@@ -13,4 +13,7 @@ ENV DB_PATH=/data/shop.db
 
 EXPOSE 8080
 
-CMD ["bun", "run", "src/index.ts"]
+# Run as root so we can write to the /data volume mount (owned by root)
+USER root
+
+CMD ["sh", "-c", "mkdir -p /data && bun run src/index.ts"]
