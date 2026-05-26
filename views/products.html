@@ -55,6 +55,10 @@
               <label class="form-label">Selling Price</label>
               <input type="number" class="form-control" id="product-price" step="0.01" min="0" required>
             </div>
+            <div class="col">
+              <label class="form-label">Discount Price <small class="text-muted">(optional)</small></label>
+              <input type="number" class="form-control" id="product-discount" step="0.01" min="0" placeholder="leave blank for none">
+            </div>
           </div>
           <div class="mb-3">
             <div id="product-margin" class="text-muted" style="font-size:0.85rem;"></div>
@@ -88,13 +92,14 @@
       const search = document.getElementById('product-search').value.toLowerCase();
       const filtered = allProducts.filter(p => !search || p.name.toLowerCase().includes(search) || p.category.toLowerCase().includes(search));
       document.getElementById('products-table').innerHTML = filtered.map(p => {
-        const margin = p.selling_price - (p.cost_price || 0);
-        const marginPct = p.selling_price > 0 ? ((margin / p.selling_price) * 100).toFixed(0) : 0;
+        const effective = p.discount_price || p.selling_price;
+        const margin = effective - (p.cost_price || 0);
+        const marginPct = effective > 0 ? ((margin / effective) * 100).toFixed(0) : 0;
         return `<tr>
           <td class="fw-bold">${p.name}</td>
           <td>${p.category}</td>
           <td>${formatCurrency(p.cost_price || 0)}</td>
-          <td>${formatCurrency(p.selling_price)}</td>
+          <td>${p.discount_price ? `<s class="text-muted">${formatCurrency(p.selling_price)}</s> <span class="text-danger fw-bold">${formatCurrency(p.discount_price)}</span>` : formatCurrency(p.selling_price)}</td>
           <td><span class="text-${margin > 0 ? 'success' : 'danger'}">${formatCurrency(margin)} (${marginPct}%)</span></td>
           <td><span class="badge bg-${p.is_active ? 'success' : 'secondary'}">${p.is_active ? 'Active' : 'Inactive'}</span></td>
           <td>
@@ -125,6 +130,7 @@
       document.getElementById('product-category').value = '';
       document.getElementById('product-cost').value = '';
       document.getElementById('product-price').value = '';
+      document.getElementById('product-discount').value = '';
       document.getElementById('product-active').checked = true;
       document.getElementById('product-margin').innerHTML = '';
       document.getElementById('product-cost').oninput = updateMarginPreview;
@@ -140,6 +146,7 @@
       document.getElementById('product-category').value = p.category;
       document.getElementById('product-cost').value = p.cost_price || 0;
       document.getElementById('product-price').value = p.selling_price;
+      document.getElementById('product-discount').value = p.discount_price || '';
       document.getElementById('product-active').checked = !!p.is_active;
       document.getElementById('product-cost').oninput = updateMarginPreview;
       document.getElementById('product-price').oninput = updateMarginPreview;
@@ -149,11 +156,13 @@
 
     async function saveProduct() {
       const id = document.getElementById('product-id').value;
+      const discountInput = document.getElementById('product-discount').value;
       const data = {
         name: document.getElementById('product-name').value,
         category: document.getElementById('product-category').value || 'General',
         cost_price: parseFloat(document.getElementById('product-cost').value) || 0,
         selling_price: parseFloat(document.getElementById('product-price').value),
+        discount_price: discountInput ? parseFloat(discountInput) : null,
         is_active: document.getElementById('product-active').checked ? 1 : 0,
       };
       if (id) {

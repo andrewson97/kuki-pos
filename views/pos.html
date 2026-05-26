@@ -38,9 +38,10 @@
           <div class="text-center text-muted py-5" id="cart-empty">No items in cart</div>
         </div>
         <div class="cart-summary">
+          <div class="summary-row" id="row-savings" style="display:none;color:#dc3545;"><span>Item Discounts</span><span id="cart-savings">-</span></div>
           <div class="summary-row"><span>Subtotal</span><span id="cart-subtotal">-</span></div>
           <div class="summary-row">
-            <span>Discount</span>
+            <span>Extra Discount</span>
             <div class="d-flex align-items-center gap-1">
               <input type="number" class="form-control form-control-sm" id="discount-input" value="0" min="0" style="width:80px;text-align:right;" onchange="updateCartTotals()">
             </div>
@@ -59,10 +60,35 @@
             </div>
           </div>
           <div class="d-flex gap-2 mb-2">
-            <button class="btn btn-sm flex-fill" id="pay-cash" onclick="checkout('cash')" style="background:#28a745;color:white;">Cash</button>
+            <button class="btn btn-sm flex-fill" id="pay-cash" onclick="openCashModal()" style="background:#28a745;color:white;">Cash</button>
             <button class="btn btn-sm flex-fill" id="pay-card" onclick="checkout('card')" style="background:#007bff;color:white;">Card</button>
             <button class="btn btn-sm flex-fill" id="pay-upi" onclick="checkout('upi')" style="background:#6f42c1;color:white;">UPI</button>
           </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Cash Payment Modal -->
+  <div class="modal fade" id="cashModal" tabindex="-1">
+    <div class="modal-dialog modal-sm">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title">Cash Payment</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body">
+          <div class="d-flex justify-content-between mb-2"><span>Total:</span><strong id="cash-total"></strong></div>
+          <label class="form-label fw-bold">Amount Given</label>
+          <input type="number" class="form-control form-control-lg" id="cash-given" step="0.01" min="0" autofocus>
+          <div class="d-flex flex-wrap gap-1 mt-2" id="quick-cash"></div>
+          <hr>
+          <div class="d-flex justify-content-between fs-5"><span>Change:</span><strong id="cash-change" class="text-success">Rs. 0.00</strong></div>
+          <div id="cash-warning" class="text-danger small mt-1" style="display:none;">Insufficient amount</div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button class="btn btn-success" id="cash-confirm">Confirm Sale</button>
         </div>
       </div>
     </div>
@@ -188,13 +214,18 @@
         if (cat && p.category !== cat) return false;
         return true;
       });
-      document.getElementById('product-grid').innerHTML = filtered.map(p => `
+      document.getElementById('product-grid').innerHTML = filtered.map(p => {
+        const effective = p.discount_price || p.selling_price;
+        const priceHtml = p.discount_price
+          ? `<div class="product-price"><s class="text-muted" style="font-size:0.8rem">${formatCurrency(p.selling_price)}</s> <span class="text-danger">${formatCurrency(effective)}</span></div>`
+          : `<div class="product-price">${formatCurrency(p.selling_price)}</div>`;
+        return `
         <div class="product-card" onclick="addToCart(${p.id})">
           <div class="product-name">${p.name}</div>
           <div class="text-muted" style="font-size:0.75rem">${p.category}</div>
-          <div class="product-price">${formatCurrency(p.selling_price)}</div>
-        </div>
-      `).join('') || '<div class="text-center text-muted py-5 w-100">No products found</div>';
+          ${priceHtml}
+        </div>`;
+      }).join('') || '<div class="text-center text-muted py-5 w-100">No products found</div>';
     }
 
     function addToCart(productId) {
@@ -204,7 +235,14 @@
       if (existing) {
         existing.quantity++;
       } else {
-        cart.push({ product_id: product.id, product_name: product.name, quantity: 1, unit_price: product.selling_price });
+        const effective = product.discount_price || product.selling_price;
+        cart.push({
+          product_id: product.id,
+          product_name: product.name,
+          quantity: 1,
+          unit_price: effective,
+          original_price: product.selling_price,
+        });
       }
       renderCart();
     }
@@ -219,11 +257,15 @@
         emptyEl.style.display = 'block';
         container.appendChild(emptyEl);
       } else {
-        container.innerHTML = cart.map((item, idx) => `
+        container.innerHTML = cart.map((item, idx) => {
+          const hasDiscount = item.original_price && item.original_price > item.unit_price;
+          return `
           <div class="cart-item">
             <div>
               <div class="item-name">${item.product_name}</div>
-              <div class="text-muted" style="font-size:0.8rem">${formatCurrency(item.unit_price)} each</div>
+              <div class="text-muted" style="font-size:0.8rem">
+                ${hasDiscount ? `<s>${formatCurrency(item.original_price)}</s> <span class="text-danger">${formatCurrency(item.unit_price)}</span> each` : `${formatCurrency(item.unit_price)} each`}
+              </div>
             </div>
             <div class="d-flex align-items-center gap-2">
               <div class="item-qty">
@@ -234,8 +276,8 @@
               <span class="fw-bold" style="min-width:70px;text-align:right">${formatCurrency(item.quantity * item.unit_price)}</span>
               <button class="btn btn-sm text-danger" onclick="removeItem(${idx})" style="padding:2px 6px;">&times;</button>
             </div>
-          </div>
-        `).join('');
+          </div>`;
+        }).join('');
       }
       updateCartTotals();
     }
@@ -260,17 +302,74 @@
 
     function updateCartTotals() {
       const subtotal = cart.reduce((s, i) => s + i.quantity * i.unit_price, 0);
+      const savings = cart.reduce((s, i) => s + (i.original_price && i.original_price > i.unit_price ? (i.original_price - i.unit_price) * i.quantity : 0), 0);
       const discount = parseFloat(document.getElementById('discount-input').value) || 0;
       const taxable = Math.max(0, subtotal - discount);
       const tax = taxable * (taxRate / 100);
       const total = taxable + tax;
 
+      document.getElementById('row-savings').style.display = savings > 0 ? 'flex' : 'none';
+      document.getElementById('cart-savings').textContent = '-' + formatCurrency(savings);
       document.getElementById('cart-subtotal').textContent = formatCurrency(subtotal);
       document.getElementById('cart-tax').textContent = formatCurrency(tax);
       document.getElementById('cart-total').textContent = formatCurrency(total);
     }
 
-    async function checkout(paymentMethod) {
+    function getCartTotal() {
+      const subtotal = cart.reduce((s, i) => s + i.quantity * i.unit_price, 0);
+      const discount = parseFloat(document.getElementById('discount-input').value) || 0;
+      const taxable = Math.max(0, subtotal - discount);
+      const tax = taxable * (taxRate / 100);
+      return taxable + tax;
+    }
+
+    function openCashModal() {
+      if (cart.length === 0) { showToast('Cart is empty', 'warning'); return; }
+      const total = getCartTotal();
+      document.getElementById('cash-total').textContent = formatCurrency(total);
+      const given = document.getElementById('cash-given');
+      given.value = '';
+      document.getElementById('cash-change').textContent = formatCurrency(0);
+      document.getElementById('cash-warning').style.display = 'none';
+
+      // Quick cash buttons (round-up presets)
+      const presets = [];
+      const rounded100 = Math.ceil(total / 100) * 100;
+      const rounded500 = Math.ceil(total / 500) * 500;
+      const rounded1000 = Math.ceil(total / 1000) * 1000;
+      [Math.ceil(total), rounded100, rounded500, rounded1000, rounded1000 + 1000].forEach(v => {
+        if (v >= total && !presets.includes(v)) presets.push(v);
+      });
+      document.getElementById('quick-cash').innerHTML = presets.slice(0, 5).map(v =>
+        `<button type="button" class="btn btn-outline-secondary btn-sm" onclick="setCashGiven(${v})">${formatCurrency(v)}</button>`
+      ).join('');
+
+      given.oninput = () => {
+        const amt = parseFloat(given.value) || 0;
+        const change = amt - total;
+        document.getElementById('cash-change').textContent = formatCurrency(Math.max(0, change));
+        document.getElementById('cash-warning').style.display = (amt > 0 && amt < total) ? 'block' : 'none';
+        document.getElementById('cash-confirm').disabled = amt < total;
+      };
+      document.getElementById('cash-confirm').disabled = true;
+      document.getElementById('cash-confirm').onclick = () => {
+        const amt = parseFloat(given.value) || 0;
+        if (amt < total) return;
+        bootstrap.Modal.getInstance(document.getElementById('cashModal')).hide();
+        checkout('cash', amt);
+      };
+
+      new bootstrap.Modal(document.getElementById('cashModal')).show();
+      setTimeout(() => given.focus(), 250);
+    }
+
+    function setCashGiven(v) {
+      const input = document.getElementById('cash-given');
+      input.value = v;
+      input.dispatchEvent(new Event('input'));
+    }
+
+    async function checkout(paymentMethod, amountGiven) {
       if (cart.length === 0) { showToast('Cart is empty', 'warning'); return; }
 
       const discount = parseFloat(document.getElementById('discount-input').value) || 0;
@@ -286,11 +385,13 @@
               product_name: i.product_name,
               quantity: i.quantity,
               unit_price: i.unit_price,
+              original_price: i.original_price || i.unit_price,
             })),
             customer_id: customerId ? parseInt(customerId) : null,
             discount,
             tax_rate: taxRate,
             payment_method: paymentMethod,
+            amount_given: paymentMethod === 'cash' && amountGiven ? amountGiven : null,
           },
         });
       } catch (err) {
@@ -352,7 +453,7 @@
     // Keyboard shortcuts
     document.addEventListener('keydown', (e) => {
       if (e.key === 'F2') { e.preventDefault(); document.getElementById('product-search').focus(); }
-      if (e.key === 'F9') { e.preventDefault(); checkout('cash'); }
+      if (e.key === 'F9') { e.preventDefault(); openCashModal(); }
       if (e.key === 'F10') { e.preventDefault(); checkout('card'); }
       if (e.key === 'F11') { e.preventDefault(); checkout('upi'); }
       if (e.key === 'Escape') { clearCart(); }

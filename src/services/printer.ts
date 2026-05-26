@@ -6,7 +6,7 @@ interface PrintReceiptData {
   shopPhone: string;
   tokenNumber: number;
   billDate: string;
-  items: { name: string; qty: number; price: number; total: number }[];
+  items: { name: string; qty: number; price: number; total: number; original_price?: number }[];
   subtotal: number;
   discount: number;
   taxRate: number;
@@ -15,6 +15,8 @@ interface PrintReceiptData {
   paymentMethod: string;
   cashierName: string;
   customerName?: string;
+  amountGiven?: number | null;
+  changeGiven?: number | null;
 }
 
 export function getSettings(): Record<string, string> {
@@ -49,14 +51,23 @@ export function buildReceiptText(data: PrintReceiptData): string {
   lines.push("Item              Qty   Amount");
   lines.push("-".repeat(w));
 
+  let totalSavings = 0;
   for (const item of data.items) {
     const name = item.name.length > 16 ? item.name.substring(0, 16) : item.name.padEnd(16);
     const qty = String(item.qty).padStart(3);
     const amt = item.total.toFixed(2).padStart(9);
     lines.push(`${name}  ${qty}  ${amt}`);
+    if (item.original_price && item.original_price > item.price) {
+      const saved = (item.original_price - item.price) * item.qty;
+      totalSavings += saved;
+      lines.push(`  was @${item.original_price.toFixed(2)}, saved ${saved.toFixed(2)}`);
+    }
   }
 
   lines.push("-".repeat(w));
+  if (totalSavings > 0) {
+    lines.push(`${"Item Savings".padEnd(20)} -${totalSavings.toFixed(2).padStart(9)}`);
+  }
   lines.push(`${"Subtotal".padEnd(20)} ${data.subtotal.toFixed(2).padStart(10)}`);
   if (data.discount > 0) {
     lines.push(`${"Discount".padEnd(20)} -${data.discount.toFixed(2).padStart(9)}`);
@@ -67,6 +78,10 @@ export function buildReceiptText(data: PrintReceiptData): string {
   lines.push("=".repeat(w));
   lines.push(`${"TOTAL".padEnd(20)} ${data.total.toFixed(2).padStart(10)}`);
   lines.push(`${"Payment".padEnd(20)} ${data.paymentMethod.toUpperCase().padStart(10)}`);
+  if (data.amountGiven != null) {
+    lines.push(`${"Cash Given".padEnd(20)} ${data.amountGiven.toFixed(2).padStart(10)}`);
+    lines.push(`${"Change".padEnd(20)} ${(data.changeGiven ?? 0).toFixed(2).padStart(10)}`);
+  }
   lines.push("=".repeat(w));
   lines.push("");
   lines.push(center("Thank you!"));

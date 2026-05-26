@@ -24,21 +24,23 @@ products.get("/:id", (c) => {
 });
 
 products.post("/", adminOnly, async (c) => {
-  const { name, category, cost_price, selling_price, is_active } = await c.req.json();
+  const { name, category, cost_price, selling_price, discount_price, is_active } = await c.req.json();
   const db = getDb();
+  const dp = discount_price && discount_price > 0 && discount_price < selling_price ? discount_price : null;
   const result = db.query(
-    "INSERT INTO products (name, category, cost_price, selling_price, is_active) VALUES (?, ?, ?, ?, ?)"
-  ).run(name, category || "General", cost_price || 0, selling_price, is_active ?? 1);
-  return c.json({ id: Number(result.lastInsertRowid), name, category, cost_price, selling_price });
+    "INSERT INTO products (name, category, cost_price, selling_price, discount_price, is_active) VALUES (?, ?, ?, ?, ?, ?)"
+  ).run(name, category || "General", cost_price || 0, selling_price, dp, is_active ?? 1);
+  return c.json({ id: Number(result.lastInsertRowid), name, category, cost_price, selling_price, discount_price: dp });
 });
 
 products.put("/:id", adminOnly, async (c) => {
   const id = c.req.param("id");
-  const { name, category, cost_price, selling_price, is_active } = await c.req.json();
+  const { name, category, cost_price, selling_price, discount_price, is_active } = await c.req.json();
   const db = getDb();
+  const dp = discount_price && discount_price > 0 && discount_price < selling_price ? discount_price : null;
   db.query(
-    "UPDATE products SET name = ?, category = ?, cost_price = ?, selling_price = ?, is_active = ? WHERE id = ?"
-  ).run(name, category, cost_price || 0, selling_price, is_active, id);
+    "UPDATE products SET name = ?, category = ?, cost_price = ?, selling_price = ?, discount_price = ?, is_active = ? WHERE id = ?"
+  ).run(name, category, cost_price || 0, selling_price, dp, is_active, id);
   return c.json({ success: true });
 });
 

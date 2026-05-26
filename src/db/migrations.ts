@@ -154,6 +154,10 @@ export function runMigrations(): void {
   addColumn("bills", "refund_reason", "TEXT");
   addColumn("bills", "refunded_at", "TEXT");
   addColumn("bills", "refunded_by_user_id", "INTEGER");
+  addColumn("products", "discount_price", "REAL");
+  addColumn("bill_items", "original_price", "REAL");
+  addColumn("bills", "amount_given", "REAL");
+  addColumn("bills", "change_given", "REAL");
 }
 
 export function seedDefaults(): void {

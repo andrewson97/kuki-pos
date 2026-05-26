@@ -30,6 +30,7 @@ pos.post("/bill", async (c) => {
     tax_rate,
     payment_method: body.payment_method || "cash",
     user_id: user.id,
+    amount_given: body.amount_given ?? null,
   });
 
   // Generate receipt
@@ -48,7 +49,7 @@ pos.post("/bill", async (c) => {
     shopPhone: settings.shop_phone || "",
     tokenNumber: bill.token_number,
     billDate: new Date().toLocaleString("en-IN"),
-    items: billItems.map((i: any) => ({ name: i.product_name, qty: i.quantity, price: i.unit_price, total: i.total })),
+    items: billItems.map((i: any) => ({ name: i.product_name, qty: i.quantity, price: i.unit_price, total: i.total, original_price: i.original_price })),
     subtotal: fullBill.subtotal,
     discount: fullBill.discount,
     taxRate: fullBill.tax_rate,
@@ -57,6 +58,8 @@ pos.post("/bill", async (c) => {
     paymentMethod: fullBill.payment_method,
     cashierName: user.full_name,
     customerName,
+    amountGiven: fullBill.amount_given,
+    changeGiven: fullBill.change_given,
   };
 
   const printResult = await printReceipt(receiptData);
@@ -164,7 +167,7 @@ pos.get("/bills/:id/receipt", async (c) => {
     shopPhone: settings.shop_phone || "",
     tokenNumber: bill.token_number,
     billDate: new Date(bill.created_at).toLocaleString("en-IN"),
-    items: items.map((i: any) => ({ name: i.product_name, qty: i.quantity, price: i.unit_price, total: i.total })),
+    items: items.map((i: any) => ({ name: i.product_name, qty: i.quantity, price: i.unit_price, total: i.total, original_price: i.original_price })),
     subtotal: bill.subtotal,
     discount: bill.discount,
     taxRate: bill.tax_rate,
@@ -173,6 +176,8 @@ pos.get("/bills/:id/receipt", async (c) => {
     paymentMethod: bill.payment_method,
     cashierName: bill.cashier_name,
     customerName: bill.customer_name,
+    amountGiven: bill.amount_given,
+    changeGiven: bill.change_given,
   };
 
   const result = await printReceipt(receiptData);
