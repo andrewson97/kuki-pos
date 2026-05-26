@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Stock - Cake Shop POS</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="/public/css/style.css" rel="stylesheet">
+</head>
+<body>
+  <div class="sidebar" id="sidebar"></div>
+  <div class="main-content">
+    <div class="top-bar">
+      <h5 class="mb-0">Stock Management</h5>
+      <div id="top-bar-user"></div>
+    </div>
+    <div class="content-area">
+      <div class="d-flex justify-content-between mb-3">
+        <div class="d-flex gap-2">
+          <input type="text" class="form-control" id="stock-search" placeholder="Search..." style="width:250px;">
+          <select class="form-select" id="stock-cat-filter" style="width:180px;">
+            <option value="">All Categories</option>
+          </select>
+        </div>
+        <div class="d-flex gap-2">
+          <button class="btn btn-outline-secondary" onclick="showAddCategory()">+ Category</button>
+          <button class="btn btn-primary" onclick="showAddItem()">+ Stock Item</button>
+          <button class="btn btn-warning" onclick="toggleUsageMode()"><span id="usage-btn-text">Mark as Used</span></button>
+        </div>
+      </div>
+
+      <!-- Usage Panel (hidden by default) -->
+      <div id="usage-panel" class="table-container p-3 mb-3" style="display:none;border:2px solid #ffc107;">
+        <div class="d-flex justify-content-between align-items-center mb-3">
+          <h6 class="fw-bold mb-0">Mark Stock as Used</h6>
+          <button class="btn btn-sm btn-outline-secondary" onclick="toggleUsageMode()">Close</button>
+        </div>
+        <div class="mb-3">
+          <label class="form-label">Purpose / Reason</label>
+          <input type="text" class="form-control" id="usage-purpose" placeholder="e.g., Making cakes, Packing orders, Daily baking...">
+        </div>
+        <div class="mb-2">
+          <div class="d-flex gap-2 mb-2">
+            <input type="text" class="form-control" id="usage-item-search" placeholder="Search item to add...">
+          </div>
+          <div id="usage-item-suggestions" class="border rounded mb-2" style="display:none;max-height:150px;overflow-y:auto;"></div>
+        </div>
+        <table class="table table-sm" id="usage-items-table">
+          <thead><tr><th>Item</th><th>Available</th><th>Used Qty</th><th>Unit</th><th></th></tr></thead>
+          <tbody id="usage-items-body"></tbody>
+        </table>
+        <div id="usage-empty" class="text-center text-muted py-3">Search and add items above</div>
+        <button class="btn btn-warning w-100" onclick="submitUsage()" id="usage-submit-btn" disabled>Confirm Usage</button>
+      </div>
+
+      <div class="table-container">
+        <table class="table table-hover mb-0">
+          <thead><tr><th>Name</th><th>Category</th><th>Quantity</th><th>Unit</th><th>Cost/Unit</th><th>Reorder Level</th><th>Expiry</th><th>Actions</th></tr></thead>
+          <tbody id="stock-table"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- Add/Edit Item Modal -->
+  <div class="modal fade" id="stockModal" tabindex="-1">
+    <div class="modal-dialog">
+      <div class="modal-content">
+        <div class="modal-header"><h5 class="modal-title" id="stock-modal-title">Add Stock Item</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+        <div class="modal-body">
+          <input type="hidden" id="stock-id">
+          <div class="mb-3"><label class="form-label">Name</label><input type="text" class="form-control" id="stock-name" required></div>
+          <div class="row mb-3">
+            <div class="col"><label class="form-label">Category</label><select class="form-select" id="stock-category"></select></div>
+            <div class="col"><label class="form-label">Unit</label><input type="text" class="form-control" id="stock-unit" placeholder="kg, g, pcs, liters"></div>
+          </div>
+          <div class="row mb-3">
+            <div class="col"><label class="form-label">Initial Quantity</label><input type="number" class="form-control" id="stock-qty" step="0.01" min="0" value="0"></div>
+            <div class="col"><label class="form-label">Cost Per Unit</label><input type="number" class="form-control" id="stock-cost" step="0.01" min="0" value="0"></div>
+          </div>
+          <div class="row mb-3">
+            <div class="col"><label class="form-label">Reorder Level</label><input type="number" class="form-control" id="stock-reorder" step="0.01" min="0" value="0"></div>
+            <div class="col"><label class="form-label">Expiry Date</label><input type="date" class="form-control" id="stock-expiry"></div>
+          </div>
+        </div>
+        <div class="modal-footer"><button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button><button class="btn btn-primary" onclick="saveStockItem()">Save</button></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Add Stock Transaction Modal -->
+  <div class="modal fade" id="transactionModal" tabindex="-1">
+    <div class="modal-dialog">
+      <div class="modal-content">
+        <div class="modal-header"><h5 class="modal-title">Add/Remove Stock</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+        <div class="modal-body">
+          <input type="hidden" id="txn-item-id">
+          <p><strong id="txn-item-name"></strong> — Current: <span id="txn-current-qty"></span></p>
+          <div class="mb-3">
+            <label class="form-label">Type</label>
+            <select class="form-select" id="txn-type">
+              <option value="purchase">Purchase (Add)</option>
+              <option value="adjustment">Adjustment</option>
+              <option value="waste">Waste (Remove)</option>
+            </select>
+          </div>
+          <div class="mb-3"><label class="form-label">Quantity (use negative to remove)</label><input type="number" class="form-control" id="txn-qty" step="0.01"></div>
+          <div class="mb-3"><label class="form-label">Reference/Note</label><input type="text" class="form-control" id="txn-ref"></div>
+        </div>
+        <div class="modal-footer"><button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button><button class="btn btn-primary" onclick="saveTransaction()">Save</button></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Category Modal -->
+  <div class="modal fade" id="categoryModal" tabindex="-1">
+    <div class="modal-dialog modal-sm">
+      <div class="modal-content">
+        <div class="modal-header"><h5 class="modal-title">Add Category</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+        <div class="modal-body"><input type="text" class="form-control" id="new-category-name" placeholder="Category name"></div>
+        <div class="modal-footer"><button class="btn btn-primary" onclick="saveCategory()">Save</button></div>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+  <script src="/public/js/app.js"></script>
+  <script>
+    let stockItems = [], categories = [];
+    initApp('/stock', loadStock);
+
+    async function loadStock() {
+      [stockItems, categories] = await Promise.all([api('/api/stock/items'), api('/api/stock/categories')]);
+      renderCategoryOptions();
+      renderStock();
+      document.getElementById('stock-search').addEventListener('input', renderStock);
+      document.getElementById('stock-cat-filter').addEventListener('change', renderStock);
+    }
+
+    function renderCategoryOptions() {
+      const filter = document.getElementById('stock-cat-filter');
+      const select = document.getElementById('stock-category');
+      filter.innerHTML = '<option value="">All Categories</option>';
+      select.innerHTML = '';
+      categories.forEach(c => {
+        filter.innerHTML += `<option value="${c.id}">${c.name}</option>`;
+        select.innerHTML += `<option value="${c.id}">${c.name}</option>`;
+      });
+    }
+
+    function renderStock() {
+      const search = document.getElementById('stock-search').value.toLowerCase();
+      const cat = document.getElementById('stock-cat-filter').value;
+      const filtered = stockItems.filter(i => {
+        if (search && !i.name.toLowerCase().includes(search)) return false;
+        if (cat && i.category_id != cat) return false;
+        return true;
+      });
+      document.getElementById('stock-table').innerHTML = filtered.map(i => {
+        const isLow = i.reorder_level > 0 && i.quantity <= i.reorder_level;
+        return `<tr class="${isLow ? 'table-danger' : ''}">
+          <td class="fw-bold">${i.name} ${isLow ? '<span class="badge-low-stock">LOW</span>' : ''}</td>
+          <td>${i.category_name || '-'}</td>
+          <td class="${isLow ? 'text-danger fw-bold' : ''}">${i.quantity}</td>
+          <td>${i.unit}</td>
+          <td>${formatCurrency(i.cost_per_unit)}</td>
+          <td>${i.reorder_level}</td>
+          <td>${i.expiry_date || '-'}</td>
+          <td>
+            <button class="btn btn-sm btn-outline-success" onclick="showTransaction(${i.id})">+/-</button>
+            <button class="btn btn-sm btn-outline-primary" onclick="editItem(${i.id})">Edit</button>
+          </td>
+        </tr>`;
+      }).join('') || '<tr><td colspan="8" class="text-center text-muted py-4">No stock items</td></tr>';
+    }
+
+    function showAddItem() {
+      document.getElementById('stock-modal-title').textContent = 'Add Stock Item';
+      document.getElementById('stock-id').value = '';
+      document.getElementById('stock-name').value = '';
+      document.getElementById('stock-unit').value = '';
+      document.getElementById('stock-qty').value = '0';
+      document.getElementById('stock-cost').value = '0';
+      document.getElementById('stock-reorder').value = '0';
+      document.getElementById('stock-expiry').value = '';
+      document.getElementById('stock-qty').disabled = false;
+      new bootstrap.Modal(document.getElementById('stockModal')).show();
+    }
+
+    function editItem(id) {
+      const i = stockItems.find(x => x.id === id);
+      document.getElementById('stock-modal-title').textContent = 'Edit Stock Item';
+      document.getElementById('stock-id').value = i.id;
+      document.getElementById('stock-name').value = i.name;
+      document.getElementById('stock-category').value = i.category_id || '';
+      document.getElementById('stock-unit').value = i.unit;
+      document.getElementById('stock-qty').value = i.quantity;
+      document.getElementById('stock-qty').disabled = true;
+      document.getElementById('stock-cost').value = i.cost_per_unit;
+      document.getElementById('stock-reorder').value = i.reorder_level;
+      document.getElementById('stock-expiry').value = i.expiry_date || '';
+      new bootstrap.Modal(document.getElementById('stockModal')).show();
+    }
+
+    async function saveStockItem() {
+      const id = document.getElementById('stock-id').value;
+      const data = {
+        name: document.getElementById('stock-name').value,
+        category_id: parseInt(document.getElementById('stock-category').value) || null,
+        unit: document.getElementById('stock-unit').value || 'pcs',
+        cost_per_unit: parseFloat(document.getElementById('stock-cost').value) || 0,
+        reorder_level: parseFloat(document.getElementById('stock-reorder').value) || 0,
+        expiry_date: document.getElementById('stock-expiry').value || null,
+      };
+      if (id) {
+        await api(`/api/stock/items/${id}`, { method: 'PUT', body: data });
+      } else {
+        data.quantity = parseFloat(document.getElementById('stock-qty').value) || 0;
+        await api('/api/stock/items', { method: 'POST', body: data });
+      }
+      bootstrap.Modal.getInstance(document.getElementById('stockModal')).hide();
+      showToast('Stock item saved!');
+      loadStock();
+    }
+
+    function showTransaction(id) {
+      const i = stockItems.find(x => x.id === id);
+      document.getElementById('txn-item-id').value = i.id;
+      document.getElementById('txn-item-name').textContent = i.name;
+      document.getElementById('txn-current-qty').textContent = `${i.quantity} ${i.unit}`;
+      document.getElementById('txn-qty').value = '';
+      document.getElementById('txn-ref').value = '';
+      new bootstrap.Modal(document.getElementById('transactionModal')).show();
+    }
+
+    async function saveTransaction() {
+      const id = document.getElementById('txn-item-id').value;
+      await api(`/api/stock/items/${id}/transaction`, {
+        method: 'POST',
+        body: {
+          type: document.getElementById('txn-type').value,
+          quantity: parseFloat(document.getElementById('txn-qty').value),
+          reference: document.getElementById('txn-ref').value,
+        },
+      });
+      bootstrap.Modal.getInstance(document.getElementById('transactionModal')).hide();
+      showToast('Stock updated!');
+      loadStock();
+    }
+
+    function showAddCategory() {
+      document.getElementById('new-category-name').value = '';
+      new bootstrap.Modal(document.getElementById('categoryModal')).show();
+    }
+
+    async function saveCategory() {
+      await api('/api/stock/categories', { method: 'POST', body: { name: document.getElementById('new-category-name').value } });
+      bootstrap.Modal.getInstance(document.getElementById('categoryModal')).hide();
+      showToast('Category added!');
+      loadStock();
+    }
+
+    // ===== Mark as Used =====
+    let usageItems = [];
+    let usageModeOpen = false;
+
+    function toggleUsageMode() {
+      usageModeOpen = !usageModeOpen;
+      document.getElementById('usage-panel').style.display = usageModeOpen ? 'block' : 'none';
+      document.getElementById('usage-btn-text').textContent = usageModeOpen ? 'Close Usage' : 'Mark as Used';
+      if (usageModeOpen) {
+        usageItems = [];
+        document.getElementById('usage-purpose').value = '';
+        renderUsageItems();
+        setupUsageSearch();
+      }
+    }
+
+    function setupUsageSearch() {
+      const input = document.getElementById('usage-item-search');
+      const suggestions = document.getElementById('usage-item-suggestions');
+
+      input.oninput = () => {
+        const q = input.value.toLowerCase().trim();
+        if (q.length === 0) { suggestions.style.display = 'none'; return; }
+        const alreadyAdded = new Set(usageItems.map(u => u.stock_item_id));
+        const matches = stockItems.filter(s =>
+          !alreadyAdded.has(s.id) && (s.name.toLowerCase().includes(q) || (s.category_name || '').toLowerCase().includes(q))
+        ).slice(0, 8);
+        if (matches.length === 0) {
+          suggestions.innerHTML = '<div class="p-2 text-muted" style="font-size:0.85rem;">No items found</div>';
+        } else {
+          suggestions.innerHTML = matches.map(s => `
+            <div class="p-2 border-bottom d-flex justify-content-between align-items-center" style="cursor:pointer;" onmousedown="addUsageItem(${s.id})">
+              <div>
+                <strong>${s.name}</strong>
+                <small class="text-muted">(${s.category_name || 'N/A'})</small>
+              </div>
+              <small class="text-muted">${s.quantity} ${s.unit} available</small>
+            </div>
+          `).join('');
+        }
+        suggestions.style.display = 'block';
+      };
+      input.onblur = () => setTimeout(() => { suggestions.style.display = 'none'; }, 150);
+    }
+
+    function addUsageItem(id) {
+      const item = stockItems.find(s => s.id === id);
+      if (!item) return;
+      usageItems.push({
+        stock_item_id: item.id,
+        name: item.name,
+        unit: item.unit,
+        available: item.quantity,
+        quantity: 1,
+      });
+      document.getElementById('usage-item-search').value = '';
+      document.getElementById('usage-item-suggestions').style.display = 'none';
+      renderUsageItems();
+    }
+
+    function renderUsageItems() {
+      const tbody = document.getElementById('usage-items-body');
+      const empty = document.getElementById('usage-empty');
+      const btn = document.getElementById('usage-submit-btn');
+
+      if (usageItems.length === 0) {
+        tbody.innerHTML = '';
+        empty.style.display = 'block';
+        btn.disabled = true;
+        return;
+      }
+      empty.style.display = 'none';
+      btn.disabled = false;
+
+      tbody.innerHTML = usageItems.map((item, idx) => `
+        <tr>
+          <td class="fw-bold">${item.name}</td>
+          <td>${item.available} ${item.unit}</td>
+          <td><input type="number" class="form-control form-control-sm" value="${item.quantity}" min="0.01" max="${item.available}" step="0.01" style="width:100px;"
+            onchange="usageItems[${idx}].quantity = parseFloat(this.value) || 0"></td>
+          <td>${item.unit}</td>
+          <td><button class="btn btn-sm btn-outline-danger" onclick="usageItems.splice(${idx},1);renderUsageItems();">x</button></td>
+        </tr>
+      `).join('');
+    }
+
+    async function submitUsage() {
+      const purpose = document.getElementById('usage-purpose').value.trim();
+      if (usageItems.length === 0) return;
+
+      const valid = usageItems.filter(i => i.quantity > 0);
+      if (valid.length === 0) { showToast('Enter quantities for at least one item', 'warning'); return; }
+
+      const overstock = valid.find(i => i.quantity > i.available);
+      if (overstock) {
+        showToast(`Cannot use more than available: ${overstock.name} (${overstock.available} ${overstock.unit})`, 'error');
+        return;
+      }
+
+      try {
+        await api('/api/stock/usage', {
+          method: 'POST',
+          body: {
+            items: valid.map(i => ({ stock_item_id: i.stock_item_id, quantity: i.quantity })),
+            purpose: purpose || 'General usage',
+          },
+        });
+        showToast(`${valid.length} item(s) marked as used!`);
+        toggleUsageMode();
+        loadStock();
+      } catch (err) {
+        showToast('Failed: ' + err.message, 'error');
+      }
+    }
+  </script>
+</body>
+</html>

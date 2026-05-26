@@ -1,0 +1,8 @@
+node_modules
+data
+imported_assets
+.git
+.gitignore
+*.md
+.env
+.env.*

@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "WebFetch(domain:www.npmjs.com)",
+      "Bash(bun --version)",
+      "Bash(npm --version)",
+      "Bash(npm install:*)",
+      "Bash(bun init:*)",
+      "Bash(bun add:*)",
+      "Bash(netstat -ano)",
+      "Bash(taskkill //F //PID 3976)"
+    ]
+  }
+}

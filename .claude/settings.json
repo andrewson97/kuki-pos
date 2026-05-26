@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(COOKIE=\"session_id=761d6368-ad6a-4ce1-afba-b0497211ce53\" echo \"=== Dashboard ===\" curl -s -b \"$COOKIE\" http://localhost:3000/api/dashboard/stats 2)",
+      "Bash(1 echo:*)",
+      "Bash(COOKIE=\"session_id=761d6368-ad6a-4ce1-afba-b0497211ce53\")",
+      "Bash(curl -s -b \"$COOKIE\" -X POST http://localhost:3000/api/products -H \"Content-Type: application/json\" -d '{\"\"name\"\":\"\"Black Forest Cake\"\",\"\"category\"\":\"\"Cakes\"\",\"\"selling_price\"\":450}')",
+      "Bash(curl -s -b \"$COOKIE\" -X POST http://localhost:3000/api/products -H \"Content-Type: application/json\" -d '{\"\"name\"\":\"\"Chocolate Truffle\"\",\"\"category\"\":\"\"Cakes\"\",\"\"selling_price\"\":550}')",
+      "Bash(curl -s -b \"$COOKIE\" http://localhost:3000/api/pos/token)",
+      "Bash(curl -s -b \"$COOKIE\" -X POST http://localhost:3000/api/pos/bill -H \"Content-Type: application/json\" -d '{\"\"items\"\":[{\"\"product_id\"\":1,\"\"product_name\"\":\"\"Black Forest Cake\"\",\"\"quantity\"\":2,\"\"unit_price\"\":450}],\"\"discount\"\":0,\"\"payment_method\"\":\"\"cash\"\"}')",
+      "Read(//e/opensofai/shop-pos/**)",
+      "Bash(taskkill //F //PID 24504)",
+      "Bash(curl -s http://localhost:3000/login)",
+      "Bash(grep -n \"DELETE.*customers\\\\|DELETE.*stock\" /e/opensofai/shop-pos/src/routes/*.ts)",
+      "Bash(grep -n \"customers.delete\\\\|stock.*delete\\\\|stock.delete\" /e/opensofai/shop-pos/src/routes/*.ts)",
+      "Bash(grep -r api\\\\\\( /e/opensofai/shop-pos/views/*.html)",
+      "Bash(grep -rh \"fetch\\\\|api\\(\" /e/opensofai/shop-pos/views/*.html)",
+      "Bash(grep -o \"/api/[^\\\\`''''\"\"]*\")",
+      "Bash(grep -r /api/ /e/opensofai/shop-pos/views/*.html)",
+      "Bash(grep -rh /{ /e/opensofai/shop-pos/views/*.html)",
+      "Bash(grep -o \"/api/[^\\\\`\\\\}]*\")"
+    ]
+  }
+}

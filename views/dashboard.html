@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Dashboard - Cake Shop POS</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="/public/css/style.css" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+</head>
+<body>
+  <div class="sidebar" id="sidebar"></div>
+  <div class="main-content">
+    <div class="top-bar">
+      <h5 class="mb-0">Dashboard</h5>
+      <div id="top-bar-user"></div>
+    </div>
+    <div class="content-area" id="page-content">
+      <div class="row g-4 mb-4">
+        <div class="col-md-3">
+          <div class="stat-card position-relative">
+            <div class="stat-label">Today's Sales</div>
+            <div class="stat-value" id="stat-sales">-</div>
+            <div class="stat-icon">&#128176;</div>
+          </div>
+        </div>
+        <div class="col-md-3">
+          <div class="stat-card position-relative">
+            <div class="stat-label">Bills Today</div>
+            <div class="stat-value" id="stat-bills">-</div>
+            <div class="stat-icon">&#128196;</div>
+          </div>
+        </div>
+        <div class="col-md-3">
+          <div class="stat-card position-relative">
+            <div class="stat-label">Cost of Goods</div>
+            <div class="stat-value" id="stat-cost">-</div>
+            <div class="stat-icon">&#128184;</div>
+          </div>
+        </div>
+        <div class="col-md-3">
+          <div class="stat-card position-relative">
+            <div class="stat-label">Gross Profit</div>
+            <div class="stat-value" id="stat-profit">-</div>
+            <div class="stat-icon">&#128200;</div>
+          </div>
+        </div>
+      </div>
+      <div class="row g-4 mb-4">
+        <div class="col-md-3">
+          <div class="stat-card position-relative">
+            <div class="stat-label">Today's Expenses</div>
+            <div class="stat-value" id="stat-expenses">-</div>
+          </div>
+        </div>
+        <div class="col-md-3">
+          <div class="stat-card position-relative">
+            <div class="stat-label">Net Profit</div>
+            <div class="stat-value" id="stat-net-profit">-</div>
+          </div>
+        </div>
+      </div>
+      <div class="row g-4 mb-4">
+        <div class="col-md-3">
+          <div class="stat-card">
+            <div class="stat-label">Active Products</div>
+            <div class="stat-value" id="stat-products">-</div>
+          </div>
+        </div>
+        <div class="col-md-3">
+          <div class="stat-card">
+            <div class="stat-label">Total Customers</div>
+            <div class="stat-value" id="stat-customers">-</div>
+          </div>
+        </div>
+        <div class="col-md-3">
+          <div class="stat-card">
+            <div class="stat-label">Low Stock Items</div>
+            <div class="stat-value text-danger" id="stat-lowstock">-</div>
+          </div>
+        </div>
+        <div class="col-md-3 d-flex align-items-stretch">
+          <a href="/pos" class="stat-card text-decoration-none text-dark d-flex align-items-center justify-content-center w-100" style="background:linear-gradient(135deg,#e83e8c,#d63384);color:white!important;">
+            <div class="text-center">
+              <div style="font-size:2rem">&#128722;</div>
+              <div class="fw-bold mt-1">Open POS</div>
+            </div>
+          </a>
+        </div>
+      </div>
+      <div class="row g-4">
+        <div class="col-md-7">
+          <div class="table-container p-3">
+            <h6 class="fw-bold mb-3">Recent Bills Today</h6>
+            <table class="table table-sm table-hover mb-0">
+              <thead><tr><th>Token</th><th>Customer</th><th>Amount</th><th>Payment</th><th>Time</th></tr></thead>
+              <tbody id="recent-bills"></tbody>
+            </table>
+            <div id="no-bills" class="text-center text-muted py-4 d-none">No bills today yet</div>
+          </div>
+        </div>
+        <div class="col-md-5">
+          <div class="table-container p-3">
+            <h6 class="fw-bold mb-3">&#128680; Low Stock Alerts</h6>
+            <table class="table table-sm mb-0">
+              <thead><tr><th>Item</th><th>Current</th><th>Min</th></tr></thead>
+              <tbody id="low-stock-list"></tbody>
+            </table>
+            <div id="no-alerts" class="text-center text-muted py-4 d-none">All stock levels are fine!</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <script src="/public/js/app.js"></script>
+  <script>
+    initApp('/', loadDashboard);
+
+    async function loadDashboard() {
+      try {
+        const stats = await api('/api/dashboard/stats');
+        document.getElementById('stat-sales').textContent = formatCurrency(stats.today.sales);
+        document.getElementById('stat-bills').textContent = stats.today.bill_count;
+        document.getElementById('stat-cost').textContent = formatCurrency(stats.today.cost_of_goods);
+        document.getElementById('stat-profit').textContent = formatCurrency(stats.today.gross_profit);
+        document.getElementById('stat-profit').style.color = stats.today.gross_profit >= 0 ? '#28a745' : '#dc3545';
+        document.getElementById('stat-expenses').textContent = formatCurrency(stats.today.expenses);
+        document.getElementById('stat-net-profit').textContent = formatCurrency(stats.today.net_profit);
+        document.getElementById('stat-net-profit').style.color = stats.today.net_profit >= 0 ? '#28a745' : '#dc3545';
+        document.getElementById('stat-products').textContent = stats.total_products;
+        document.getElementById('stat-customers').textContent = stats.total_customers;
+        document.getElementById('stat-lowstock').textContent = stats.low_stock_count;
+
+        const billsTbody = document.getElementById('recent-bills');
+        if (stats.recent_bills.length === 0) {
+          document.getElementById('no-bills').classList.remove('d-none');
+        } else {
+          billsTbody.innerHTML = stats.recent_bills.map(b => `
+            <tr>
+              <td><strong>#${String(b.token_number).padStart(3,'0')}</strong></td>
+              <td>${b.customer_name || '-'}</td>
+              <td>${formatCurrency(b.total)}</td>
+              <td><span class="badge bg-info">${b.payment_method}</span></td>
+              <td>${new Date(b.created_at).toLocaleTimeString('en-IN', {hour:'2-digit',minute:'2-digit'})}</td>
+            </tr>
+          `).join('');
+        }
+
+        const stockTbody = document.getElementById('low-stock-list');
+        if (stats.low_stock_items.length === 0) {
+          document.getElementById('no-alerts').classList.remove('d-none');
+        } else {
+          stockTbody.innerHTML = stats.low_stock_items.map(s => `
+            <tr>
+              <td>${s.name} <small class="text-muted">(${s.category_name})</small></td>
+              <td class="text-danger fw-bold">${s.quantity} ${s.unit}</td>
+              <td>${s.reorder_level} ${s.unit}</td>
+            </tr>
+          `).join('');
+        }
+      } catch (err) {
+        showToast('Failed to load dashboard: ' + err.message, 'error');
+      }
+    }
+  </script>
+</body>
+</html>

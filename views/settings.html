@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Settings - Cake Shop POS</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="/public/css/style.css" rel="stylesheet">
+</head>
+<body>
+  <div class="sidebar" id="sidebar"></div>
+  <div class="main-content">
+    <div class="top-bar"><h5 class="mb-0">Settings</h5><div id="top-bar-user"></div></div>
+    <div class="content-area">
+      <div class="row">
+        <div class="col-md-8">
+          <div class="table-container p-4">
+            <h6 class="fw-bold mb-3">Shop Information</h6>
+            <div class="mb-3"><label class="form-label">Shop Name</label><input type="text" class="form-control" id="s-shop-name"></div>
+            <div class="mb-3"><label class="form-label">Address</label><input type="text" class="form-control" id="s-shop-address"></div>
+            <div class="mb-3"><label class="form-label">Phone</label><input type="text" class="form-control" id="s-shop-phone"></div>
+            <hr>
+            <h6 class="fw-bold mb-3">Billing</h6>
+            <div class="row mb-3">
+              <div class="col-md-6"><label class="form-label">Tax Rate (%)</label><input type="number" class="form-control" id="s-tax-rate" step="0.01" min="0"></div>
+              <div class="col-md-6"><label class="form-label">Currency Symbol</label><input type="text" class="form-control" id="s-currency" maxlength="5"></div>
+            </div>
+            <hr>
+            <h6 class="fw-bold mb-3">Thermal Printer</h6>
+            <div class="row mb-3">
+              <div class="col-md-6">
+                <label class="form-label">Printer Type</label>
+                <select class="form-select" id="s-printer-type">
+                  <option value="none">None (Print via browser)</option>
+                  <option value="usb">USB Printer</option>
+                  <option value="network">Network Printer</option>
+                </select>
+              </div>
+              <div class="col-md-6"><label class="form-label">Printer Address/Port</label><input type="text" class="form-control" id="s-printer-address" placeholder="e.g., //localhost/printer or 192.168.1.100:9100"></div>
+            </div>
+            <button class="btn btn-primary" onclick="saveSettings()">Save Settings</button>
+          </div>
+
+          <div class="table-container p-4 mt-4">
+            <h6 class="fw-bold mb-3">Data Management</h6>
+            <a href="/api/settings/backup" class="btn btn-outline-secondary" download>Download Database Backup</a>
+          </div>
+        </div>
+        <div class="col-md-4">
+          <div class="table-container p-4">
+            <h6 class="fw-bold mb-3">Keyboard Shortcuts (POS)</h6>
+            <table class="table table-sm mb-0">
+              <tr><td><kbd>F2</kbd></td><td>Search products</td></tr>
+              <tr><td><kbd>F9</kbd></td><td>Pay with Cash</td></tr>
+              <tr><td><kbd>F10</kbd></td><td>Pay with Card</td></tr>
+              <tr><td><kbd>F11</kbd></td><td>Pay with UPI</td></tr>
+              <tr><td><kbd>Esc</kbd></td><td>Clear cart</td></tr>
+            </table>
+          </div>
+
+          <div class="table-container p-4 mt-4">
+            <h6 class="fw-bold mb-3">Recent Activity</h6>
+            <div id="activity-log" style="max-height:300px;overflow-y:auto;"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+  <script src="/public/js/app.js"></script>
+  <script>
+    initApp('/settings', loadSettingsPage);
+
+    async function loadSettingsPage() {
+      const s = await api('/api/settings');
+      document.getElementById('s-shop-name').value = s.shop_name || '';
+      document.getElementById('s-shop-address').value = s.shop_address || '';
+      document.getElementById('s-shop-phone').value = s.shop_phone || '';
+      document.getElementById('s-tax-rate').value = s.tax_rate || '0';
+      document.getElementById('s-currency').value = s.currency_symbol || '\u20B9';
+      document.getElementById('s-printer-type').value = s.printer_type || 'none';
+      document.getElementById('s-printer-address').value = s.printer_address || '';
+
+      // Load activity log
+      const log = await api('/api/settings/activity-log?limit=50');
+      document.getElementById('activity-log').innerHTML = log.map(l =>
+        `<div class="py-1 border-bottom" style="font-size:0.85rem;">
+          <strong>${l.user_name || 'System'}</strong> ${l.action.replace(/_/g, ' ')}
+          <div class="text-muted" style="font-size:0.75rem;">${new Date(l.created_at).toLocaleString('en-IN')}</div>
+        </div>`
+      ).join('') || '<p class="text-muted">No activity yet</p>';
+    }
+
+    async function saveSettings() {
+      await api('/api/settings', {
+        method: 'PUT',
+        body: {
+          shop_name: document.getElementById('s-shop-name').value,
+          shop_address: document.getElementById('s-shop-address').value,
+          shop_phone: document.getElementById('s-shop-phone').value,
+          tax_rate: document.getElementById('s-tax-rate').value,
+          currency_symbol: document.getElementById('s-currency').value,
+          printer_type: document.getElementById('s-printer-type').value,
+          printer_address: document.getElementById('s-printer-address').value,
+        },
+      });
+      showToast('Settings saved!');
+    }
+  </script>
+</body>
+</html>
