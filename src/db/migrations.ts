@@ -151,6 +151,9 @@ export function runMigrations(): void {
   };
   addColumn("products", "cost_price", "REAL NOT NULL DEFAULT 0");
   addColumn("bill_items", "cost_price", "REAL NOT NULL DEFAULT 0");
+  addColumn("bills", "refund_reason", "TEXT");
+  addColumn("bills", "refunded_at", "TEXT");
+  addColumn("bills", "refunded_by_user_id", "INTEGER");
 }
 
 export function seedDefaults(): void {

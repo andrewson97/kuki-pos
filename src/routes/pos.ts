@@ -3,6 +3,8 @@ import { getDb } from "../db/database";
 import { getUser } from "../middleware/auth";
 import { createBill, getNextTokenNumber } from "../services/billing";
 import { getSettings, buildReceiptText, buildKitchenTicket, printReceipt } from "../services/printer";
+import { restoreStockForBill } from "../services/stock";
+import { adminOnly } from "../middleware/auth";
 
 const pos = new Hono();
 
@@ -99,9 +101,11 @@ pos.get("/bills", (c) => {
 pos.get("/bills/:id", (c) => {
   const db = getDb();
   const bill = db.query(`
-    SELECT b.*, u.full_name as cashier_name, c.name as customer_name, c.phone as customer_phone
+    SELECT b.*, u.full_name as cashier_name, c.name as customer_name, c.phone as customer_phone,
+           ru.full_name as refunded_by_name
     FROM bills b
     LEFT JOIN users u ON b.user_id = u.id
+    LEFT JOIN users ru ON b.refunded_by_user_id = ru.id
     LEFT JOIN customers c ON b.customer_id = c.id
     WHERE b.id = ?
   `).get(c.req.param("id"));
@@ -111,18 +115,34 @@ pos.get("/bills/:id", (c) => {
   return c.json({ ...(bill as any), items });
 });
 
-pos.post("/bills/:id/cancel", async (c) => {
+pos.post("/bills/:id/refund", adminOnly, async (c) => {
   const db = getDb();
   const user = getUser(c)!;
   const id = c.req.param("id");
+  const body = await c.req.json().catch(() => ({}));
+  const reason = (body.reason || "").trim();
+  if (!reason) return c.json({ error: "Refund reason is required" }, 400);
+
   const bill = db.query("SELECT * FROM bills WHERE id = ?").get(id) as any;
   if (!bill) return c.json({ error: "Not found" }, 404);
-  if (bill.status !== "completed") return c.json({ error: "Bill already " + bill.status }, 400);
+  if (bill.status !== "completed") return c.json({ error: "Bill is already " + bill.status }, 400);
 
-  db.query("UPDATE bills SET status = 'cancelled' WHERE id = ?").run(id);
-  db.query("INSERT INTO activity_log (user_id, action, details) VALUES (?, 'cancelled_bill', ?)").run(
-    user.id, JSON.stringify({ bill_id: id, token: bill.token_number })
-  );
+  const items = db.query("SELECT product_id, quantity FROM bill_items WHERE bill_id = ?").all(id) as any[];
+
+  db.transaction(() => {
+    for (const item of items) {
+      if (item.product_id) {
+        restoreStockForBill(item.product_id, item.quantity, Number(id), user.id);
+      }
+    }
+    db.query(
+      "UPDATE bills SET status = 'refunded', refund_reason = ?, refunded_at = datetime('now'), refunded_by_user_id = ? WHERE id = ?"
+    ).run(reason, user.id, id);
+    db.query("INSERT INTO activity_log (user_id, action, details) VALUES (?, 'refunded_bill', ?)").run(
+      user.id, JSON.stringify({ bill_id: id, token: bill.token_number, amount: bill.total, reason })
+    );
+  })();
+
   return c.json({ success: true });
 });
 

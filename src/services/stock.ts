@@ -17,6 +17,23 @@ export function deductStockForBill(productId: number, quantity: number, billId: 
   }
 }
 
+export function restoreStockForBill(productId: number, quantity: number, billId: number, userId: number): void {
+  const db = getDb();
+  const recipe = db.query(
+    "SELECT stock_item_id, quantity_needed FROM recipes WHERE product_id = ?"
+  ).all(productId) as { stock_item_id: number; quantity_needed: number }[];
+
+  for (const item of recipe) {
+    const totalReturned = item.quantity_needed * quantity;
+    db.query(
+      "UPDATE stock_items SET quantity = quantity + ?, updated_at = datetime('now') WHERE id = ?"
+    ).run(totalReturned, item.stock_item_id);
+    db.query(
+      "INSERT INTO stock_transactions (stock_item_id, type, quantity, reference, user_id) VALUES (?, 'adjustment', ?, ?, ?)"
+    ).run(item.stock_item_id, totalReturned, `Refund Bill #${billId}`, userId);
+  }
+}
+
 export function getLowStockItems(): any[] {
   const db = getDb();
   return db.query(

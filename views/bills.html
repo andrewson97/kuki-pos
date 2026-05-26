@@ -42,7 +42,7 @@
         <div class="modal-body" id="bill-detail-body"></div>
         <div class="modal-footer">
           <button class="btn btn-outline-secondary" id="btn-reprint">Reprint Receipt</button>
-          <button class="btn btn-danger d-none" id="btn-cancel-bill">Cancel Bill</button>
+          <button class="btn btn-danger d-none" id="btn-refund-bill">Refund Bill</button>
           <button class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
         </div>
       </div>
@@ -73,7 +73,7 @@
           <td>-</td>
           <td class="fw-bold">${formatCurrency(b.total)}</td>
           <td><span class="badge bg-info">${b.payment_method}</span></td>
-          <td><span class="badge bg-${b.status === 'completed' ? 'success' : 'danger'}">${b.status}</span></td>
+          <td><span class="badge bg-${b.status === 'completed' ? 'success' : (b.status === 'refunded' ? 'warning text-dark' : 'danger')}">${b.status}</span></td>
           <td>${b.cashier_name || '-'}</td>
           <td><button class="btn btn-sm btn-outline-primary" onclick="viewBill(${b.id})">View</button></td>
         </tr>
@@ -92,9 +92,14 @@
             <strong>Cashier:</strong> ${bill.cashier_name}</p>
           </div>
           <div class="col-md-6 text-end">
-            <span class="badge bg-${bill.status === 'completed' ? 'success' : 'danger'} fs-6">${bill.status}</span>
+            <span class="badge bg-${bill.status === 'completed' ? 'success' : (bill.status === 'refunded' ? 'warning text-dark' : 'danger')} fs-6">${bill.status.toUpperCase()}</span>
           </div>
         </div>
+        ${bill.status === 'refunded' ? `
+          <div class="alert alert-warning py-2 mb-3">
+            <strong>Refunded</strong> by ${bill.refunded_by_name || '-'} on ${bill.refunded_at ? new Date(bill.refunded_at).toLocaleString() : '-'}<br>
+            <strong>Reason:</strong> ${bill.refund_reason || '-'}
+          </div>` : ''}
         <table class="table table-sm">
           <thead><tr><th>Product</th><th>Qty</th><th>Price</th><th>Total</th></tr></thead>
           <tbody>
@@ -109,19 +114,26 @@
         </table>
       `;
 
-      const cancelBtn = document.getElementById('btn-cancel-bill');
+      const refundBtn = document.getElementById('btn-refund-bill');
       if (bill.status === 'completed' && currentUser.role === 'admin') {
-        cancelBtn.classList.remove('d-none');
-        cancelBtn.onclick = async () => {
-          if (confirm('Cancel this bill?')) {
-            await api(`/api/pos/bills/${id}/cancel`, { method: 'POST' });
-            showToast('Bill cancelled');
+        refundBtn.classList.remove('d-none');
+        refundBtn.onclick = async () => {
+          const reason = prompt('Refund reason (required):');
+          if (reason === null) return;
+          const trimmed = reason.trim();
+          if (!trimmed) { showToast('Reason is required', 'error'); return; }
+          if (!confirm(`Refund this bill for ${formatCurrency(bill.total)}?\nStock will be restored. This cannot be undone.`)) return;
+          try {
+            await api(`/api/pos/bills/${id}/refund`, { method: 'POST', body: { reason: trimmed } });
+            showToast('Bill refunded — stock restored');
             bootstrap.Modal.getInstance(document.getElementById('billDetailModal')).hide();
             loadBills();
+          } catch (err) {
+            showToast('Refund failed: ' + err.message, 'error');
           }
         };
       } else {
-        cancelBtn.classList.add('d-none');
+        refundBtn.classList.add('d-none');
       }
 
       document.getElementById('btn-reprint').onclick = async () => {
