@@ -43,7 +43,7 @@
           <div class="summary-row">
             <span>Extra Discount</span>
             <div class="d-flex align-items-center gap-1">
-              <input type="number" class="form-control form-control-sm" id="discount-input" value="0" min="0" style="width:80px;text-align:right;" onchange="updateCartTotals()">
+              <input type="number" class="form-control form-control-sm" id="discount-input" value="0" min="0" style="width:80px;text-align:right;" oninput="updateCartTotals()">
             </div>
           </div>
           <div class="summary-row"><span>Tax (<span id="tax-rate-display">0</span>%)</span><span id="cart-tax">-</span></div>
@@ -296,6 +296,12 @@
     function clearCart() {
       cart = [];
       document.getElementById('discount-input').value = 0;
+      document.getElementById('cart-count').textContent = '0';
+      document.getElementById('cart-subtotal').textContent = formatCurrency(0);
+      document.getElementById('cart-tax').textContent = formatCurrency(0);
+      document.getElementById('cart-total').textContent = formatCurrency(0);
+      document.getElementById('cart-savings').textContent = '-' + formatCurrency(0);
+      document.getElementById('row-savings').style.display = 'none';
       clearCustomer();
       renderCart();
     }
