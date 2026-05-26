@@ -115,7 +115,7 @@
       `;
 
       const refundBtn = document.getElementById('btn-refund-bill');
-      if (bill.status === 'completed' && currentUser.role === 'admin') {
+      if (bill.status === 'completed') {
         refundBtn.classList.remove('d-none');
         refundBtn.onclick = async () => {
           const reason = prompt('Refund reason (required):');

@@ -115,7 +115,7 @@ pos.get("/bills/:id", (c) => {
   return c.json({ ...(bill as any), items });
 });
 
-pos.post("/bills/:id/refund", adminOnly, async (c) => {
+pos.post("/bills/:id/refund", async (c) => {
   const db = getDb();
   const user = getUser(c)!;
   const id = c.req.param("id");
