@@ -9,13 +9,9 @@ primary_region = 'ams'
 [build]
 
 [env]
-  DB_PATH = '/data/shop.db'
-  NODE_ENV = 'production'
-  PORT = '3000'
-
-[[mounts]]
-  source = 'shop_data'
-  destination = '/data'
+  NODE_ENV = "production"
+  PORT = "8080"
+  DB_PATH = "/data/shop.db"
 
 [http_service]
   internal_port = 8080
