@@ -83,6 +83,7 @@ function renderLayout(activePage) {
     { path: '/recipes', icon: '\u{1F4D6}', label: 'Recipes', admin: true },
     { path: '/stock', icon: '\u{1F4E6}', label: 'Stock', admin: true },
     { divider: 'Finance' },
+    { path: '/cash', icon: '\u{1F4B5}', label: 'Cash Drawer', admin: false },
     { path: '/expenses', icon: '\u{1F4B8}', label: 'Expenses', admin: true },
     { path: '/income', icon: '\u{1F4B0}', label: 'Income', admin: true },
     { path: '/reports', icon: '\u{1F4C8}', label: 'Reports', admin: true },

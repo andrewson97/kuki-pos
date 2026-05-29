@@ -139,6 +139,25 @@ export function runMigrations(): void {
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS cash_counts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      count_type TEXT NOT NULL CHECK(count_type IN ('open', 'close')),
+      count_date TEXT NOT NULL,
+      user_id INTEGER REFERENCES users(id),
+      notes_20 INTEGER NOT NULL DEFAULT 0,
+      notes_50 INTEGER NOT NULL DEFAULT 0,
+      notes_100 INTEGER NOT NULL DEFAULT 0,
+      notes_500 INTEGER NOT NULL DEFAULT 0,
+      notes_1000 INTEGER NOT NULL DEFAULT 0,
+      notes_2000 INTEGER NOT NULL DEFAULT 0,
+      notes_5000 INTEGER NOT NULL DEFAULT 0,
+      total_amount REAL NOT NULL DEFAULT 0,
+      expected_amount REAL,
+      variance REAL,
+      notes TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
   `);
 
   // Incremental migrations for existing databases
