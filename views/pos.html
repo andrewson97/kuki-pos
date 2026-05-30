@@ -20,13 +20,11 @@
     <div class="pos-container" style="padding:15px;">
       <!-- Products panel -->
       <div style="overflow-y:auto;">
-        <div class="mb-3 d-flex gap-2">
+        <div class="mb-2">
           <input type="text" class="form-control" id="product-search" placeholder="Search products...">
-          <select class="form-select" id="category-filter" style="width:180px;">
-            <option value="">All Categories</option>
-          </select>
         </div>
-        <div class="product-grid" id="product-grid"></div>
+        <div class="category-tabs mb-3" id="category-tabs"></div>
+        <div id="product-grid"></div>
       </div>
       <!-- Cart panel -->
       <div class="cart-panel">
@@ -127,6 +125,7 @@
     let customers = [];
     let lastReceiptText = '';
     let lastKitchenText = '';
+    let activeCategory = '';
 
     initApp('/pos', loadPOS);
 
@@ -143,21 +142,27 @@
       customers = custs;
       document.getElementById('token-badge').textContent = `Token #${String(token.next_token).padStart(3,'0')}`;
 
-      // Populate categories
-      const cats = [...new Set(products.map(p => p.category))];
-      const catSelect = document.getElementById('category-filter');
-      cats.forEach(c => {
-        const opt = document.createElement('option');
-        opt.value = c; opt.textContent = c;
-        catSelect.appendChild(opt);
-      });
-
+      renderCategoryTabs();
       renderProducts();
       setupCustomerSearch();
 
-      // Search & filter
       document.getElementById('product-search').addEventListener('input', renderProducts);
-      document.getElementById('category-filter').addEventListener('change', renderProducts);
+    }
+
+    function renderCategoryTabs() {
+      const counts = {};
+      products.forEach(p => { counts[p.category] = (counts[p.category] || 0) + 1; });
+      const cats = Object.keys(counts).sort();
+      const pills = [{ key: '', label: 'All', count: products.length }, ...cats.map(c => ({ key: c, label: c, count: counts[c] }))];
+      document.getElementById('category-tabs').innerHTML = pills.map(p => `
+        <button type="button" class="cat-pill ${activeCategory === p.key ? 'active' : ''}" onclick="selectCategory('${p.key.replace(/'/g, "\\'")}')">${p.label} <span class="cat-count">${p.count}</span></button>
+      `).join('');
+    }
+
+    function selectCategory(key) {
+      activeCategory = key;
+      renderCategoryTabs();
+      renderProducts();
     }
 
     // Customer search
@@ -208,13 +213,13 @@
 
     function renderProducts() {
       const search = document.getElementById('product-search').value.toLowerCase();
-      const cat = document.getElementById('category-filter').value;
       const filtered = products.filter(p => {
         if (search && !p.name.toLowerCase().includes(search)) return false;
-        if (cat && p.category !== cat) return false;
+        if (activeCategory && p.category !== activeCategory) return false;
         return true;
       });
-      document.getElementById('product-grid').innerHTML = filtered.map(p => {
+
+      const card = (p) => {
         const effective = p.discount_price || p.selling_price;
         const priceHtml = p.discount_price
           ? `<div class="product-price"><s class="text-muted" style="font-size:0.8rem">${formatCurrency(p.selling_price)}</s> <span class="text-danger">${formatCurrency(effective)}</span></div>`
@@ -222,10 +227,30 @@
         return `
         <div class="product-card" onclick="addToCart(${p.id})">
           <div class="product-name">${p.name}</div>
-          <div class="text-muted" style="font-size:0.75rem">${p.category}</div>
           ${priceHtml}
         </div>`;
-      }).join('') || '<div class="text-center text-muted py-5 w-100">No products found</div>';
+      };
+
+      const container = document.getElementById('product-grid');
+      if (filtered.length === 0) {
+        container.innerHTML = '<div class="text-center text-muted py-5 w-100">No products found</div>';
+        return;
+      }
+
+      // When viewing All (no specific category selected), group with headers.
+      // When a category is selected or user is searching, flat grid.
+      if (activeCategory || search) {
+        container.innerHTML = `<div class="product-grid">${filtered.map(card).join('')}</div>`;
+      } else {
+        const groups = {};
+        filtered.forEach(p => { (groups[p.category] = groups[p.category] || []).push(p); });
+        container.innerHTML = Object.keys(groups).sort().map(cat => `
+          <div class="cat-section">
+            <h6 class="cat-section-title">${cat} <small class="text-muted">(${groups[cat].length})</small></h6>
+            <div class="product-grid">${groups[cat].map(card).join('')}</div>
+          </div>
+        `).join('');
+      }
     }
 
     function addToCart(productId) {
