@@ -12,14 +12,20 @@
   <div class="main-content">
     <div class="top-bar"><h5 class="mb-0">Expenses</h5><div id="top-bar-user"></div></div>
     <div class="content-area">
-      <div class="d-flex justify-content-between mb-3">
-        <div class="d-flex gap-2">
+      <div class="d-flex justify-content-between mb-3 flex-wrap gap-2">
+        <div class="d-flex gap-2 flex-wrap">
           <input type="date" class="form-control" id="exp-start" style="width:160px;">
           <input type="date" class="form-control" id="exp-end" style="width:160px;">
+          <select class="form-select" id="exp-status-filter" style="width:160px;" onchange="loadExpenses()">
+            <option value="">All statuses</option>
+            <option value="pending">Pending</option>
+            <option value="approved">Approved</option>
+            <option value="rejected">Rejected</option>
+          </select>
           <button class="btn btn-outline-secondary" onclick="loadExpenses()">Filter</button>
         </div>
         <div class="d-flex gap-2">
-          <button class="btn btn-outline-secondary" onclick="showAddCategory()">+ Category</button>
+          <button class="btn btn-outline-secondary" id="btn-add-cat" onclick="showAddCategory()">+ Category</button>
           <button class="btn btn-primary" onclick="showAddExpense()">+ Add Expense</button>
         </div>
       </div>
@@ -30,7 +36,7 @@
       </div>
       <div class="table-container">
         <table class="table table-hover mb-0">
-          <thead><tr><th>Date</th><th>Category</th><th>Amount</th><th>Description</th><th>By</th><th>Actions</th></tr></thead>
+          <thead><tr><th>Date</th><th>Category</th><th>Amount</th><th>Source</th><th>Description</th><th>By</th><th>Status</th><th>Actions</th></tr></thead>
           <tbody id="expenses-table"></tbody>
         </table>
       </div>
@@ -44,7 +50,15 @@
         <div class="modal-body">
           <div class="mb-3"><label class="form-label">Category</label><select class="form-select" id="exp-category"></select></div>
           <div class="mb-3"><label class="form-label">Amount</label><input type="number" class="form-control" id="exp-amount" step="0.01" min="0"></div>
-          <div class="mb-3"><label class="form-label">Description</label><input type="text" class="form-control" id="exp-desc"></div>
+          <div class="mb-3">
+            <label class="form-label">Paid From</label>
+            <select class="form-select" id="exp-source">
+              <option value="cash">Cash (drawer)</option>
+              <option value="card">Card</option>
+              <option value="bank">Bank Transfer</option>
+            </select>
+          </div>
+          <div class="mb-3"><label class="form-label">Description / Note</label><input type="text" class="form-control" id="exp-desc" placeholder="e.g., emergency cream purchase"></div>
           <div class="mb-3"><label class="form-label">Date</label><input type="date" class="form-control" id="exp-date"></div>
         </div>
         <div class="modal-footer"><button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button><button class="btn btn-primary" onclick="saveExpense()">Save</button></div>
@@ -72,6 +86,9 @@
       document.getElementById('exp-start').value = firstOfMonth;
       document.getElementById('exp-end').value = today;
       document.getElementById('exp-date').value = today;
+      if (currentUser.role !== 'admin') {
+        document.getElementById('btn-add-cat').style.display = 'none';
+      }
       expCategories = await api('/api/expenses/categories');
       renderCatOptions();
       loadExpenses();
@@ -86,21 +103,52 @@
       const params = new URLSearchParams();
       const s = document.getElementById('exp-start').value;
       const e = document.getElementById('exp-end').value;
+      const st = document.getElementById('exp-status-filter').value;
       if (s) params.set('start_date', s);
       if (e) params.set('end_date', e);
+      if (st) params.set('status', st);
       const expenses = await api(`/api/expenses?${params}`);
-      const total = expenses.reduce((s, e) => s + e.amount, 0);
+      const total = expenses.filter(x => x.status === 'approved').reduce((s, e) => s + e.amount, 0);
       document.getElementById('exp-total').textContent = formatCurrency(total);
-      document.getElementById('expenses-table').innerHTML = expenses.map(e => `
-        <tr>
+      const isAdmin = currentUser.role === 'admin';
+      document.getElementById('expenses-table').innerHTML = expenses.map(e => {
+        const statusBadge = e.status === 'pending' ? '<span class="badge bg-warning text-dark">PENDING</span>'
+          : e.status === 'rejected' ? `<span class="badge bg-danger" title="${(e.rejected_reason || '').replace(/"/g, '&quot;')}">REJECTED</span>`
+          : '<span class="badge bg-success">APPROVED</span>';
+        const actions = [];
+        if (isAdmin && e.status === 'pending') {
+          actions.push(`<button class="btn btn-sm btn-success" onclick="approveExpense(${e.id})">Approve</button>`);
+          actions.push(`<button class="btn btn-sm btn-outline-danger" onclick="rejectExpense(${e.id})">Reject</button>`);
+        }
+        if (isAdmin) actions.push(`<button class="btn btn-sm btn-outline-secondary" onclick="deleteExpense(${e.id})">Delete</button>`);
+        return `<tr class="${e.status === 'pending' ? 'table-warning' : ''}">
           <td>${formatDate(e.expense_date)}</td>
           <td><span class="badge bg-secondary">${e.category_name || '-'}</span></td>
           <td class="fw-bold">${formatCurrency(e.amount)}</td>
+          <td><small>${(e.payment_source || 'cash').toUpperCase()}</small></td>
           <td>${e.description || '-'}</td>
-          <td>${e.user_name || '-'}</td>
-          <td><button class="btn btn-sm btn-outline-danger" onclick="deleteExpense(${e.id})">Delete</button></td>
-        </tr>
-      `).join('') || '<tr><td colspan="6" class="text-center text-muted py-4">No expenses found</td></tr>';
+          <td>${e.user_name || '-'}${e.approver_name && e.status !== 'pending' ? `<br><small class="text-muted">${e.status} by ${e.approver_name}</small>` : ''}</td>
+          <td>${statusBadge}</td>
+          <td>${actions.join(' ')}</td>
+        </tr>`;
+      }).join('') || '<tr><td colspan="8" class="text-center text-muted py-4">No expenses found</td></tr>';
+    }
+
+    async function approveExpense(id) {
+      try {
+        await api(`/api/expenses/${id}/approve`, { method: 'POST' });
+        showToast('Expense approved');
+        loadExpenses();
+      } catch (err) { showToast('Failed: ' + err.message, 'error'); }
+    }
+
+    async function rejectExpense(id) {
+      const reason = prompt('Reason for rejection (optional):') || '';
+      try {
+        await api(`/api/expenses/${id}/reject`, { method: 'POST', body: { reason } });
+        showToast('Expense rejected');
+        loadExpenses();
+      } catch (err) { showToast('Failed: ' + err.message, 'error'); }
     }
 
     function showAddExpense() {
@@ -111,17 +159,23 @@
     }
 
     async function saveExpense() {
-      await api('/api/expenses', {
+      const desc = document.getElementById('exp-desc').value.trim();
+      if (currentUser.role !== 'admin' && !desc) {
+        showToast('Please enter a description/note', 'error');
+        return;
+      }
+      const res = await api('/api/expenses', {
         method: 'POST',
         body: {
           category_id: parseInt(document.getElementById('exp-category').value),
           amount: parseFloat(document.getElementById('exp-amount').value),
-          description: document.getElementById('exp-desc').value,
+          description: desc,
           expense_date: document.getElementById('exp-date').value,
+          payment_source: document.getElementById('exp-source').value,
         },
       });
       bootstrap.Modal.getInstance(document.getElementById('expenseModal')).hide();
-      showToast('Expense added!');
+      showToast(res.status === 'pending' ? 'Submitted for admin approval' : 'Expense added!');
       loadExpenses();
     }
 

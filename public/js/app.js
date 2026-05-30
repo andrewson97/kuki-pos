@@ -84,7 +84,7 @@ function renderLayout(activePage) {
     { path: '/stock', icon: '\u{1F4E6}', label: 'Stock', admin: true },
     { divider: 'Finance' },
     { path: '/cash', icon: '\u{1F4B5}', label: 'Cash Drawer', admin: false },
-    { path: '/expenses', icon: '\u{1F4B8}', label: 'Expenses', admin: true },
+    { path: '/expenses', icon: '\u{1F4B8}', label: 'Expenses', admin: false, badge: 'pending_expenses' },
     { path: '/income', icon: '\u{1F4B0}', label: 'Income', admin: true },
     { path: '/reports', icon: '\u{1F4C8}', label: 'Reports', admin: true },
     { divider: 'System' },
@@ -106,7 +106,8 @@ function renderLayout(activePage) {
   }).map(item => {
     if (item.divider) return `<li class="nav-divider">${item.divider}</li>`;
     const active = item.path === activePage ? 'active' : '';
-    return `<li><a href="${item.path}" class="${active}">${item.icon} ${item.label}</a></li>`;
+    const badgeAttr = item.badge ? ` data-badge="${item.badge}"` : '';
+    return `<li><a href="${item.path}" class="${active}"${badgeAttr}>${item.icon} ${item.label}<span class="nav-badge ms-1" style="display:none;"></span></a></li>`;
   }).join('');
 
   document.getElementById('sidebar').innerHTML = `
@@ -121,6 +122,26 @@ function renderLayout(activePage) {
     <span class="me-3"><strong>${currentUser.full_name}</strong> <span class="badge bg-secondary">${currentUser.role}</span></span>
     <button class="btn btn-outline-secondary btn-sm" onclick="logout()">Logout</button>
   `;
+
+  refreshSidebarBadges();
+}
+
+async function refreshSidebarBadges() {
+  if (!currentUser || currentUser.role !== 'admin') return;
+  try {
+    const res = await fetch('/api/expenses/pending-count');
+    if (!res.ok) return;
+    const data = await res.json();
+    const el = document.querySelector('[data-badge="pending_expenses"] .nav-badge');
+    if (el) {
+      if (data.count > 0) {
+        el.textContent = data.count;
+        el.style.cssText = 'display:inline-block;background:#dc3545;color:white;border-radius:10px;padding:1px 7px;font-size:0.75rem;font-weight:bold;';
+      } else {
+        el.style.display = 'none';
+      }
+    }
+  } catch {}
 }
 
 // ===== Init =====

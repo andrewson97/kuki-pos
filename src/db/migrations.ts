@@ -177,6 +177,11 @@ export function runMigrations(): void {
   addColumn("bill_items", "original_price", "REAL");
   addColumn("bills", "amount_given", "REAL");
   addColumn("bills", "change_given", "REAL");
+  addColumn("expenses", "status", "TEXT NOT NULL DEFAULT 'approved'");
+  addColumn("expenses", "payment_source", "TEXT NOT NULL DEFAULT 'cash'");
+  addColumn("expenses", "approved_by_user_id", "INTEGER");
+  addColumn("expenses", "approved_at", "TEXT");
+  addColumn("expenses", "rejected_reason", "TEXT");
 }
 
 export function seedDefaults(): void {

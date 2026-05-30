@@ -31,6 +31,24 @@ function getCashRefundsToday(date: string): number {
   return row.total;
 }
 
+function getCashExpensesToday(date: string): number {
+  const db = getDb();
+  const row = db.query(`
+    SELECT COALESCE(SUM(amount), 0) as total
+    FROM expenses
+    WHERE expense_date = ? AND payment_source = 'cash' AND status = 'approved'
+  `).get(date) as { total: number };
+  return row.total;
+}
+
+function getPendingExpenseCountToday(date: string): number {
+  const db = getDb();
+  const row = db.query(
+    "SELECT COUNT(*) as count FROM expenses WHERE expense_date = ? AND status = 'pending'"
+  ).get(date) as { count: number };
+  return row.count;
+}
+
 cash.get("/today", (c) => {
   const db = getDb();
   const date = todayDate();
@@ -42,7 +60,9 @@ cash.get("/today", (c) => {
   ).get(date);
   const cash_sales = getCashSalesToday(date);
   const cash_refunds = getCashRefundsToday(date);
-  return c.json({ date, open, close, cash_sales, cash_refunds });
+  const cash_expenses = getCashExpensesToday(date);
+  const pending_expenses = getPendingExpenseCountToday(date);
+  return c.json({ date, open, close, cash_sales, cash_refunds, cash_expenses, pending_expenses });
 });
 
 cash.post("/open", async (c) => {
@@ -76,11 +96,17 @@ cash.post("/close", async (c) => {
   const existingClose = db.query("SELECT id FROM cash_counts WHERE count_date = ? AND count_type = 'close'").get(date);
   if (existingClose) return c.json({ error: "Closing count already recorded today" }, 400);
 
+  const pending = getPendingExpenseCountToday(date);
+  if (pending > 0) {
+    return c.json({ error: `${pending} expense${pending > 1 ? "s" : ""} pending approval. Admin must approve or reject before closing.` }, 400);
+  }
+
   const openRow = db.query("SELECT total_amount FROM cash_counts WHERE count_date = ? AND count_type = 'open'").get(date) as { total_amount: number } | null;
   const opening = openRow?.total_amount || 0;
   const cashSales = getCashSalesToday(date);
   const cashRefunds = getCashRefundsToday(date);
-  const expected = opening + cashSales - cashRefunds;
+  const cashExpenses = getCashExpensesToday(date);
+  const expected = opening + cashSales - cashRefunds - cashExpenses;
   const counted = computeTotal(body);
   const variance = counted - expected;
 

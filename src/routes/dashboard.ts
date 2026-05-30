@@ -15,7 +15,7 @@ dashboard.get("/stats", (c) => {
 
   const todayExpenses = db.query(`
     SELECT COALESCE(SUM(amount), 0) as total
-    FROM expenses WHERE expense_date = ?
+    FROM expenses WHERE expense_date = ? AND status = 'approved'
   `).get(today) as any;
 
   const lowStockCount = db.query(`
