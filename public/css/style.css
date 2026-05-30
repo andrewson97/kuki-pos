@@ -187,18 +187,31 @@ body {
 }
 .cat-pill.active .cat-count { opacity: 0.9; }
 
-.cat-section { margin-bottom: 18px; }
+.cat-sections {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 16px;
+  align-items: start;
+}
+.cat-section {
+  background: #fff;
+  border: 1px solid #e9ecef;
+  border-radius: 10px;
+  padding: 10px 12px;
+}
 .cat-section-title {
   font-weight: 700;
   color: #2c3e50;
-  border-bottom: 2px solid #e9ecef;
+  border-bottom: 2px solid var(--primary);
   padding-bottom: 6px;
-  margin-bottom: 10px;
-  position: sticky;
-  top: 0;
-  background: var(--bg-light);
-  z-index: 5;
+  margin: 0 0 10px;
+  font-size: 0.95rem;
 }
+.cat-section .product-grid {
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 8px;
+}
+.cat-section .product-card { padding: 10px; }
 
 .product-grid {
   display: grid;

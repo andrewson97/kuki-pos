@@ -244,12 +244,12 @@
       } else {
         const groups = {};
         filtered.forEach(p => { (groups[p.category] = groups[p.category] || []).push(p); });
-        container.innerHTML = Object.keys(groups).sort().map(cat => `
+        container.innerHTML = `<div class="cat-sections">${Object.keys(groups).sort().map(cat => `
           <div class="cat-section">
             <h6 class="cat-section-title">${cat} <small class="text-muted">(${groups[cat].length})</small></h6>
             <div class="product-grid">${groups[cat].map(card).join('')}</div>
           </div>
-        `).join('');
+        `).join('')}</div>`;
       }
     }
 
