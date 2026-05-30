@@ -21,7 +21,7 @@
       </div>
       <div class="table-container">
         <table class="table table-hover mb-0">
-          <thead><tr><th>Name</th><th>Category</th><th>Cost</th><th>Selling</th><th>Margin</th><th>Status</th><th>Actions</th></tr></thead>
+          <thead><tr><th></th><th>Name</th><th>Category</th><th>Cost</th><th>Selling</th><th>Margin</th><th>Status</th><th>Actions</th></tr></thead>
           <tbody id="products-table"></tbody>
         </table>
       </div>
@@ -63,6 +63,16 @@
           <div class="mb-3">
             <div id="product-margin" class="text-muted" style="font-size:0.85rem;"></div>
           </div>
+          <div class="mb-3">
+            <label class="form-label">Image <small class="text-muted">(optional, max 3MB)</small></label>
+            <div class="d-flex align-items-center gap-3">
+              <img id="product-image-preview" src="" alt="" style="display:none;width:80px;height:80px;object-fit:cover;border-radius:8px;border:1px solid #dee2e6;">
+              <div class="flex-fill">
+                <input type="file" class="form-control" id="product-image" accept="image/*">
+                <button type="button" class="btn btn-sm btn-outline-danger mt-1" id="btn-remove-image" style="display:none;" onclick="removeProductImage()">Remove current image</button>
+              </div>
+            </div>
+          </div>
           <div class="form-check">
             <input type="checkbox" class="form-check-input" id="product-active" checked>
             <label class="form-check-label">Active (visible in POS)</label>
@@ -95,7 +105,11 @@
         const effective = p.discount_price || p.selling_price;
         const margin = effective - (p.cost_price || 0);
         const marginPct = effective > 0 ? ((margin / effective) * 100).toFixed(0) : 0;
+        const thumb = p.image_path
+          ? `<img src="/uploads/${p.image_path}" alt="" style="width:42px;height:42px;object-fit:cover;border-radius:6px;">`
+          : `<div style="width:42px;height:42px;background:#e9ecef;border-radius:6px;display:flex;align-items:center;justify-content:center;color:#adb5bd;font-size:1.2rem;">&#127874;</div>`;
         return `<tr>
+          <td>${thumb}</td>
           <td class="fw-bold">${p.name}</td>
           <td>${p.category}</td>
           <td>${formatCurrency(p.cost_price || 0)}</td>
@@ -107,7 +121,7 @@
             <button class="btn btn-sm btn-outline-danger" onclick="deleteProduct(${p.id})">Delete</button>
           </td>
         </tr>`;
-      }).join('') || '<tr><td colspan="7" class="text-center text-muted py-4">No products found</td></tr>';
+      }).join('') || '<tr><td colspan="8" class="text-center text-muted py-4">No products found</td></tr>';
     }
 
     function updateMarginPreview() {
@@ -133,6 +147,9 @@
       document.getElementById('product-discount').value = '';
       document.getElementById('product-active').checked = true;
       document.getElementById('product-margin').innerHTML = '';
+      document.getElementById('product-image').value = '';
+      document.getElementById('product-image-preview').style.display = 'none';
+      document.getElementById('btn-remove-image').style.display = 'none';
       document.getElementById('product-cost').oninput = updateMarginPreview;
       document.getElementById('product-price').oninput = updateMarginPreview;
       new bootstrap.Modal(document.getElementById('productModal')).show();
@@ -148,6 +165,17 @@
       document.getElementById('product-price').value = p.selling_price;
       document.getElementById('product-discount').value = p.discount_price || '';
       document.getElementById('product-active').checked = !!p.is_active;
+      document.getElementById('product-image').value = '';
+      const preview = document.getElementById('product-image-preview');
+      const removeBtn = document.getElementById('btn-remove-image');
+      if (p.image_path) {
+        preview.src = '/uploads/' + p.image_path;
+        preview.style.display = 'block';
+        removeBtn.style.display = 'inline-block';
+      } else {
+        preview.style.display = 'none';
+        removeBtn.style.display = 'none';
+      }
       document.getElementById('product-cost').oninput = updateMarginPreview;
       document.getElementById('product-price').oninput = updateMarginPreview;
       updateMarginPreview();
@@ -165,14 +193,44 @@
         discount_price: discountInput ? parseFloat(discountInput) : null,
         is_active: document.getElementById('product-active').checked ? 1 : 0,
       };
+      let productId;
       if (id) {
         await api(`/api/products/${id}`, { method: 'PUT', body: data });
+        productId = id;
       } else {
-        await api('/api/products', { method: 'POST', body: data });
+        const created = await api('/api/products', { method: 'POST', body: data });
+        productId = created.id;
       }
+
+      // Upload image if selected
+      const fileInput = document.getElementById('product-image');
+      if (fileInput.files && fileInput.files[0]) {
+        const fd = new FormData();
+        fd.append('image', fileInput.files[0]);
+        try {
+          const res = await fetch(`/api/products/${productId}/image`, { method: 'POST', body: fd });
+          if (!res.ok) {
+            const err = await res.json().catch(() => ({}));
+            showToast('Image upload failed: ' + (err.error || res.statusText), 'error');
+          }
+        } catch (err) {
+          showToast('Image upload failed: ' + err.message, 'error');
+        }
+      }
+
       bootstrap.Modal.getInstance(document.getElementById('productModal')).hide();
       showToast('Product saved!');
       loadProducts();
+    }
+
+    async function removeProductImage() {
+      const id = document.getElementById('product-id').value;
+      if (!id) return;
+      if (!confirm('Remove this product image?')) return;
+      await api(`/api/products/${id}/image`, { method: 'DELETE' });
+      document.getElementById('product-image-preview').style.display = 'none';
+      document.getElementById('btn-remove-image').style.display = 'none';
+      showToast('Image removed');
     }
 
     async function deleteProduct(id) {

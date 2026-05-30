@@ -236,6 +236,22 @@ body {
   box-shadow: 0 4px 12px rgba(232, 62, 140, 0.15);
 }
 
+.product-card .product-image {
+  width: 100%;
+  aspect-ratio: 1;
+  background-size: cover;
+  background-position: center;
+  background-color: #f8f9fa;
+  border-radius: 6px;
+  margin-bottom: 8px;
+}
+.product-card .product-image-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.8rem;
+  color: #ced4da;
+}
 .product-card .product-name {
   font-weight: 600;
   font-size: 0.9rem;

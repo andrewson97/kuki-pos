@@ -1,7 +1,9 @@
 import { Hono } from "hono";
 import { serveStatic } from "hono/bun";
 import { getCookie } from "hono/cookie";
+import path from "path";
 import { runMigrations, seedDefaults } from "./db/migrations";
+import { UPLOADS_DIR } from "./utils/paths";
 import { authMiddleware } from "./middleware/auth";
 import { getDb } from "./db/database";
 import authRoutes from "./routes/auth";
@@ -26,6 +28,15 @@ const app = new Hono();
 // Static files
 app.use("/public/*", serveStatic({ root: "./" }));
 
+// Uploaded product images — public read, no auth needed
+app.get("/uploads/:filename", async (c) => {
+  const filename = c.req.param("filename");
+  if (!/^[\w.-]+$/.test(filename)) return c.notFound();
+  const file = Bun.file(path.join(UPLOADS_DIR, filename));
+  if (!(await file.exists())) return c.notFound();
+  return new Response(file);
+});
+
 // Login page (no auth needed)
 app.get("/login", async (c) => {
   const sessionId = getCookie(c, "session_id");
@@ -45,7 +56,7 @@ app.route("/api/auth", authRoutes);
 app.use("*", async (c, next) => {
   const path = c.req.path;
   // Skip auth for login page, static files, and auth API
-  if (path === "/login" || path.startsWith("/public/") || path.startsWith("/api/auth")) {
+  if (path === "/login" || path.startsWith("/public/") || path.startsWith("/uploads/") || path.startsWith("/api/auth")) {
     return next();
   }
   return authMiddleware(c, next);

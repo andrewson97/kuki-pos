@@ -224,8 +224,12 @@
         const priceHtml = p.discount_price
           ? `<div class="product-price"><s class="text-muted" style="font-size:0.8rem">${formatCurrency(p.selling_price)}</s> <span class="text-danger">${formatCurrency(effective)}</span></div>`
           : `<div class="product-price">${formatCurrency(p.selling_price)}</div>`;
+        const imgHtml = p.image_path
+          ? `<div class="product-image" style="background-image:url('/uploads/${p.image_path}')"></div>`
+          : `<div class="product-image product-image-placeholder">&#127874;</div>`;
         return `
         <div class="product-card" onclick="addToCart(${p.id})">
+          ${imgHtml}
           <div class="product-name">${p.name}</div>
           ${priceHtml}
         </div>`;
