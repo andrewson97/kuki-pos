@@ -158,12 +158,11 @@
       if (!enforce) { shiftBlocked = false; updateShiftUI(); return; }
       try {
         const data = await api('/api/cash/today');
-        if (!data.open) {
+        if (!data.shift_open) {
           shiftBlocked = true;
-          shiftBlockReason = 'Cash drawer not opened today. <a href="/cash" class="alert-link">Open the drawer</a> before taking sales.';
-        } else if (data.close) {
-          shiftBlocked = true;
-          shiftBlockReason = 'Cash drawer is already closed for today. No more sales until tomorrow.';
+          shiftBlockReason = data.open
+            ? 'Cash shift is closed. <a href="/cash" class="alert-link">Open a new shift</a> to continue billing.'
+            : 'Cash drawer not opened today. <a href="/cash" class="alert-link">Open the drawer</a> before taking sales.';
         } else {
           shiftBlocked = false;
         }

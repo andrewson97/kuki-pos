@@ -23,7 +23,7 @@
       <div class="table-container">
         <table class="table table-hover mb-0">
           <thead><tr>
-            <th>Token</th><th>Date</th><th>Customer</th><th>Items</th><th>Total</th><th>Payment</th><th>Status</th><th>Cashier</th><th>Actions</th>
+            <th>Token</th><th>Date</th><th>Time</th><th>Customer</th><th>Items</th><th>Total</th><th>Payment</th><th>Status</th><th>Cashier</th><th>Actions</th>
           </tr></thead>
           <tbody id="bills-table"></tbody>
         </table>
@@ -69,6 +69,7 @@
         <tr>
           <td><strong>#${String(b.token_number).padStart(3,'0')}</strong></td>
           <td>${formatDate(b.bill_date)}</td>
+          <td>${b.created_at ? new Date(b.created_at).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) : '-'}</td>
           <td>${b.customer_name || '-'}</td>
           <td>-</td>
           <td class="fw-bold">${formatCurrency(b.total)}</td>
@@ -77,7 +78,7 @@
           <td>${b.cashier_name || '-'}</td>
           <td><button class="btn btn-sm btn-outline-primary" onclick="viewBill(${b.id})">View</button></td>
         </tr>
-      `).join('') || '<tr><td colspan="9" class="text-center text-muted py-4">No bills found</td></tr>';
+      `).join('') || '<tr><td colspan="10" class="text-center text-muted py-4">No bills found</td></tr>';
     }
 
     async function viewBill(id) {
@@ -87,6 +88,7 @@
         <div class="row mb-3">
           <div class="col-md-6">
             <p><strong>Date:</strong> ${formatDate(bill.bill_date)}<br>
+            <strong>Time:</strong> ${bill.created_at ? new Date(bill.created_at).toLocaleString() : '-'}<br>
             <strong>Customer:</strong> ${bill.customer_name || 'Walk-in'}<br>
             <strong>Payment:</strong> ${bill.payment_method.toUpperCase()}<br>
             <strong>Cashier:</strong> ${bill.cashier_name}</p>

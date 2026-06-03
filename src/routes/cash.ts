@@ -11,33 +11,56 @@ function computeTotal(notes: Record<string, number>): number {
   return DENOMINATIONS.reduce((sum, d) => sum + (notes[`notes_${d}`] || 0) * d, 0);
 }
 
-function getCashSalesToday(date: string): number {
+function getLatestOpen(date: string) {
+  const db = getDb();
+  return db.query(
+    "SELECT cc.*, u.full_name as user_name FROM cash_counts cc LEFT JOIN users u ON cc.user_id = u.id WHERE count_date = ? AND count_type = 'open' ORDER BY created_at DESC LIMIT 1"
+  ).get(date) as any;
+}
+
+function getLatestClose(date: string) {
+  const db = getDb();
+  return db.query(
+    "SELECT cc.*, u.full_name as user_name FROM cash_counts cc LEFT JOIN users u ON cc.user_id = u.id WHERE count_date = ? AND count_type = 'close' ORDER BY created_at DESC LIMIT 1"
+  ).get(date) as any;
+}
+
+// A shift is currently OPEN when the latest open is more recent than the latest close (or no close exists).
+function isShiftOpen(date: string): boolean {
+  const open = getLatestOpen(date);
+  if (!open) return false;
+  const close = getLatestClose(date);
+  if (!close) return true;
+  return new Date(open.created_at).getTime() > new Date(close.created_at).getTime();
+}
+
+function getCashSalesSince(date: string, since: string): number {
   const db = getDb();
   const row = db.query(`
     SELECT COALESCE(SUM(total), 0) as total
     FROM bills
-    WHERE bill_date = ? AND payment_method = 'cash' AND status = 'completed'
-  `).get(date) as { total: number };
+    WHERE bill_date = ? AND payment_method = 'cash' AND status = 'completed' AND created_at >= ?
+  `).get(date, since) as { total: number };
   return row.total;
 }
 
-function getCashRefundsToday(date: string): number {
+function getCashRefundsSince(date: string, since: string): number {
   const db = getDb();
   const row = db.query(`
     SELECT COALESCE(SUM(total), 0) as total
     FROM bills
-    WHERE bill_date = ? AND payment_method = 'cash' AND status = 'refunded'
-  `).get(date) as { total: number };
+    WHERE bill_date = ? AND payment_method = 'cash' AND status = 'refunded' AND refunded_at >= ?
+  `).get(date, since) as { total: number };
   return row.total;
 }
 
-function getCashExpensesToday(date: string): number {
+function getCashExpensesSince(date: string, since: string): number {
   const db = getDb();
   const row = db.query(`
     SELECT COALESCE(SUM(amount), 0) as total
     FROM expenses
-    WHERE expense_date = ? AND payment_source = 'cash' AND status = 'approved'
-  `).get(date) as { total: number };
+    WHERE expense_date = ? AND payment_source = 'cash' AND status = 'approved' AND created_at >= ?
+  `).get(date, since) as { total: number };
   return row.total;
 }
 
@@ -50,19 +73,19 @@ function getPendingExpenseCountToday(date: string): number {
 }
 
 cash.get("/today", (c) => {
-  const db = getDb();
   const date = todayDate();
-  const open = db.query(
-    "SELECT cc.*, u.full_name as user_name FROM cash_counts cc LEFT JOIN users u ON cc.user_id = u.id WHERE count_date = ? AND count_type = 'open' ORDER BY created_at DESC LIMIT 1"
-  ).get(date);
-  const close = db.query(
-    "SELECT cc.*, u.full_name as user_name FROM cash_counts cc LEFT JOIN users u ON cc.user_id = u.id WHERE count_date = ? AND count_type = 'close' ORDER BY created_at DESC LIMIT 1"
-  ).get(date);
-  const cash_sales = getCashSalesToday(date);
-  const cash_refunds = getCashRefundsToday(date);
-  const cash_expenses = getCashExpensesToday(date);
+  const open = getLatestOpen(date);
+  const close = getLatestClose(date);
+  const shift_open = isShiftOpen(date);
+
+  // Sales/refunds/expenses since the current shift started (or 00:00 today if none).
+  const since = shift_open ? open.created_at : (close?.created_at || `${date} 00:00:00`);
+  const cash_sales = getCashSalesSince(date, since);
+  const cash_refunds = getCashRefundsSince(date, since);
+  const cash_expenses = getCashExpensesSince(date, since);
   const pending_expenses = getPendingExpenseCountToday(date);
-  return c.json({ date, open, close, cash_sales, cash_refunds, cash_expenses, pending_expenses });
+
+  return c.json({ date, open, close, shift_open, cash_sales, cash_refunds, cash_expenses, pending_expenses });
 });
 
 cash.post("/open", async (c) => {
@@ -71,8 +94,7 @@ cash.post("/open", async (c) => {
   const db = getDb();
   const date = todayDate();
 
-  const existing = db.query("SELECT id FROM cash_counts WHERE count_date = ? AND count_type = 'open'").get(date);
-  if (existing) return c.json({ error: "Opening count already recorded today" }, 400);
+  if (isShiftOpen(date)) return c.json({ error: "A shift is already open. Close it before starting a new one." }, 400);
 
   const total = computeTotal(body);
   db.query(`
@@ -93,19 +115,19 @@ cash.post("/close", async (c) => {
   const db = getDb();
   const date = todayDate();
 
-  const existingClose = db.query("SELECT id FROM cash_counts WHERE count_date = ? AND count_type = 'close'").get(date);
-  if (existingClose) return c.json({ error: "Closing count already recorded today" }, 400);
+  if (!isShiftOpen(date)) return c.json({ error: "No open shift to close." }, 400);
 
   const pending = getPendingExpenseCountToday(date);
   if (pending > 0) {
     return c.json({ error: `${pending} expense${pending > 1 ? "s" : ""} pending approval. Admin must approve or reject before closing.` }, 400);
   }
 
-  const openRow = db.query("SELECT total_amount FROM cash_counts WHERE count_date = ? AND count_type = 'open'").get(date) as { total_amount: number } | null;
+  const openRow = getLatestOpen(date);
   const opening = openRow?.total_amount || 0;
-  const cashSales = getCashSalesToday(date);
-  const cashRefunds = getCashRefundsToday(date);
-  const cashExpenses = getCashExpensesToday(date);
+  const since = openRow.created_at;
+  const cashSales = getCashSalesSince(date, since);
+  const cashRefunds = getCashRefundsSince(date, since);
+  const cashExpenses = getCashExpensesSince(date, since);
   const expected = opening + cashSales - cashRefunds - cashExpenses;
   const counted = computeTotal(body);
   const variance = counted - expected;

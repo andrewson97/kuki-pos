@@ -99,11 +99,17 @@
       const formTitle = document.getElementById('form-title');
       const expectedBlock = document.getElementById('expected-block');
 
+      submitBtn.style.display = 'block';
+      document.querySelectorAll('.denom-input').forEach(i => { i.disabled = false; i.value = 0; });
+      document.getElementById('count-notes').disabled = false;
+      document.getElementById('count-notes').value = '';
+
       if (mode === 'open') {
-        formTitle.textContent = 'Opening Float';
-        submitBtn.textContent = 'Save Opening Float';
+        formTitle.textContent = todayData.close ? 'Open New Shift' : 'Opening Float';
+        submitBtn.textContent = todayData.close ? 'Open New Shift' : 'Save Opening Float';
         submitBtn.className = 'btn btn-primary w-100 mt-3';
         expectedBlock.style.display = 'none';
+        document.getElementById('pending-warning').style.display = 'none';
       } else if (mode === 'close') {
         formTitle.textContent = 'Closing Count';
         submitBtn.textContent = 'Save Closing Count';
@@ -116,20 +122,14 @@
         const expected = (todayData.open?.total_amount || 0) + (todayData.cash_sales || 0) - (todayData.cash_refunds || 0) - (todayData.cash_expenses || 0);
         document.getElementById('expected-amt').textContent = formatCurrency(expected);
         const pendWarn = document.getElementById('pending-warning');
-        const submitBtn = document.getElementById('submit-btn');
         if (todayData.pending_expenses > 0) {
-          pendWarn.textContent = `${todayData.pending_expenses} expense(s) pending admin approval. Day cannot be closed until they are approved or rejected.`;
+          pendWarn.textContent = `${todayData.pending_expenses} expense(s) pending admin approval. Shift cannot be closed until they are approved or rejected.`;
           pendWarn.style.display = 'block';
           submitBtn.disabled = true;
         } else {
           pendWarn.style.display = 'none';
           submitBtn.disabled = false;
         }
-      } else {
-        formTitle.textContent = 'Day Closed';
-        submitBtn.style.display = 'none';
-        document.querySelectorAll('.denom-input').forEach(i => i.disabled = true);
-        document.getElementById('count-notes').disabled = true;
       }
       recalc();
     }
@@ -139,9 +139,10 @@
       todayData = await api('/api/cash/today');
       renderTodayStatus();
 
-      if (!todayData.open) setMode('open');
-      else if (!todayData.close) setMode('close');
-      else setMode('done');
+      // shift_open: a shift is currently active and can be closed.
+      // !shift_open: either no open today, or last shift already closed → ready to open a new one.
+      if (todayData.shift_open) setMode('close');
+      else setMode('open');
 
       const history = await api('/api/cash/history?limit=30');
       document.getElementById('history-table').innerHTML = history.map(h => `
@@ -159,18 +160,17 @@
       const status = document.getElementById('today-status');
       if (!todayData.open) {
         status.innerHTML = `<div class="alert alert-info">No opening float recorded for today yet. Enter the cash count to start the day.</div>`;
-      } else if (!todayData.close) {
-        status.innerHTML = `<div class="alert alert-warning">Day in progress — opening float of <strong>${formatCurrency(todayData.open.total_amount)}</strong> recorded by ${todayData.open.user_name}. Count cash again at end of day to close.</div>`;
+      } else if (todayData.shift_open) {
+        status.innerHTML = `<div class="alert alert-warning">Shift in progress — opening float of <strong>${formatCurrency(todayData.open.total_amount)}</strong> recorded by ${todayData.open.user_name}. Count cash again to close this shift.</div>`;
       } else {
         const v = todayData.close.variance;
         const cls = v === 0 ? 'success' : (v > 0 ? 'warning' : 'danger');
         const word = v === 0 ? 'matched exactly' : (v > 0 ? 'over by' : 'short by');
-        status.innerHTML = `<div class="alert alert-${cls}">Day closed. Counted ${formatCurrency(todayData.close.total_amount)}, ${word} ${formatCurrency(Math.abs(v))}.</div>`;
+        status.innerHTML = `<div class="alert alert-${cls}">Last shift closed at ${new Date(todayData.close.created_at).toLocaleTimeString()} — counted ${formatCurrency(todayData.close.total_amount)}, ${word} ${formatCurrency(Math.abs(v))}. You can open a new shift below if needed.</div>`;
       }
     }
 
     async function submitCount() {
-      if (mode === 'done') return;
       const body = { notes: document.getElementById('count-notes').value };
       DENOMS.forEach(d => body[`notes_${d}`] = parseInt(document.getElementById(`notes_${d}`).value) || 0);
       try {

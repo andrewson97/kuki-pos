@@ -24,17 +24,24 @@ pos.post("/bill", async (c) => {
   const settings = getSettings();
   const tax_rate = body.tax_rate ?? parseFloat(settings.tax_rate || "0");
 
-  // Enforce cash shift state (opening/closing) when setting is enabled
+  // Enforce cash shift state when setting is enabled. A shift is "open" if the latest
+  // open record is more recent than the latest close record. Multiple shifts per day are
+  // supported (close one, open another).
   if (settings.enforce_cash_shift === "1") {
     const db = getDb();
     const today = todayDate();
-    const open = db.query("SELECT id FROM cash_counts WHERE count_date = ? AND count_type = 'open'").get(today);
-    const close = db.query("SELECT id FROM cash_counts WHERE count_date = ? AND count_type = 'close'").get(today);
-    if (!open) {
-      return c.json({ error: "Cash drawer not opened. Record opening float on the Cash Drawer page before taking sales." }, 400);
-    }
-    if (close) {
-      return c.json({ error: "Cash drawer is already closed for today. No more sales can be made until tomorrow." }, 400);
+    const latestOpen = db.query(
+      "SELECT created_at FROM cash_counts WHERE count_date = ? AND count_type = 'open' ORDER BY created_at DESC LIMIT 1"
+    ).get(today) as { created_at: string } | null;
+    const latestClose = db.query(
+      "SELECT created_at FROM cash_counts WHERE count_date = ? AND count_type = 'close' ORDER BY created_at DESC LIMIT 1"
+    ).get(today) as { created_at: string } | null;
+    const shiftOpen = latestOpen && (!latestClose || new Date(latestOpen.created_at) > new Date(latestClose.created_at));
+    if (!shiftOpen) {
+      const msg = !latestOpen
+        ? "Cash drawer not opened. Record opening float on the Cash Drawer page before taking sales."
+        : "The cash shift has been closed. Open a new shift on the Cash Drawer page to continue billing.";
+      return c.json({ error: msg }, 400);
     }
   }
 
