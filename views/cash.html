@@ -166,7 +166,7 @@
         const v = todayData.close.variance;
         const cls = v === 0 ? 'success' : (v > 0 ? 'warning' : 'danger');
         const word = v === 0 ? 'matched exactly' : (v > 0 ? 'over by' : 'short by');
-        status.innerHTML = `<div class="alert alert-${cls}">Last shift closed at ${new Date(todayData.close.created_at).toLocaleTimeString()} — counted ${formatCurrency(todayData.close.total_amount)}, ${word} ${formatCurrency(Math.abs(v))}. You can open a new shift below if needed.</div>`;
+        status.innerHTML = `<div class="alert alert-${cls}">Last shift closed at ${formatTime(todayData.close.created_at)} — counted ${formatCurrency(todayData.close.total_amount)}, ${word} ${formatCurrency(Math.abs(v))}. You can open a new shift below if needed.</div>`;
       }
     }
 

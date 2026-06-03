@@ -6,8 +6,19 @@ export function formatCurrency(amount: number, symbol: string = "₹"): string {
   return `${symbol}${amount.toFixed(2)}`;
 }
 
+const TZ = "Asia/Colombo";
+
+function parseDb(date: string): Date {
+  if (!date) return new Date(NaN);
+  if (date instanceof Date) return date;
+  // SQLite "YYYY-MM-DD HH:MM:SS" is UTC; ensure JS parses it as UTC.
+  if (/[zZ]|[+-]\d{2}:?\d{2}$/.test(date)) return new Date(date);
+  return new Date(date.replace(" ", "T") + "Z");
+}
+
 export function formatDate(date: string): string {
-  return new Date(date).toLocaleDateString("en-IN", {
+  return parseDb(date).toLocaleDateString("en-LK", {
+    timeZone: TZ,
     year: "numeric",
     month: "short",
     day: "numeric",
@@ -15,7 +26,8 @@ export function formatDate(date: string): string {
 }
 
 export function formatDateTime(date: string): string {
-  return new Date(date).toLocaleString("en-IN", {
+  return parseDb(date).toLocaleString("en-LK", {
+    timeZone: TZ,
     year: "numeric",
     month: "short",
     day: "numeric",
@@ -24,8 +36,9 @@ export function formatDateTime(date: string): string {
   });
 }
 
+// Today's date in Sri Lanka (YYYY-MM-DD).
 export function todayDate(): string {
-  return new Date().toISOString().split("T")[0];
+  return new Date().toLocaleDateString("en-CA", { timeZone: TZ });
 }
 
 export function nowISO(): string {

@@ -141,7 +141,7 @@
               <td>${b.customer_name || '-'}</td>
               <td>${formatCurrency(b.total)}</td>
               <td><span class="badge bg-info">${b.payment_method}</span></td>
-              <td>${new Date(b.created_at).toLocaleTimeString('en-IN', {hour:'2-digit',minute:'2-digit'})}</td>
+              <td>${formatTime(b.created_at)}</td>
             </tr>
           `).join('');
         }

@@ -40,13 +40,40 @@ function formatCurrency(amount) {
   return `${sym}${parseFloat(amount).toFixed(2)}`;
 }
 
+// SQLite's datetime('now') returns UTC without a timezone marker.
+// JavaScript's Date() parses "2026-06-03 14:23:45" as LOCAL time, which is wrong.
+// This helper turns DB timestamps into a Date that JS knows is UTC.
+function parseDbDate(d) {
+  if (!d) return null;
+  if (d instanceof Date) return d;
+  let s = String(d);
+  // Already has timezone info?
+  if (/[zZ]|[+-]\d{2}:?\d{2}$/.test(s)) return new Date(s);
+  // SQLite format "YYYY-MM-DD HH:MM:SS" — treat as UTC.
+  return new Date(s.replace(' ', 'T') + 'Z');
+}
+
+const TZ = 'Asia/Colombo';
+
 function formatDate(d) {
   if (!d) return '';
-  return new Date(d).toLocaleDateString('en-IN', { year: 'numeric', month: 'short', day: 'numeric' });
+  const dt = parseDbDate(d);
+  return dt.toLocaleDateString('en-LK', { timeZone: TZ, year: 'numeric', month: 'short', day: 'numeric' });
+}
+
+function formatTime(d) {
+  if (!d) return '';
+  return parseDbDate(d).toLocaleTimeString('en-LK', { timeZone: TZ, hour: '2-digit', minute: '2-digit' });
+}
+
+function formatDateTime(d) {
+  if (!d) return '';
+  return parseDbDate(d).toLocaleString('en-LK', { timeZone: TZ, year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 }
 
 function todayISO() {
-  return new Date().toISOString().split('T')[0];
+  // Today's date in Sri Lanka, not UTC.
+  return new Date().toLocaleDateString('en-CA', { timeZone: TZ }); // en-CA gives YYYY-MM-DD
 }
 
 async function loadUser() {

@@ -97,7 +97,7 @@
       document.getElementById('activity-log').innerHTML = log.map(l =>
         `<div class="py-1 border-bottom" style="font-size:0.85rem;">
           <strong>${l.user_name || 'System'}</strong> ${l.action.replace(/_/g, ' ')}
-          <div class="text-muted" style="font-size:0.75rem;">${new Date(l.created_at).toLocaleString('en-IN')}</div>
+          <div class="text-muted" style="font-size:0.75rem;">${formatDateTime(l.created_at)}</div>
         </div>`
       ).join('') || '<p class="text-muted">No activity yet</p>';
     }

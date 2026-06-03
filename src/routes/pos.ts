@@ -5,7 +5,7 @@ import { createBill, getNextTokenNumber } from "../services/billing";
 import { getSettings, buildReceiptText, buildKitchenTicket, printReceipt } from "../services/printer";
 import { restoreStockForBill } from "../services/stock";
 import { adminOnly } from "../middleware/auth";
-import { todayDate } from "../utils/helpers";
+import { todayDate, formatDateTime } from "../utils/helpers";
 
 const pos = new Hono();
 
@@ -70,7 +70,7 @@ pos.post("/bill", async (c) => {
     shopAddress: settings.shop_address || "",
     shopPhone: settings.shop_phone || "",
     tokenNumber: bill.token_number,
-    billDate: new Date().toLocaleString("en-IN"),
+    billDate: formatDateTime(new Date().toISOString()),
     items: billItems.map((i: any) => ({ name: i.product_name, qty: i.quantity, price: i.unit_price, total: i.total, original_price: i.original_price })),
     subtotal: fullBill.subtotal,
     discount: fullBill.discount,
@@ -188,7 +188,7 @@ pos.get("/bills/:id/receipt", async (c) => {
     shopAddress: settings.shop_address || "",
     shopPhone: settings.shop_phone || "",
     tokenNumber: bill.token_number,
-    billDate: new Date(bill.created_at).toLocaleString("en-IN"),
+    billDate: formatDateTime(bill.created_at),
     items: items.map((i: any) => ({ name: i.product_name, qty: i.quantity, price: i.unit_price, total: i.total, original_price: i.original_price })),
     subtotal: bill.subtotal,
     discount: bill.discount,

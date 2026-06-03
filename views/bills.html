@@ -69,7 +69,7 @@
         <tr>
           <td><strong>#${String(b.token_number).padStart(3,'0')}</strong></td>
           <td>${formatDate(b.bill_date)}</td>
-          <td>${b.created_at ? new Date(b.created_at).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) : '-'}</td>
+          <td>${formatTime(b.created_at)}</td>
           <td>${b.customer_name || '-'}</td>
           <td>-</td>
           <td class="fw-bold">${formatCurrency(b.total)}</td>
@@ -88,7 +88,7 @@
         <div class="row mb-3">
           <div class="col-md-6">
             <p><strong>Date:</strong> ${formatDate(bill.bill_date)}<br>
-            <strong>Time:</strong> ${bill.created_at ? new Date(bill.created_at).toLocaleString() : '-'}<br>
+            <strong>Time:</strong> ${formatDateTime(bill.created_at)}<br>
             <strong>Customer:</strong> ${bill.customer_name || 'Walk-in'}<br>
             <strong>Payment:</strong> ${bill.payment_method.toUpperCase()}<br>
             <strong>Cashier:</strong> ${bill.cashier_name}</p>
@@ -99,7 +99,7 @@
         </div>
         ${bill.status === 'refunded' ? `
           <div class="alert alert-warning py-2 mb-3">
-            <strong>Refunded</strong> by ${bill.refunded_by_name || '-'} on ${bill.refunded_at ? new Date(bill.refunded_at).toLocaleString() : '-'}<br>
+            <strong>Refunded</strong> by ${bill.refunded_by_name || '-'} on ${formatDateTime(bill.refunded_at) || '-'}<br>
             <strong>Reason:</strong> ${bill.refund_reason || '-'}
           </div>` : ''}
         <table class="table table-sm">
