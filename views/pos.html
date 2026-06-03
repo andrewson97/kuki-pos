@@ -17,6 +17,7 @@
       </div>
       <div id="top-bar-user"></div>
     </div>
+    <div id="shift-banner" style="display:none;"></div>
     <div class="pos-container" style="padding:15px;">
       <!-- Products panel -->
       <div style="overflow-y:auto;">
@@ -126,6 +127,8 @@
     let lastReceiptText = '';
     let lastKitchenText = '';
     let activeCategory = '';
+    let shiftBlocked = false;
+    let shiftBlockReason = '';
 
     initApp('/pos', loadPOS);
 
@@ -145,8 +148,44 @@
       renderCategoryTabs();
       renderProducts();
       setupCustomerSearch();
+      await checkShiftState();
 
       document.getElementById('product-search').addEventListener('input', renderProducts);
+    }
+
+    async function checkShiftState() {
+      const enforce = (appSettings.enforce_cash_shift ?? '1') === '1';
+      if (!enforce) { shiftBlocked = false; updateShiftUI(); return; }
+      try {
+        const data = await api('/api/cash/today');
+        if (!data.open) {
+          shiftBlocked = true;
+          shiftBlockReason = 'Cash drawer not opened today. <a href="/cash" class="alert-link">Open the drawer</a> before taking sales.';
+        } else if (data.close) {
+          shiftBlocked = true;
+          shiftBlockReason = 'Cash drawer is already closed for today. No more sales until tomorrow.';
+        } else {
+          shiftBlocked = false;
+        }
+      } catch {
+        shiftBlocked = false; // network error — let server enforce
+      }
+      updateShiftUI();
+    }
+
+    function updateShiftUI() {
+      const banner = document.getElementById('shift-banner');
+      const cashBtn = document.getElementById('pay-cash');
+      const cardBtn = document.getElementById('pay-card');
+      const upiBtn = document.getElementById('pay-upi');
+      if (shiftBlocked) {
+        banner.innerHTML = `<div class="alert alert-warning mb-0 rounded-0">&#9888;&#65039; ${shiftBlockReason}</div>`;
+        banner.style.display = 'block';
+        [cashBtn, cardBtn, upiBtn].forEach(b => { if (b) { b.disabled = true; b.style.opacity = '0.5'; b.style.cursor = 'not-allowed'; } });
+      } else {
+        banner.style.display = 'none';
+        [cashBtn, cardBtn, upiBtn].forEach(b => { if (b) { b.disabled = false; b.style.opacity = ''; b.style.cursor = ''; } });
+      }
     }
 
     function renderCategoryTabs() {
@@ -360,6 +399,7 @@
 
     function openCashModal() {
       if (cart.length === 0) { showToast('Cart is empty', 'warning'); return; }
+      if (shiftBlocked) { showToast(shiftBlockReason.replace(/<[^>]+>/g, ''), 'error'); return; }
       const total = getCartTotal();
       document.getElementById('cash-total').textContent = formatCurrency(total);
       const given = document.getElementById('cash-given');
@@ -406,6 +446,7 @@
 
     async function checkout(paymentMethod, amountGiven) {
       if (cart.length === 0) { showToast('Cart is empty', 'warning'); return; }
+      if (shiftBlocked) { showToast(shiftBlockReason.replace(/<[^>]+>/g, ''), 'error'); return; }
 
       const discount = parseFloat(document.getElementById('discount-input').value) || 0;
       const customerId = document.getElementById('customer-id').value || null;

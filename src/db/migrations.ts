@@ -217,6 +217,7 @@ export function seedDefaults(): void {
     currency_symbol: "₹",
     printer_type: "none",
     printer_address: "",
+    enforce_cash_shift: "1",
   };
   for (const [key, value] of Object.entries(defaults)) {
     db.query("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)").run(key, value);

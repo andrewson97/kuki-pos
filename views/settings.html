@@ -38,6 +38,15 @@
               </div>
               <div class="col-md-6"><label class="form-label">Printer Address/Port</label><input type="text" class="form-control" id="s-printer-address" placeholder="e.g., //localhost/printer or 192.168.1.100:9100"></div>
             </div>
+            <hr>
+            <h6 class="fw-bold mb-3">Cash Shift Discipline</h6>
+            <div class="form-check form-switch mb-3">
+              <input class="form-check-input" type="checkbox" role="switch" id="s-enforce-shift">
+              <label class="form-check-label" for="s-enforce-shift">
+                Require cash drawer to be opened (and not yet closed) before allowing sales
+                <div class="text-muted" style="font-size:0.85rem;">When on, cashiers can't take any payment until the day's opening float is recorded, and sales are blocked once the drawer is closed for the day.</div>
+              </label>
+            </div>
             <button class="btn btn-primary" onclick="saveSettings()">Save Settings</button>
           </div>
 
@@ -81,6 +90,7 @@
       document.getElementById('s-currency').value = s.currency_symbol || '\u20B9';
       document.getElementById('s-printer-type').value = s.printer_type || 'none';
       document.getElementById('s-printer-address').value = s.printer_address || '';
+      document.getElementById('s-enforce-shift').checked = (s.enforce_cash_shift ?? '1') === '1';
 
       // Load activity log
       const log = await api('/api/settings/activity-log?limit=50');
@@ -103,6 +113,7 @@
           currency_symbol: document.getElementById('s-currency').value,
           printer_type: document.getElementById('s-printer-type').value,
           printer_address: document.getElementById('s-printer-address').value,
+          enforce_cash_shift: document.getElementById('s-enforce-shift').checked ? '1' : '0',
         },
       });
       showToast('Settings saved!');

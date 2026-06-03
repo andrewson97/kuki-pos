@@ -5,6 +5,7 @@ import { createBill, getNextTokenNumber } from "../services/billing";
 import { getSettings, buildReceiptText, buildKitchenTicket, printReceipt } from "../services/printer";
 import { restoreStockForBill } from "../services/stock";
 import { adminOnly } from "../middleware/auth";
+import { todayDate } from "../utils/helpers";
 
 const pos = new Hono();
 
@@ -22,6 +23,20 @@ pos.post("/bill", async (c) => {
 
   const settings = getSettings();
   const tax_rate = body.tax_rate ?? parseFloat(settings.tax_rate || "0");
+
+  // Enforce cash shift state (opening/closing) when setting is enabled
+  if (settings.enforce_cash_shift === "1") {
+    const db = getDb();
+    const today = todayDate();
+    const open = db.query("SELECT id FROM cash_counts WHERE count_date = ? AND count_type = 'open'").get(today);
+    const close = db.query("SELECT id FROM cash_counts WHERE count_date = ? AND count_type = 'close'").get(today);
+    if (!open) {
+      return c.json({ error: "Cash drawer not opened. Record opening float on the Cash Drawer page before taking sales." }, 400);
+    }
+    if (close) {
+      return c.json({ error: "Cash drawer is already closed for today. No more sales can be made until tomorrow." }, 400);
+    }
+  }
 
   const bill = createBill({
     items: body.items,
