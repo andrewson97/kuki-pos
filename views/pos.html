@@ -492,40 +492,38 @@
       } catch {}
     }
 
-    function printReceiptText() {
-      const printWindow = window.open('', '_blank', 'width=350,height=700');
+    async function printReceiptText() {
+      const w = window.open('', '_blank', 'width=350,height=700');
       const logoUrl = window.location.origin + '/public/img/kuki_logo.png';
-      const slip = (text) => `
-        <div class="slip">
-          <img src="${logoUrl}" alt="KUKI">
-          <pre>${text}</pre>
-        </div>`;
-      printWindow.document.write(`
+      w.document.write(`
         <html><head><title></title><style>
           @page { size: 58mm auto; margin: 0; }
-          html, body { margin: 0; padding: 0; width: 58mm; }
-          body { font-family: monospace; }
+          html, body { margin: 0; padding: 0; width: 58mm; font-family: monospace; }
           .slip { padding: 3mm 2mm; width: 58mm; box-sizing: border-box; text-align: center; }
           .slip img { display: block; margin: 0 auto 3px; max-width: 40mm; max-height: 20mm; }
           .slip pre { font-family: monospace; font-size: 10px; margin: 0; white-space: pre-wrap; text-align: left; }
-          .slip + .slip { page-break-before: always; }
-          @media screen { body { background:#eee; } .slip { background:#fff; margin: 8px auto; box-shadow: 0 0 4px rgba(0,0,0,.2); } }
-        </style></head><body>
-          ${lastKitchenText ? slip(lastKitchenText) : ''}
-          ${slip(lastReceiptText)}
-          <script>
-            window.addEventListener('load', () => {
-              const imgs = Array.from(document.images);
-              Promise.all(imgs.map(img => img.complete ? null : new Promise(r => { img.onload = img.onerror = r; })))
-                .then(() => {
-                  window.addEventListener('afterprint', () => setTimeout(() => window.close(), 200));
-                  window.print();
-                });
-            });
-          <\/script>
-        </body></html>
+        </style></head><body></body></html>
       `);
-      printWindow.document.close();
+      w.document.close();
+      const slip = (text) => `<div class="slip"><img src="${logoUrl}" alt="KUKI"><pre>${text}</pre></div>`;
+
+      async function printOne(html) {
+        w.document.body.innerHTML = html;
+        const imgs = Array.from(w.document.images);
+        await Promise.all(imgs.map(img => img.complete ? null : new Promise(r => { img.onload = img.onerror = r; })));
+        await new Promise(resolve => {
+          const handler = () => { w.removeEventListener('afterprint', handler); resolve(); };
+          w.addEventListener('afterprint', handler);
+          w.print();
+        });
+      }
+
+      try {
+        if (lastKitchenText) await printOne(slip(lastKitchenText));
+        await printOne(slip(lastReceiptText));
+      } finally {
+        setTimeout(() => { try { w.close(); } catch {} }, 200);
+      }
     }
 
     // Keyboard shortcuts
