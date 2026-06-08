@@ -109,8 +109,9 @@
           </div>
           <div class="receipt-preview" id="receipt-text"></div>
         </div>
-        <div class="modal-footer">
-          <button class="btn btn-outline-secondary" onclick="printReceiptText()">Print Receipt</button>
+        <div class="modal-footer flex-wrap gap-2">
+          <button class="btn btn-outline-warning" onclick="printSlip('kitchen')">Print Kitchen Copy</button>
+          <button class="btn btn-outline-secondary" onclick="printSlip('customer')">Print Customer Copy</button>
           <button class="btn btn-primary" data-bs-dismiss="modal">Done</button>
         </div>
       </div>
@@ -492,7 +493,13 @@
       } catch {}
     }
 
-    async function printReceiptText() {
+    async function printSlip(which) {
+      const text = which === 'kitchen' ? lastKitchenText : lastReceiptText;
+      if (!text) { showToast(`No ${which} copy available`, 'warning'); return; }
+      await openAndPrint(text);
+    }
+
+    async function openAndPrint(text) {
       const w = window.open('', '_blank', 'width=350,height=700');
       const logoUrl = window.location.origin + '/public/img/kuki_logo.png';
       w.document.write(`
@@ -502,28 +509,15 @@
           .slip { padding: 3mm 2mm; width: 58mm; box-sizing: border-box; text-align: center; }
           .slip img { display: block; margin: 0 auto 3px; max-width: 40mm; max-height: 20mm; }
           .slip pre { font-family: monospace; font-size: 10px; margin: 0; white-space: pre-wrap; text-align: left; }
-        </style></head><body></body></html>
+        </style></head><body>
+          <div class="slip"><img src="${logoUrl}" alt="KUKI"><pre>${text}</pre></div>
+        </body></html>
       `);
       w.document.close();
-      const slip = (text) => `<div class="slip"><img src="${logoUrl}" alt="KUKI"><pre>${text}</pre></div>`;
-
-      async function printOne(html) {
-        w.document.body.innerHTML = html;
-        const imgs = Array.from(w.document.images);
-        await Promise.all(imgs.map(img => img.complete ? null : new Promise(r => { img.onload = img.onerror = r; })));
-        await new Promise(resolve => {
-          const handler = () => { w.removeEventListener('afterprint', handler); resolve(); };
-          w.addEventListener('afterprint', handler);
-          w.print();
-        });
-      }
-
-      try {
-        if (lastKitchenText) await printOne(slip(lastKitchenText));
-        await printOne(slip(lastReceiptText));
-      } finally {
-        setTimeout(() => { try { w.close(); } catch {} }, 200);
-      }
+      const imgs = Array.from(w.document.images);
+      await Promise.all(imgs.map(img => img.complete ? null : new Promise(r => { img.onload = img.onerror = r; })));
+      w.addEventListener('afterprint', () => setTimeout(() => { try { w.close(); } catch {} }, 200));
+      w.print();
     }
 
     // Keyboard shortcuts

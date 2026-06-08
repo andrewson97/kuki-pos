@@ -41,7 +41,8 @@
         </div>
         <div class="modal-body" id="bill-detail-body"></div>
         <div class="modal-footer">
-          <button class="btn btn-outline-secondary" id="btn-reprint">Reprint Receipt</button>
+          <button class="btn btn-outline-warning" id="btn-print-kitchen">Print Kitchen Copy</button>
+          <button class="btn btn-outline-secondary" id="btn-print-customer">Print Customer Copy</button>
           <button class="btn btn-danger d-none" id="btn-refund-bill">Refund Bill</button>
           <button class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
         </div>
@@ -138,8 +139,8 @@
         refundBtn.classList.add('d-none');
       }
 
-      document.getElementById('btn-reprint').onclick = async () => {
-        const res = await api(`/api/pos/bills/${id}/receipt`);
+      const printOneSlip = async (text) => {
+        if (!text) { showToast('Nothing to print', 'warning'); return; }
         const w = window.open('', '_blank', 'width=350,height=700');
         const logoUrl = window.location.origin + '/public/img/kuki_logo.png';
         w.document.write(`
@@ -149,28 +150,24 @@
             .slip { padding: 3mm 2mm; width: 58mm; box-sizing: border-box; text-align: center; }
             .slip img { display: block; margin: 0 auto 3px; max-width: 40mm; max-height: 20mm; }
             .slip pre { font-family: monospace; font-size: 10px; margin: 0; white-space: pre-wrap; text-align: left; }
-          </style></head><body></body></html>
+          </style></head><body>
+            <div class="slip"><img src="${logoUrl}" alt="KUKI"><pre>${text}</pre></div>
+          </body></html>
         `);
         w.document.close();
-        const slip = (text) => `<div class="slip"><img src="${logoUrl}" alt="KUKI"><pre>${text}</pre></div>`;
+        const imgs = Array.from(w.document.images);
+        await Promise.all(imgs.map(img => img.complete ? null : new Promise(r => { img.onload = img.onerror = r; })));
+        w.addEventListener('afterprint', () => setTimeout(() => { try { w.close(); } catch {} }, 200));
+        w.print();
+      };
 
-        async function printOne(html) {
-          w.document.body.innerHTML = html;
-          const imgs = Array.from(w.document.images);
-          await Promise.all(imgs.map(img => img.complete ? null : new Promise(r => { img.onload = img.onerror = r; })));
-          await new Promise(resolve => {
-            const handler = () => { w.removeEventListener('afterprint', handler); resolve(); };
-            w.addEventListener('afterprint', handler);
-            w.print();
-          });
-        }
-
-        try {
-          if (res.kitchen_text) await printOne(slip(res.kitchen_text));
-          await printOne(slip(res.text));
-        } finally {
-          setTimeout(() => { try { w.close(); } catch {} }, 200);
-        }
+      document.getElementById('btn-print-kitchen').onclick = async () => {
+        const res = await api(`/api/pos/bills/${id}/receipt`);
+        await printOneSlip(res.kitchen_text);
+      };
+      document.getElementById('btn-print-customer').onclick = async () => {
+        const res = await api(`/api/pos/bills/${id}/receipt`);
+        await printOneSlip(res.text);
       };
 
       new bootstrap.Modal(document.getElementById('billDetailModal')).show();
