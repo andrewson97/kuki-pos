@@ -38,10 +38,10 @@ export function buildReceiptText(data: PrintReceiptData): string {
     return " ".repeat(pad) + text;
   };
 
-  lines.push(center(data.shopName));
+  // Shop name is shown via the logo image above the text, so don't repeat it here.
   if (data.shopAddress) lines.push(center(data.shopAddress));
   if (data.shopPhone) lines.push(center(`Tel: ${data.shopPhone}`));
-  lines.push("-".repeat(w));
+  if (data.shopAddress || data.shopPhone) lines.push("-".repeat(w));
   lines.push(`Token: #${String(data.tokenNumber).padStart(3, "0")}`);
   lines.push(`Date: ${data.billDate}`);
   if (data.customerName) lines.push(`Customer: ${data.customerName}`);
@@ -97,7 +97,6 @@ export function buildKitchenTicket(data: PrintReceiptData): string {
     return " ".repeat(pad) + text;
   };
 
-  lines.push(center(data.shopName));
   lines.push(center("*** KITCHEN COPY ***"));
   lines.push("=".repeat(w));
   lines.push(`Token: #${String(data.tokenNumber).padStart(3, "0")}`);
