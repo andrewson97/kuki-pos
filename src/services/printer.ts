@@ -31,7 +31,7 @@ export function getSettings(): Record<string, string> {
 
 export function buildReceiptText(data: PrintReceiptData): string {
   const lines: string[] = [];
-  const w = 32; // 58mm printer ~ 32 chars
+  const w = 28; // 57mm printer ~ 28 chars at 13px monospace
 
   const center = (text: string) => {
     const pad = Math.max(0, Math.floor((w - text.length) / 2));
@@ -47,40 +47,37 @@ export function buildReceiptText(data: PrintReceiptData): string {
   if (data.customerName) lines.push(`Customer: ${data.customerName}`);
   lines.push("-".repeat(w));
 
-  // Header
-  lines.push("Item              Qty   Amount");
+  // Header — columns sum to w=28: name(14)+sp+qty(3)+sp+amt(9)
+  lines.push(`${"Item".padEnd(14)} ${"Qty".padStart(3)} ${"Amount".padStart(9)}`);
   lines.push("-".repeat(w));
 
   let totalSavings = 0;
   for (const item of data.items) {
-    const name = item.name.length > 16 ? item.name.substring(0, 16) : item.name.padEnd(16);
+    const name = item.name.length > 14 ? item.name.substring(0, 14) : item.name.padEnd(14);
     const qty = String(item.qty).padStart(3);
     const amt = item.total.toFixed(2).padStart(9);
-    lines.push(`${name}  ${qty}  ${amt}`);
+    lines.push(`${name} ${qty} ${amt}`);
     if (item.original_price && item.original_price > item.price) {
       const saved = (item.original_price - item.price) * item.qty;
       totalSavings += saved;
-      lines.push(`  was @${item.original_price.toFixed(2)}, saved ${saved.toFixed(2)}`);
+      lines.push(`  was@${item.original_price.toFixed(2)} save ${saved.toFixed(2)}`);
     }
   }
 
+  // Totals — left label padEnd(17) + space + value padStart(10) = 28
   lines.push("-".repeat(w));
-  if (totalSavings > 0) {
-    lines.push(`${"Item Savings".padEnd(20)} -${totalSavings.toFixed(2).padStart(9)}`);
-  }
-  lines.push(`${"Subtotal".padEnd(20)} ${data.subtotal.toFixed(2).padStart(10)}`);
-  if (data.discount > 0) {
-    lines.push(`${"Discount".padEnd(20)} -${data.discount.toFixed(2).padStart(9)}`);
-  }
-  if (data.taxAmount > 0) {
-    lines.push(`${`Tax (${data.taxRate}%)`.padEnd(20)} ${data.taxAmount.toFixed(2).padStart(10)}`);
-  }
+  const totalLine = (label: string, value: number, neg = false) =>
+    `${label.padEnd(17)} ${(neg ? "-" : "") + value.toFixed(2)}`.padEnd(28);
+  if (totalSavings > 0) lines.push(totalLine("Item Savings", totalSavings, true));
+  lines.push(totalLine("Subtotal", data.subtotal));
+  if (data.discount > 0) lines.push(totalLine("Discount", data.discount, true));
+  if (data.taxAmount > 0) lines.push(totalLine(`Tax (${data.taxRate}%)`, data.taxAmount));
   lines.push("=".repeat(w));
-  lines.push(`${"TOTAL".padEnd(20)} ${data.total.toFixed(2).padStart(10)}`);
-  lines.push(`${"Payment".padEnd(20)} ${data.paymentMethod.toUpperCase().padStart(10)}`);
+  lines.push(totalLine("TOTAL", data.total));
+  lines.push(`${"Payment".padEnd(17)} ${data.paymentMethod.toUpperCase().padStart(10)}`);
   if (data.amountGiven != null) {
-    lines.push(`${"Cash Given".padEnd(20)} ${data.amountGiven.toFixed(2).padStart(10)}`);
-    lines.push(`${"Change".padEnd(20)} ${(data.changeGiven ?? 0).toFixed(2).padStart(10)}`);
+    lines.push(totalLine("Cash Given", data.amountGiven));
+    lines.push(totalLine("Change", data.changeGiven ?? 0));
   }
   lines.push("=".repeat(w));
   lines.push("");
@@ -94,7 +91,7 @@ export function buildReceiptText(data: PrintReceiptData): string {
 
 export function buildKitchenTicket(data: PrintReceiptData): string {
   const lines: string[] = [];
-  const w = 32;
+  const w = 28;
   const center = (text: string) => {
     const pad = Math.max(0, Math.floor((w - text.length) / 2));
     return " ".repeat(pad) + text;
@@ -110,8 +107,8 @@ export function buildKitchenTicket(data: PrintReceiptData): string {
   lines.push("Qty  Item");
   lines.push("-".repeat(w));
   for (const item of data.items) {
-    const qty = String(item.qty).padEnd(4);
-    const name = item.name.length > 27 ? item.name.substring(0, 27) : item.name;
+    const qty = String(item.qty).padEnd(3);
+    const name = item.name.length > 24 ? item.name.substring(0, 24) : item.name;
     lines.push(`${qty} ${name}`);
   }
   lines.push("=".repeat(w));

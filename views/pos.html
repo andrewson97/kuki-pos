@@ -504,11 +504,11 @@
       const logoUrl = window.location.origin + '/public/img/kuki_logo.png';
       w.document.write(`
         <html><head><title></title><style>
-          @page { size: 58mm auto; margin: 0; }
-          html, body { margin: 0; padding: 0; width: 58mm; font-family: monospace; }
-          .slip { padding: 3mm 2mm; width: 58mm; box-sizing: border-box; text-align: center; }
-          .slip img { display: block; margin: 0 auto 3px; max-width: 40mm; max-height: 20mm; }
-          .slip pre { font-family: monospace; font-size: 10px; margin: 0; white-space: pre-wrap; text-align: left; }
+          @page { size: 57mm auto; margin: 0; }
+          html, body { margin: 0; padding: 0; width: 57mm; font-family: 'Consolas', 'Courier New', monospace; }
+          .slip { padding: 2mm 0; width: 57mm; box-sizing: border-box; text-align: center; }
+          .slip img { display: block; margin: 0 auto 4px; max-width: 45mm; max-height: 22mm; }
+          .slip pre { font-family: inherit; font-size: 13px; font-weight: 600; line-height: 1.15; margin: 0; padding: 0 1mm; white-space: pre-wrap; text-align: left; }
         </style></head><body>
           <div class="slip"><img src="${logoUrl}" alt="KUKI"><pre>${text}</pre></div>
         </body></html>
