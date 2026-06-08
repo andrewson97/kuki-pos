@@ -149,12 +149,12 @@
           </div>`;
         win.document.write(`
           <html><head><title></title><style>
-            @page { size: 80mm auto; margin: 0; }
-            html, body { margin: 0; padding: 0; width: 80mm; }
+            @page { size: 58mm auto; margin: 0; }
+            html, body { margin: 0; padding: 0; width: 58mm; }
             body { font-family: monospace; }
-            .slip { padding: 4mm 3mm; width: 80mm; box-sizing: border-box; text-align: center; }
-            .slip img { display: block; margin: 0 auto 4px; max-width: 50mm; max-height: 25mm; }
-            .slip pre { font-family: monospace; font-size: 11px; margin: 0; white-space: pre-wrap; text-align: left; }
+            .slip { padding: 3mm 2mm; width: 58mm; box-sizing: border-box; text-align: center; }
+            .slip img { display: block; margin: 0 auto 3px; max-width: 40mm; max-height: 20mm; }
+            .slip pre { font-family: monospace; font-size: 10px; margin: 0; white-space: pre-wrap; text-align: left; }
             .slip + .slip { page-break-before: always; }
             @media screen { body { background:#eee; } .slip { background:#fff; margin: 8px auto; box-shadow: 0 0 4px rgba(0,0,0,.2); } }
           </style></head><body>
@@ -164,7 +164,7 @@
               window.addEventListener('load', () => {
                 const imgs = Array.from(document.images);
                 Promise.all(imgs.map(img => img.complete ? null : new Promise(r => { img.onload = img.onerror = r; })))
-                  .then(() => window.print());
+                  .then(() => { window.print(); setTimeout(() => window.close(), 500); });
               });
             <\/script>
           </body></html>
