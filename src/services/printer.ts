@@ -53,10 +53,18 @@ export function buildReceiptText(data: PrintReceiptData): string {
 
   let totalSavings = 0;
   for (const item of data.items) {
-    const name = item.name.length > 14 ? item.name.substring(0, 14) : item.name.padEnd(14);
     const qty = String(item.qty).padStart(3);
     const amt = item.total.toFixed(2).padStart(9);
-    lines.push(`${name} ${qty} ${amt}`);
+    if (item.name.length <= 14) {
+      // Fits on one line with qty/amt to the right.
+      lines.push(`${item.name.padEnd(14)} ${qty} ${amt}`);
+    } else {
+      // Print full name (wrapping at 28 chars), then qty/amt right-aligned on next line.
+      for (let i = 0; i < item.name.length; i += w) {
+        lines.push(item.name.substring(i, i + w));
+      }
+      lines.push(`${" ".repeat(14)} ${qty} ${amt}`);
+    }
     if (item.original_price && item.original_price > item.price) {
       const saved = (item.original_price - item.price) * item.qty;
       totalSavings += saved;
@@ -107,8 +115,17 @@ export function buildKitchenTicket(data: PrintReceiptData): string {
   lines.push("-".repeat(w));
   for (const item of data.items) {
     const qty = String(item.qty).padEnd(3);
-    const name = item.name.length > 24 ? item.name.substring(0, 24) : item.name;
-    lines.push(`${qty} ${name}`);
+    const indent = " ".repeat(4); // qty(3) + space
+    const nameWidth = w - 4;
+    if (item.name.length <= nameWidth) {
+      lines.push(`${qty} ${item.name}`);
+    } else {
+      // First line includes qty, subsequent lines indented under name column.
+      lines.push(`${qty} ${item.name.substring(0, nameWidth)}`);
+      for (let i = nameWidth; i < item.name.length; i += nameWidth) {
+        lines.push(`${indent}${item.name.substring(i, i + nameWidth)}`);
+      }
+    }
   }
   lines.push("=".repeat(w));
   lines.push("");
