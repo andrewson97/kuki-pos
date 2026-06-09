@@ -91,8 +91,6 @@ export function buildReceiptText(data: PrintReceiptData): string {
   lines.push("");
   lines.push(center("Thank you! Visit again!"));
   lines.push(center("+94 76 565 2881"));
-  lines.push("");
-  lines.push(`Cashier: ${data.cashierName}`);
 
   return lines.join("\n");
 }
