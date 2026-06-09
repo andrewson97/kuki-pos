@@ -89,8 +89,8 @@ export function buildReceiptText(data: PrintReceiptData): string {
   }
   lines.push("=".repeat(w));
   lines.push("");
-  lines.push(center("Thank you!"));
-  lines.push(center("Visit again!"));
+  lines.push(center("Thank you! Visit again!"));
+  lines.push(center("+94 76 565 2881"));
   lines.push("");
   lines.push(`Cashier: ${data.cashierName}`);
 
