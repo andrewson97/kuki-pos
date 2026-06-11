@@ -36,10 +36,14 @@ function isShiftOpen(date: string): boolean {
 
 function getCashSalesSince(date: string, since: string): number {
   const db = getDb();
+  // Count cash received at the point of sale, regardless of later status.
+  // Refunds are subtracted separately via getCashRefundsSince — counting cash
+  // received here only by status='completed' double-counts the refund and shows
+  // a phantom surplus in the closing variance.
   const row = db.query(`
     SELECT COALESCE(SUM(total), 0) as total
     FROM bills
-    WHERE bill_date = ? AND payment_method = 'cash' AND status = 'completed' AND created_at >= ?
+    WHERE bill_date = ? AND payment_method = 'cash' AND status IN ('completed', 'refunded') AND created_at >= ?
   `).get(date, since) as { total: number };
   return row.total;
 }
