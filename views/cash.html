@@ -160,8 +160,10 @@
       const status = document.getElementById('today-status');
       if (!todayData.open) {
         status.innerHTML = `<div class="alert alert-info">No opening float recorded for today yet. Enter the cash count to start the day.</div>`;
+      } else if (todayData.shift_from_prior_day) {
+        status.innerHTML = `<div class="alert alert-danger"><strong>&#9888;&#65039; Shift from ${formatDate(todayData.open.count_date)} still open.</strong> The shift opened by ${todayData.open.user_name} on ${formatDate(todayData.open.count_date)} at ${formatTime(todayData.open.created_at)} was never closed. Count the drawer now and close it below before taking any new sales today.</div>`;
       } else if (todayData.shift_open) {
-        status.innerHTML = `<div class="alert alert-warning">Shift in progress — opening float of <strong>${formatCurrency(todayData.open.total_amount)}</strong> recorded by ${todayData.open.user_name}. Count cash again to close this shift.</div>`;
+        status.innerHTML = `<div class="alert alert-warning">Shift in progress — opening float of <strong>${formatCurrency(todayData.open.total_amount)}</strong> recorded by ${todayData.open.user_name} at ${formatTime(todayData.open.created_at)}. Count cash again to close this shift.</div>`;
       } else {
         const v = todayData.close.variance;
         const cls = v === 0 ? 'success' : (v > 0 ? 'warning' : 'danger');

@@ -159,7 +159,10 @@
       if (!enforce) { shiftBlocked = false; updateShiftUI(); return; }
       try {
         const data = await api('/api/cash/today');
-        if (!data.shift_open) {
+        if (data.shift_from_prior_day) {
+          shiftBlocked = true;
+          shiftBlockReason = `A shift from ${data.open.count_date} is still open. <a href="/cash" class="alert-link">Close it</a> before taking new sales today.`;
+        } else if (!data.shift_open) {
           shiftBlocked = true;
           shiftBlockReason = data.open
             ? 'Cash shift is closed. <a href="/cash" class="alert-link">Open a new shift</a> to continue billing.'
