@@ -54,6 +54,8 @@ function parseDbDate(d) {
 }
 
 const TZ = 'Asia/Colombo';
+// Business day starts at 5 AM Asia/Colombo. Anything before 5 AM is the prior day.
+const BUSINESS_DAY_START_HOUR = 5;
 
 function formatDate(d) {
   if (!d) return '';
@@ -72,8 +74,9 @@ function formatDateTime(d) {
 }
 
 function todayISO() {
-  // Today's date in Sri Lanka, not UTC.
-  return new Date().toLocaleDateString('en-CA', { timeZone: TZ }); // en-CA gives YYYY-MM-DD
+  // Today's BUSINESS date in Sri Lanka — rolls over at 5 AM, not midnight.
+  const adjusted = new Date(Date.now() - BUSINESS_DAY_START_HOUR * 60 * 60 * 1000);
+  return adjusted.toLocaleDateString('en-CA', { timeZone: TZ });
 }
 
 async function loadUser() {

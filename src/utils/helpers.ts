@@ -8,6 +8,10 @@ export function formatCurrency(amount: number, symbol: string = "₹"): string {
 
 const TZ = "Asia/Colombo";
 
+// Business day starts at 5 AM Asia/Colombo. Anything between 00:00 and 04:59
+// counts as the previous day (covers shifts that run past midnight).
+const BUSINESS_DAY_START_HOUR = 5;
+
 function parseDb(date: string): Date {
   if (!date) return new Date(NaN);
   if (date instanceof Date) return date;
@@ -36,9 +40,11 @@ export function formatDateTime(date: string): string {
   });
 }
 
-// Today's date in Sri Lanka (YYYY-MM-DD).
+// Today's BUSINESS date in Sri Lanka (YYYY-MM-DD). Shifts the wall clock
+// back by BUSINESS_DAY_START_HOUR so the day rolls over at 5 AM not midnight.
 export function todayDate(): string {
-  return new Date().toLocaleDateString("en-CA", { timeZone: TZ });
+  const adjusted = new Date(Date.now() - BUSINESS_DAY_START_HOUR * 60 * 60 * 1000);
+  return adjusted.toLocaleDateString("en-CA", { timeZone: TZ });
 }
 
 export function nowISO(): string {
