@@ -35,13 +35,24 @@
     .task-meta { font-size: 0.78rem; color: #16a34a; margin-top: 4px; font-weight: 500; }
     .task-admin { display: flex; gap: 4px; flex-shrink: 0; }
     .progress-summary {
-      background: linear-gradient(135deg, #e83e8c 0%, #d63384 100%);
-      color: white; padding: 16px 20px; border-radius: 10px;
-      margin-bottom: 18px;
+      color: white; padding: 14px 18px; border-radius: 10px;
+      margin-bottom: 14px;
       display: flex; align-items: center; justify-content: space-between;
     }
-    .progress-summary h6 { margin: 0; font-size: 0.85rem; opacity: 0.9; }
-    .progress-summary .big { font-size: 1.8rem; font-weight: 700; }
+    .progress-summary.opening { background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%); }
+    .progress-summary.closing { background: linear-gradient(135deg, #6366f1 0%, #4f46e5 100%); }
+    .progress-summary h6 { margin: 0; font-size: 0.8rem; opacity: 0.9; text-transform: uppercase; letter-spacing: 0.1em; }
+    .progress-summary .big { font-size: 1.5rem; font-weight: 700; }
+    .section-block { margin-bottom: 28px; }
+    .cat-tag {
+      display: inline-block;
+      font-size: 0.7rem;
+      padding: 2px 8px; border-radius: 999px;
+      text-transform: uppercase; letter-spacing: 0.08em;
+      font-weight: 600;
+    }
+    .cat-tag.opening { background: #fef3c7; color: #92400e; }
+    .cat-tag.closing { background: #e0e7ff; color: #3730a3; }
   </style>
 </head>
 <body>
@@ -54,8 +65,7 @@
     <div class="content-area">
       <div class="row">
         <div class="col-lg-8">
-          <div id="progress-summary"></div>
-          <div id="tasks-list"></div>
+          <div id="tasks-container"></div>
         </div>
         <div class="col-lg-4">
           <div class="table-container p-3" id="admin-panel" style="display:none;">
@@ -80,6 +90,13 @@
         </div>
         <div class="modal-body">
           <input type="hidden" id="task-id">
+          <div class="mb-3">
+            <label class="form-label">List</label>
+            <select class="form-select" id="task-category">
+              <option value="opening">🌅 Opening — start of shift</option>
+              <option value="closing">🌙 Closing — end of shift</option>
+            </select>
+          </div>
           <div class="mb-3">
             <label class="form-label">Title</label>
             <input type="text" class="form-control" id="task-title" placeholder="e.g., Clean coffee machine">
@@ -127,24 +144,24 @@
     }
 
     function renderTasks(tasks) {
+      const container = document.getElementById('tasks-container');
+      if (tasks.length === 0) {
+        container.innerHTML = `<div class="alert alert-info">No daily tasks set up yet${currentUser.role === 'admin' ? '. Add some using the panel on the right.' : '. Ask the admin to add tasks.'}</div>`;
+        return;
+      }
+      const opening = tasks.filter(t => (t.category || 'opening') === 'opening');
+      const closing = tasks.filter(t => t.category === 'closing');
+      container.innerHTML =
+        renderSection('🌅 Opening Tasks', 'opening', opening) +
+        renderSection('🌙 Closing Tasks', 'closing', closing);
+    }
+
+    function renderSection(title, cls, tasks) {
+      if (tasks.length === 0) return '';
       const done = tasks.filter(t => t.completion_id != null).length;
       const total = tasks.length;
       const pct = total > 0 ? Math.round((done / total) * 100) : 0;
-
-      document.getElementById('progress-summary').innerHTML = total === 0
-        ? `<div class="alert alert-info mb-3">No daily tasks set up yet${currentUser.role === 'admin' ? '. Add some using the panel on the right.' : '. Ask the admin to add tasks.'}</div>`
-        : `<div class="progress-summary">
-            <div>
-              <h6>Today's progress</h6>
-              <div class="big">${done} / ${total}</div>
-            </div>
-            <div style="text-align:right">
-              <h6>Complete</h6>
-              <div class="big">${pct}%</div>
-            </div>
-          </div>`;
-
-      document.getElementById('tasks-list').innerHTML = tasks.map(t => {
+      const items = tasks.map(t => {
         const isDone = t.completion_id != null;
         return `
           <div class="task-card ${isDone ? 'done' : ''}" data-id="${t.id}">
@@ -158,21 +175,31 @@
             </div>
           </div>`;
       }).join('');
+      return `<div class="section-block">
+        <div class="progress-summary ${cls}">
+          <div><h6>${title}</h6><div class="big">${done} / ${total}</div></div>
+          <div style="text-align:right"><h6>Complete</h6><div class="big">${pct}%</div></div>
+        </div>
+        ${items}
+      </div>`;
     }
 
     function renderAdminTasks() {
-      document.getElementById('all-tasks-list').innerHTML = allTasksCache.map(t => `
+      document.getElementById('all-tasks-list').innerHTML = allTasksCache.map(t => {
+        const cat = t.category || 'opening';
+        return `
         <div class="d-flex justify-content-between align-items-center py-2 border-bottom">
           <div>
             <div class="fw-semibold ${t.is_active ? '' : 'text-muted'}" style="font-size:0.9rem;">${escapeHtml(t.title)}</div>
-            <small class="text-muted">${t.is_active ? 'Active' : 'Inactive'}</small>
+            <span class="cat-tag ${cat}">${cat}</span>
+            <small class="text-muted ms-1">${t.is_active ? '' : '· Inactive'}</small>
           </div>
           <div>
             <button class="btn btn-sm btn-outline-secondary" onclick="editTask(${t.id})">Edit</button>
             <button class="btn btn-sm btn-outline-danger" onclick="deleteTask(${t.id})">&times;</button>
           </div>
-        </div>
-      `).join('') || '<p class="text-muted small mb-0">No tasks yet</p>';
+        </div>`;
+      }).join('') || '<p class="text-muted small mb-0">No tasks yet</p>';
     }
 
     async function toggleTask(id, isDone) {
@@ -196,6 +223,7 @@
       document.getElementById('task-desc').value = '';
       document.getElementById('task-order').value = allTasksCache.length;
       document.getElementById('task-active').checked = true;
+      document.getElementById('task-category').value = 'opening';
       new bootstrap.Modal(document.getElementById('taskModal')).show();
     }
 
@@ -207,6 +235,7 @@
       document.getElementById('task-desc').value = t.description || '';
       document.getElementById('task-order').value = t.display_order || 0;
       document.getElementById('task-active').checked = !!t.is_active;
+      document.getElementById('task-category').value = t.category || 'opening';
       new bootstrap.Modal(document.getElementById('taskModal')).show();
     }
 
@@ -219,6 +248,7 @@
         description: document.getElementById('task-desc').value.trim(),
         display_order: parseInt(document.getElementById('task-order').value) || 0,
         is_active: document.getElementById('task-active').checked,
+        category: document.getElementById('task-category').value,
       };
       try {
         if (id) {

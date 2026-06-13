@@ -201,6 +201,7 @@ export function runMigrations(): void {
   addColumn("expenses", "approved_by_user_id", "INTEGER");
   addColumn("expenses", "approved_at", "TEXT");
   addColumn("expenses", "rejected_reason", "TEXT");
+  addColumn("daily_tasks", "category", "TEXT NOT NULL DEFAULT 'opening'");
 }
 
 export function seedDefaults(): void {
