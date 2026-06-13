@@ -108,6 +108,7 @@ function renderLayout(activePage) {
     { path: '/pos', icon: '\u{1F6D2}', label: 'POS', admin: false },
     { path: '/bills', icon: '\u{1F9FE}', label: 'Bills', admin: false },
     { path: '/customers', icon: '\u{1F465}', label: 'Customers', admin: false },
+    { path: '/tasks', icon: '✅', label: 'Daily Tasks', admin: false },
     { divider: 'Inventory' },
     { path: '/products', icon: '\u{1F382}', label: 'Products', admin: true },
     { path: '/recipes', icon: '\u{1F4D6}', label: 'Recipes', admin: true },

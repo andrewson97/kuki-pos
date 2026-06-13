@@ -18,6 +18,7 @@ import incomeRoutes from "./routes/income";
 import reportRoutes from "./routes/reports";
 import settingsRoutes from "./routes/settings";
 import cashRoutes from "./routes/cash";
+import taskRoutes from "./routes/tasks";
 
 // Initialize database
 runMigrations();
@@ -74,6 +75,7 @@ app.route("/api/income", incomeRoutes);
 app.route("/api/reports", reportRoutes);
 app.route("/api/settings", settingsRoutes);
 app.route("/api/cash", cashRoutes);
+app.route("/api/tasks", taskRoutes);
 
 // Page routes - serve HTML files
 const pages = [
@@ -85,6 +87,7 @@ const pages = [
   { path: "/stock", file: "views/stock.html" },
   { path: "/customers", file: "views/customers.html" },
   { path: "/cash", file: "views/cash.html" },
+  { path: "/tasks", file: "views/tasks.html" },
   { path: "/expenses", file: "views/expenses.html" },
   { path: "/income", file: "views/income.html" },
   { path: "/reports", file: "views/reports.html" },

@@ -140,6 +140,25 @@ export function runMigrations(): void {
       value TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS daily_tasks (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      title TEXT NOT NULL,
+      description TEXT,
+      display_order INTEGER NOT NULL DEFAULT 0,
+      is_active INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS daily_task_completions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      task_id INTEGER NOT NULL REFERENCES daily_tasks(id) ON DELETE CASCADE,
+      business_date TEXT NOT NULL,
+      user_id INTEGER REFERENCES users(id),
+      notes TEXT,
+      completed_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(task_id, business_date)
+    );
+
     CREATE TABLE IF NOT EXISTS cash_counts (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       count_type TEXT NOT NULL CHECK(count_type IN ('open', 'close')),
