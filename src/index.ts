@@ -19,6 +19,7 @@ import reportRoutes from "./routes/reports";
 import settingsRoutes from "./routes/settings";
 import cashRoutes from "./routes/cash";
 import taskRoutes from "./routes/tasks";
+import mobileRoutes from "./routes/mobile";
 
 // Initialize database
 runMigrations();
@@ -76,10 +77,21 @@ app.route("/api/reports", reportRoutes);
 app.route("/api/settings", settingsRoutes);
 app.route("/api/cash", cashRoutes);
 app.route("/api/tasks", taskRoutes);
+app.route("/api/mobile", mobileRoutes);
+
+// Auto-redirect phones hitting the dashboard to the mobile view.
+// (Skip if user explicitly asked for desktop via ?desktop=1)
+app.get("/", async (c) => {
+  const ua = c.req.header("user-agent") || "";
+  const isMobile = /Android|iPhone|iPod|BlackBerry|IEMobile|Opera Mini/i.test(ua);
+  if (isMobile && c.req.query("desktop") !== "1") return c.redirect("/m");
+  const content = await Bun.file("views/dashboard.html").text();
+  return c.html(content);
+});
 
 // Page routes - serve HTML files
 const pages = [
-  { path: "/", file: "views/dashboard.html" },
+  { path: "/m", file: "views/mobile.html" },
   { path: "/pos", file: "views/pos.html" },
   { path: "/bills", file: "views/bills.html" },
   { path: "/products", file: "views/products.html" },
