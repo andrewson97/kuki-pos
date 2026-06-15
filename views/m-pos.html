@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="theme-color" content="#e83e8c">
+  <title>KUKI · POS</title>
+  <link rel="icon" href="/public/img/kuki_logo.png">
+  <link rel="stylesheet" href="/public/css/mobile.css">
+  <style>
+    body { padding-bottom: 76px; }
+    .search-row { padding: 10px 12px; background: white; border-bottom: 1px solid var(--line); position: sticky; top: 60px; z-index: 8; }
+    .search-row input { width: 100%; padding: 10px 14px; border: 1.5px solid var(--line); border-radius: 10px; }
+    .cat-strip { display: flex; gap: 6px; padding: 8px 12px; overflow-x: auto; background: white; border-bottom: 1px solid var(--line); position: sticky; top: 116px; z-index: 7; }
+    .cat-strip::-webkit-scrollbar { display: none; }
+    .pill { flex-shrink: 0; padding: 6px 12px; border-radius: 999px; background: #f3f4f6; color: var(--ink); font-size: 0.85rem; font-weight: 600; border: none; cursor: pointer; }
+    .pill.active { background: var(--pink); color: white; }
+    .product-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; padding: 12px; }
+    .prod-card { background: white; border-radius: 12px; padding: 10px; box-shadow: 0 1px 3px rgba(0,0,0,0.04); text-align: center; cursor: pointer; }
+    .prod-card:active { transform: scale(0.96); }
+    .prod-card .img { width: 100%; aspect-ratio: 1; background: #f3f4f6; border-radius: 8px; background-size: cover; background-position: center; display: flex; align-items: center; justify-content: center; font-size: 2rem; color: #cbd5e1; }
+    .prod-card .name { font-weight: 600; font-size: 0.88rem; margin: 8px 0 2px; color: var(--ink); }
+    .prod-card .price { font-weight: 700; color: var(--pink); font-size: 0.92rem; }
+    .prod-card .price s { color: var(--ink-soft); font-size: 0.78rem; font-weight: 500; margin-right: 4px; }
+
+    /* Sticky cart bar */
+    .cart-bar { position: fixed; bottom: 0; left: 0; right: 0; background: var(--pink); color: white; padding: 12px 16px; display: flex; align-items: center; justify-content: space-between; box-shadow: 0 -4px 12px rgba(0,0,0,0.15); z-index: 50; cursor: pointer; }
+    .cart-bar.empty { background: #cbd5e1; color: #6b7280; }
+    .cart-bar .count { background: white; color: var(--pink); border-radius: 999px; padding: 2px 10px; font-weight: 700; font-size: 0.85rem; margin-right: 10px; }
+    .cart-bar .total { font-weight: 700; }
+
+    .shift-blocked { background: #fee2e2; color: #991b1b; padding: 10px 14px; font-size: 0.85rem; border-bottom: 1px solid var(--line); text-align: center; }
+
+    /* Cart sheet */
+    .cart-item { display: flex; align-items: center; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--line); }
+    .cart-item .ci-name { flex: 1; min-width: 0; }
+    .cart-item .ci-title { font-weight: 600; font-size: 0.9rem; }
+    .cart-item .ci-each { font-size: 0.75rem; color: var(--ink-soft); }
+    .cart-item .ci-qty { display: flex; align-items: center; gap: 6px; }
+    .cart-item .qbtn { width: 32px; height: 32px; border-radius: 8px; border: 1.5px solid var(--line); background: white; font-weight: 700; font-size: 1.1rem; }
+    .cart-item .qn { font-weight: 700; min-width: 22px; text-align: center; }
+    .cart-item .ci-total { font-weight: 700; min-width: 70px; text-align: right; font-size: 0.92rem; }
+    .cart-item .ci-rm { color: var(--red); background: transparent; border: none; font-size: 1.3rem; padding: 0 4px; }
+    .sum-row { display: flex; justify-content: space-between; padding: 4px 0; font-size: 0.9rem; }
+    .sum-row.total { font-weight: 700; font-size: 1.05rem; padding: 8px 0; border-top: 1.5px solid var(--line); margin-top: 6px; }
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    <a href="/m" class="back">‹</a>
+    <h1 id="title-bar">POS · <span id="token-badge">#---</span></h1>
+    <a href="/pos?desktop=1" class="right">Desktop</a>
+  </div>
+
+  <div id="shift-banner"></div>
+
+  <div class="search-row">
+    <input type="text" id="prod-search" placeholder="Search products…">
+  </div>
+  <div class="cat-strip" id="cat-strip"></div>
+  <div class="product-grid" id="product-grid"></div>
+
+  <div class="cart-bar empty" id="cart-bar" onclick="openCart()">
+    <div><span class="count" id="cart-count">0</span>View cart</div>
+    <div class="total" id="cart-total">${currency}0.00</div>
+  </div>
+
+  <!-- Cart sheet -->
+  <div class="sheet" id="cart-sheet" onclick="if(event.target===this)closeSheet('cart-sheet')">
+    <div class="sheet-inner">
+      <div class="sheet-handle"></div>
+      <h3>Cart <button class="btn-sm" style="float:right;background:none;border:none;color:var(--red);font-weight:600;" onclick="clearCart()">Clear</button></h3>
+      <div id="cart-items"></div>
+      <div style="margin-top:14px;">
+        <div class="sum-row"><span>Subtotal</span><span id="s-subtotal">${currency}0.00</span></div>
+        <div class="sum-row" id="s-savings-row" style="display:none;color:var(--red);"><span>Item discounts</span><span id="s-savings">-</span></div>
+        <div class="sum-row"><span>Extra discount</span><input type="number" id="s-discount" value="0" min="0" step="0.01" style="width:90px;text-align:right;padding:4px 8px;border:1.5px solid var(--line);border-radius:6px;" oninput="recalc()"></div>
+        <div class="sum-row" id="s-tax-row" style="display:none;"><span>Tax</span><span id="s-tax">-</span></div>
+        <div class="sum-row total"><span>TOTAL</span><span id="s-total">${currency}0.00</span></div>
+      </div>
+
+      <div class="field" style="margin-top:14px;">
+        <label>Customer (optional)</label>
+        <input type="text" id="cust-search" placeholder="Search by name or phone" autocomplete="off">
+        <div id="cust-dropdown" style="display:none;background:white;border:1px solid var(--line);border-radius:8px;max-height:180px;overflow-y:auto;margin-top:4px;"></div>
+        <div id="cust-selected" style="display:none;margin-top:6px;color:var(--green);font-size:0.85rem;font-weight:600;"></div>
+        <input type="hidden" id="cust-id">
+      </div>
+
+      <div class="btn-row" style="margin-top:14px;">
+        <button class="btn btn-success" id="pay-cash" onclick="openCashPay()">Cash</button>
+        <button class="btn btn-primary" id="pay-card" onclick="checkout('card')">Card</button>
+        <button class="btn btn-outline" id="pay-upi" onclick="checkout('upi')">UPI</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Cash payment sheet -->
+  <div class="sheet" id="cash-sheet" onclick="if(event.target===this)closeSheet('cash-sheet')">
+    <div class="sheet-inner">
+      <div class="sheet-handle"></div>
+      <h3>Cash payment</h3>
+      <div class="sum-row total"><span>Total</span><span id="cash-total-amt">-</span></div>
+      <div class="field" style="margin-top:14px;">
+        <label>Amount given</label>
+        <input type="number" id="cash-given" min="0" step="0.01" inputmode="decimal" autofocus>
+      </div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:14px;" id="quick-cash"></div>
+      <div class="sum-row total" style="font-size:1.2rem;"><span>Change</span><strong id="cash-change" style="color:var(--green);">${currency}0.00</strong></div>
+      <div id="cash-warn" style="display:none;color:var(--red);font-size:0.85rem;margin-top:4px;">Insufficient amount</div>
+      <div class="btn-row" style="margin-top:14px;">
+        <button class="btn btn-outline" onclick="closeSheet('cash-sheet')">Cancel</button>
+        <button class="btn btn-success" id="cash-confirm" disabled>Confirm sale</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Receipt sheet -->
+  <div class="sheet" id="receipt-sheet" onclick="if(event.target===this)closeSheet('receipt-sheet')">
+    <div class="sheet-inner">
+      <div class="sheet-handle"></div>
+      <h3 style="text-align:center;">Sale complete</h3>
+      <div style="text-align:center;margin:10px 0;"><span class="badge success" style="font-size:0.95rem;padding:6px 14px;" id="rec-token">Token #001</span></div>
+      <div style="text-align:center;font-size:1.6rem;font-weight:700;margin-bottom:10px;" id="rec-total"></div>
+      <div class="btn-row">
+        <button class="btn btn-outline" onclick="printSlip('kitchen')">Kitchen copy</button>
+        <button class="btn btn-primary" onclick="printSlip('customer')">Customer copy</button>
+      </div>
+      <button class="btn btn-success" style="margin-top:8px;" onclick="closeSheet('receipt-sheet')">Done</button>
+    </div>
+  </div>
+
+  <script src="/public/js/mobile.js"></script>
+  <script>
+    let products = [];
+    let customers = [];
+    let cart = [];
+    let activeCat = '';
+    let taxRate = 0;
+    let shiftBlocked = false;
+    let lastReceiptText = '';
+    let lastKitchenText = '';
+
+    async function load() {
+      await bootMobile();
+      taxRate = parseFloat(appSettings.tax_rate || '0');
+      const [prods, custs, token] = await Promise.all([
+        api('/api/products/active'),
+        api('/api/customers'),
+        api('/api/pos/token'),
+      ]);
+      products = prods; customers = custs;
+      $('token-badge').textContent = `#${String(token.next_token).padStart(3,'0')}`;
+      renderCats();
+      renderProducts();
+      $('prod-search').addEventListener('input', renderProducts);
+      $('cust-search').addEventListener('input', custSearch);
+      $('cust-search').addEventListener('blur', () => setTimeout(() => $('cust-dropdown').style.display = 'none', 200));
+      $('s-discount').addEventListener('input', recalc);
+      checkShift();
+    }
+
+    async function checkShift() {
+      if ((appSettings.enforce_cash_shift ?? '1') !== '1') return;
+      try {
+        const data = await api('/api/cash/today');
+        if (data.shift_from_prior_day) {
+          shiftBlocked = true;
+          $('shift-banner').innerHTML = `<div class="shift-blocked">⚠️ Shift from ${formatDate(data.open.count_date)} still open. <a href="/m/cash" style="color:#991b1b;text-decoration:underline;">Close it</a> first.</div>`;
+        } else if (!data.shift_open) {
+          shiftBlocked = true;
+          $('shift-banner').innerHTML = `<div class="shift-blocked">${data.open ? 'Cash shift is closed.' : 'Cash drawer not opened today.'} <a href="/m/cash" style="color:#991b1b;text-decoration:underline;">${data.open ? 'Open a new shift' : 'Open the drawer'}</a>.</div>`;
+        }
+      } catch {}
+    }
+
+    function renderCats() {
+      const counts = {};
+      products.forEach(p => { counts[p.category] = (counts[p.category] || 0) + 1; });
+      const cats = Object.keys(counts).sort();
+      const pills = [{key: '', label: 'All', n: products.length}, ...cats.map(c => ({key: c, label: c, n: counts[c]}))];
+      $('cat-strip').innerHTML = pills.map(p => `
+        <button class="pill ${activeCat === p.key ? 'active' : ''}" onclick="setCat('${p.key.replace(/'/g, "\\'")}')">${escapeHtml(p.label)} <span style="opacity:.7;font-size:.7rem;">${p.n}</span></button>
+      `).join('');
+    }
+
+    function setCat(c) { activeCat = c; renderCats(); renderProducts(); }
+
+    function renderProducts() {
+      const q = $('prod-search').value.toLowerCase().trim();
+      const filtered = products.filter(p => {
+        if (q && !p.name.toLowerCase().includes(q)) return false;
+        if (activeCat && p.category !== activeCat) return false;
+        return true;
+      });
+      if (!filtered.length) { $('product-grid').innerHTML = '<div class="empty" style="grid-column:1/-1;">No products</div>'; return; }
+      $('product-grid').innerHTML = filtered.map(p => {
+        const eff = p.discount_price || p.selling_price;
+        const priceHtml = p.discount_price
+          ? `<div class="price"><s>${fmt(p.selling_price)}</s>${fmt(eff)}</div>`
+          : `<div class="price">${fmt(eff)}</div>`;
+        const img = p.image_path
+          ? `<div class="img" style="background-image:url('/uploads/${p.image_path}');"></div>`
+          : `<div class="img">🎂</div>`;
+        return `<div class="prod-card" onclick="addToCart(${p.id})">${img}<div class="name">${escapeHtml(p.name)}</div>${priceHtml}</div>`;
+      }).join('');
+    }
+
+    function addToCart(id) {
+      const p = products.find(x => x.id === id);
+      if (!p) return;
+      const ex = cart.find(c => c.product_id === id);
+      if (ex) ex.quantity++;
+      else cart.push({ product_id: p.id, product_name: p.name, quantity: 1, unit_price: p.discount_price || p.selling_price, original_price: p.selling_price });
+      recalc();
+    }
+
+    function recalc() {
+      const subtotal = cart.reduce((s, i) => s + i.quantity * i.unit_price, 0);
+      const savings = cart.reduce((s, i) => s + (i.original_price && i.original_price > i.unit_price ? (i.original_price - i.unit_price) * i.quantity : 0), 0);
+      const discount = parseFloat($('s-discount').value) || 0;
+      const taxable = Math.max(0, subtotal - discount);
+      const tax = taxable * (taxRate / 100);
+      const total = taxable + tax;
+      const count = cart.reduce((s, i) => s + i.quantity, 0);
+
+      $('cart-count').textContent = count;
+      $('cart-total').textContent = fmt(total);
+      $('cart-bar').classList.toggle('empty', count === 0);
+
+      $('s-subtotal').textContent = fmt(subtotal);
+      $('s-savings').textContent = '-' + fmt(savings);
+      $('s-savings-row').style.display = savings > 0 ? 'flex' : 'none';
+      $('s-tax').textContent = fmt(tax);
+      $('s-tax-row').style.display = taxRate > 0 ? 'flex' : 'none';
+      $('s-total').textContent = fmt(total);
+
+      renderCartItems();
+    }
+
+    function renderCartItems() {
+      if (!cart.length) { $('cart-items').innerHTML = '<div class="empty">Cart is empty</div>'; return; }
+      $('cart-items').innerHTML = cart.map((i, idx) => {
+        const hasDisc = i.original_price && i.original_price > i.unit_price;
+        return `<div class="cart-item">
+          <div class="ci-name">
+            <div class="ci-title">${escapeHtml(i.product_name)}</div>
+            <div class="ci-each">${hasDisc ? `<s>${fmt(i.original_price)}</s> <span style="color:var(--red);">${fmt(i.unit_price)}</span>` : fmt(i.unit_price)} each</div>
+          </div>
+          <div class="ci-qty">
+            <button class="qbtn" onclick="qty(${idx}, -1)">−</button>
+            <span class="qn">${i.quantity}</span>
+            <button class="qbtn" onclick="qty(${idx}, 1)">+</button>
+          </div>
+          <div class="ci-total">${fmt(i.quantity * i.unit_price)}</div>
+          <button class="ci-rm" onclick="rm(${idx})">×</button>
+        </div>`;
+      }).join('');
+    }
+
+    function qty(idx, d) { cart[idx].quantity += d; if (cart[idx].quantity <= 0) cart.splice(idx, 1); recalc(); }
+    function rm(idx) { cart.splice(idx, 1); recalc(); }
+    function clearCart() { cart = []; $('s-discount').value = 0; clearCust(); recalc(); }
+    function openCart() { if (!cart.length) { toast('Cart is empty'); return; } openSheet('cart-sheet'); }
+
+    function custSearch() {
+      const q = $('cust-search').value.toLowerCase().trim();
+      if (!q) { $('cust-dropdown').style.display = 'none'; return; }
+      const matches = customers.filter(c => c.name.toLowerCase().includes(q) || (c.phone || '').includes(q)).slice(0, 8);
+      if (!matches.length) { $('cust-dropdown').innerHTML = '<div style="padding:8px;color:var(--ink-soft);font-size:0.85rem;">No matches</div>'; }
+      else {
+        $('cust-dropdown').innerHTML = matches.map(c => `<div style="padding:10px;border-bottom:1px solid var(--line);" onmousedown="pickCust(${c.id}, '${c.name.replace(/'/g, "\\'")}')">${escapeHtml(c.name)}${c.phone ? ` <span style="color:var(--ink-soft);font-size:0.8rem;">(${c.phone})</span>` : ''}</div>`).join('');
+      }
+      $('cust-dropdown').style.display = 'block';
+    }
+    function pickCust(id, name) {
+      $('cust-id').value = id;
+      $('cust-search').value = '';
+      $('cust-dropdown').style.display = 'none';
+      $('cust-selected').style.display = 'block';
+      $('cust-selected').textContent = '✓ ' + name + ' (tap × to clear)';
+      $('cust-selected').onclick = clearCust;
+    }
+    function clearCust() {
+      $('cust-id').value = ''; $('cust-search').value = '';
+      $('cust-selected').style.display = 'none'; $('cust-selected').textContent = '';
+    }
+
+    function getCurrentTotal() {
+      const subtotal = cart.reduce((s, i) => s + i.quantity * i.unit_price, 0);
+      const discount = parseFloat($('s-discount').value) || 0;
+      const taxable = Math.max(0, subtotal - discount);
+      return taxable + taxable * (taxRate / 100);
+    }
+
+    function openCashPay() {
+      if (!cart.length) { toast('Cart is empty', 'error'); return; }
+      if (shiftBlocked) { toast('Cash shift not open', 'error'); return; }
+      const total = getCurrentTotal();
+      $('cash-total-amt').textContent = fmt(total);
+      $('cash-given').value = '';
+      $('cash-change').textContent = fmt(0);
+      $('cash-warn').style.display = 'none';
+      $('cash-confirm').disabled = true;
+      // quick cash presets
+      const presets = new Set([Math.ceil(total), Math.ceil(total / 100) * 100, Math.ceil(total / 500) * 500, Math.ceil(total / 1000) * 1000]);
+      $('quick-cash').innerHTML = [...presets].filter(v => v >= total).slice(0, 5).map(v => `<button class="btn btn-outline btn-sm" style="flex:0;" onclick="quickCash(${v})">${fmt(v)}</button>`).join('');
+      $('cash-given').oninput = () => {
+        const amt = parseFloat($('cash-given').value) || 0;
+        $('cash-change').textContent = fmt(Math.max(0, amt - total));
+        $('cash-warn').style.display = (amt > 0 && amt < total) ? 'block' : 'none';
+        $('cash-confirm').disabled = amt < total;
+      };
+      $('cash-confirm').onclick = () => {
+        const amt = parseFloat($('cash-given').value) || 0;
+        if (amt < total) return;
+        closeSheet('cash-sheet');
+        checkout('cash', amt);
+      };
+      closeSheet('cart-sheet');
+      openSheet('cash-sheet');
+      setTimeout(() => $('cash-given').focus(), 200);
+    }
+    function quickCash(v) { $('cash-given').value = v; $('cash-given').dispatchEvent(new Event('input')); }
+
+    async function checkout(method, amountGiven) {
+      if (!cart.length) { toast('Cart is empty'); return; }
+      if (shiftBlocked) { toast('Cash shift not open', 'error'); return; }
+      try {
+        const result = await api('/api/pos/bill', { method: 'POST', body: {
+          items: cart.map(i => ({ product_id: i.product_id, product_name: i.product_name, quantity: i.quantity, unit_price: i.unit_price, original_price: i.original_price || i.unit_price })),
+          customer_id: $('cust-id').value ? parseInt($('cust-id').value) : null,
+          discount: parseFloat($('s-discount').value) || 0,
+          tax_rate: taxRate,
+          payment_method: method,
+          amount_given: method === 'cash' && amountGiven ? amountGiven : null,
+        }});
+        lastReceiptText = result.receipt_text;
+        lastKitchenText = result.kitchen_text || '';
+        $('rec-token').textContent = `Token #${String(result.token_number).padStart(3,'0')}`;
+        $('rec-total').textContent = fmt(result.total);
+        closeSheet('cart-sheet');
+        openSheet('receipt-sheet');
+        clearCart();
+        const t = await api('/api/pos/token');
+        $('token-badge').textContent = `#${String(t.next_token).padStart(3,'0')}`;
+      } catch (err) { toast(err.message, 'error'); }
+    }
+
+    async function printSlip(which) {
+      const text = which === 'kitchen' ? lastKitchenText : lastReceiptText;
+      if (!text) return;
+      const w = window.open('', '_blank', 'width=350,height=700');
+      const logoUrl = window.location.origin + '/public/img/kuki_logo.png';
+      const logoHtml = which === 'kitchen' ? '' : `<img src="${logoUrl}" alt="KUKI">`;
+      w.document.write(`<html><head><style>@page{size:58mm auto;margin:0;}body{font-family:'Consolas',monospace;width:58mm;margin:0;}.slip{width:58mm;padding:0 0 2mm;text-align:center;}.slip img{max-width:45mm;max-height:22mm;display:block;margin:0 auto 2px;}pre{font-size:13px;font-weight:600;white-space:pre-wrap;text-align:left;padding:0 1mm;margin:0;}</style></head><body><div class="slip">${logoHtml}<pre>${text}</pre></div><script>window.addEventListener('load',()=>{const imgs=Array.from(document.images);Promise.all(imgs.map(i=>i.complete?null:new Promise(r=>{i.onload=i.onerror=r;}))).then(()=>{window.addEventListener('afterprint',()=>setTimeout(()=>window.close(),200));window.print();});});<\/script></body></html>`);
+      w.document.close();
+    }
+
+    load();
+  </script>
+</body>
+</html>

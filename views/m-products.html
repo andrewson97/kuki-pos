@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="theme-color" content="#e83e8c">
+  <title>KUKI · Products</title>
+  <link rel="icon" href="/public/img/kuki_logo.png">
+  <link rel="stylesheet" href="/public/css/mobile.css">
+</head>
+<body>
+  <div class="topbar">
+    <a href="/m" class="back">‹</a>
+    <h1>Products</h1>
+    <a href="/products?desktop=1" class="right">Desktop</a>
+  </div>
+  <div class="filters">
+    <input type="text" id="prod-search" placeholder="Search products…">
+  </div>
+  <div id="prod-list"><div class="empty">Loading…</div></div>
+
+  <button class="fab" id="fab" onclick="openAdd()" style="display:none;">+</button>
+
+  <div class="sheet" id="prod-sheet" onclick="if(event.target===this)closeSheet('prod-sheet')">
+    <div class="sheet-inner">
+      <div class="sheet-handle"></div>
+      <h3 id="sheet-title">Edit product</h3>
+      <input type="hidden" id="p-id">
+      <div class="field"><label>Name</label><input type="text" id="p-name"></div>
+      <div class="field"><label>Category</label><input type="text" id="p-cat" placeholder="e.g., Cakes"></div>
+      <div class="field"><label>Cost price (Rs.)</label><input type="number" id="p-cost" min="0" step="0.01" inputmode="decimal"></div>
+      <div class="field"><label>Selling price (Rs.)</label><input type="number" id="p-price" min="0" step="0.01" inputmode="decimal"></div>
+      <div class="field"><label>Discount price (optional)</label><input type="number" id="p-disc" min="0" step="0.01" inputmode="decimal" placeholder="leave blank for none"></div>
+      <div class="field">
+        <label>Image (optional)</label>
+        <div style="display:flex;gap:10px;align-items:center;">
+          <img id="p-preview" src="" style="width:60px;height:60px;object-fit:cover;border-radius:8px;border:1px solid var(--line);display:none;">
+          <input type="file" id="p-img" accept="image/*" style="flex:1;">
+        </div>
+        <button class="btn btn-danger btn-sm" id="p-rmimg" style="display:none;margin-top:6px;" onclick="removeImage()">Remove current image</button>
+      </div>
+      <div class="field"><label><input type="checkbox" id="p-active" checked> Active (shown in POS)</label></div>
+      <div class="btn-row">
+        <button class="btn btn-outline" onclick="closeSheet('prod-sheet')">Cancel</button>
+        <button class="btn btn-primary" onclick="saveProd()">Save</button>
+      </div>
+      <button class="btn btn-danger" style="margin-top:8px;" id="p-delete" onclick="delProd()">Delete</button>
+    </div>
+  </div>
+
+  <script src="/public/js/mobile.js"></script>
+  <script>
+    let allProds = [];
+
+    async function load() {
+      await bootMobile();
+      if (currentUser.role !== 'admin') { $('fab').style.display = 'none'; toast('Read-only — admin needed to edit'); }
+      else { $('fab').style.display = 'block'; }
+      allProds = await api('/api/products');
+      render();
+      $('prod-search').addEventListener('input', render);
+    }
+
+    function render() {
+      const q = $('prod-search').value.toLowerCase().trim();
+      const filtered = q ? allProds.filter(p => p.name.toLowerCase().includes(q) || (p.category || '').toLowerCase().includes(q)) : allProds;
+      if (!filtered.length) { $('prod-list').innerHTML = '<div class="empty">No products</div>'; return; }
+      const isAdmin = currentUser.role === 'admin';
+      $('prod-list').innerHTML = filtered.map(p => {
+        const eff = p.discount_price || p.selling_price;
+        const priceHtml = p.discount_price
+          ? `<s style="color:var(--ink-soft);font-size:0.78rem;">${fmt(p.selling_price)}</s> <strong style="color:var(--red);">${fmt(eff)}</strong>`
+          : `<strong>${fmt(eff)}</strong>`;
+        const img = p.image_path
+          ? `<img src="/uploads/${p.image_path}" style="width:48px;height:48px;border-radius:8px;object-fit:cover;flex-shrink:0;">`
+          : `<div style="width:48px;height:48px;border-radius:8px;background:#f3f4f6;display:flex;align-items:center;justify-content:center;font-size:1.4rem;flex-shrink:0;">🎂</div>`;
+        return `<div class="list-item" ${isAdmin ? `onclick="editProd(${p.id})"` : ''} style="display:flex;gap:12px;align-items:center;">
+          ${img}
+          <div style="flex:1;min-width:0;">
+            <div class="list-title">${escapeHtml(p.name)} ${!p.is_active ? '<span class="badge muted">inactive</span>' : ''}</div>
+            <div class="list-meta">${escapeHtml(p.category || '-')} · cost ${fmt(p.cost_price)}</div>
+          </div>
+          <div style="text-align:right;">${priceHtml}</div>
+        </div>`;
+      }).join('');
+    }
+
+    function openAdd() {
+      $('sheet-title').textContent = 'New product';
+      $('p-id').value = '';
+      ['p-name', 'p-cat', 'p-cost', 'p-price', 'p-disc'].forEach(id => $(id).value = '');
+      $('p-active').checked = true;
+      $('p-img').value = '';
+      $('p-preview').style.display = 'none';
+      $('p-rmimg').style.display = 'none';
+      $('p-delete').style.display = 'none';
+      openSheet('prod-sheet');
+    }
+
+    function editProd(id) {
+      const p = allProds.find(x => x.id === id);
+      $('sheet-title').textContent = 'Edit product';
+      $('p-id').value = p.id;
+      $('p-name').value = p.name;
+      $('p-cat').value = p.category || '';
+      $('p-cost').value = p.cost_price || 0;
+      $('p-price').value = p.selling_price;
+      $('p-disc').value = p.discount_price || '';
+      $('p-active').checked = !!p.is_active;
+      $('p-img').value = '';
+      if (p.image_path) {
+        $('p-preview').src = '/uploads/' + p.image_path;
+        $('p-preview').style.display = 'block';
+        $('p-rmimg').style.display = 'block';
+      } else {
+        $('p-preview').style.display = 'none';
+        $('p-rmimg').style.display = 'none';
+      }
+      $('p-delete').style.display = 'block';
+      openSheet('prod-sheet');
+    }
+
+    async function saveProd() {
+      const id = $('p-id').value;
+      const disc = $('p-disc').value;
+      const body = {
+        name: $('p-name').value.trim(),
+        category: $('p-cat').value.trim() || 'General',
+        cost_price: parseFloat($('p-cost').value) || 0,
+        selling_price: parseFloat($('p-price').value),
+        discount_price: disc ? parseFloat(disc) : null,
+        is_active: $('p-active').checked ? 1 : 0,
+      };
+      if (!body.name) { toast('Name required', 'error'); return; }
+      if (!body.selling_price) { toast('Selling price required', 'error'); return; }
+      try {
+        let pid = id;
+        if (id) await api(`/api/products/${id}`, { method: 'PUT', body });
+        else { const r = await api('/api/products', { method: 'POST', body }); pid = r.id; }
+
+        const file = $('p-img').files[0];
+        if (file) {
+          const fd = new FormData();
+          fd.append('image', file);
+          const r = await fetch(`/api/products/${pid}/image`, { method: 'POST', body: fd });
+          if (!r.ok) { const e = await r.json().catch(() => ({})); toast('Image upload: ' + (e.error || 'failed'), 'error'); }
+        }
+        closeSheet('prod-sheet');
+        toast('Saved');
+        allProds = await api('/api/products');
+        render();
+      } catch (err) { toast(err.message, 'error'); }
+    }
+
+    async function removeImage() {
+      const id = $('p-id').value;
+      if (!id || !confirm('Remove image?')) return;
+      try {
+        await api(`/api/products/${id}/image`, { method: 'DELETE' });
+        $('p-preview').style.display = 'none';
+        $('p-rmimg').style.display = 'none';
+        toast('Image removed');
+        allProds = await api('/api/products');
+      } catch (err) { toast(err.message, 'error'); }
+    }
+
+    async function delProd() {
+      const id = $('p-id').value;
+      if (!id || !confirm('Delete this product?')) return;
+      try {
+        const r = await api(`/api/products/${id}`, { method: 'DELETE' });
+        closeSheet('prod-sheet');
+        toast(r.soft_deleted ? 'Has sales history — marked inactive' : 'Deleted');
+        allProds = await api('/api/products');
+        render();
+      } catch (err) { toast(err.message, 'error'); }
+    }
+
+    load();
+  </script>
+</body>
+</html>

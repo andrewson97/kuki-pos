@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="theme-color" content="#e83e8c">
+  <title>KUKI · Tasks</title>
+  <link rel="icon" href="/public/img/kuki_logo.png">
+  <link rel="stylesheet" href="/public/css/mobile.css">
+  <style>
+    .task { background: white; border-radius: 12px; padding: 12px 14px; margin-bottom: 8px; display: flex; align-items: center; gap: 12px; }
+    .task.done { background: #f0fdf4; }
+    .check { width: 32px; height: 32px; border: 2.5px solid #cbd5e1; border-radius: 8px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+    .task.done .check { background: var(--green); border-color: var(--green); color: white; }
+    .task .body { flex: 1; min-width: 0; }
+    .task .title { font-weight: 600; font-size: 0.95rem; }
+    .task.done .title { text-decoration: line-through; color: var(--ink-soft); }
+    .task .meta { font-size: 0.75rem; color: var(--ink-soft); margin-top: 2px; }
+    .section-header { font-weight: 700; color: white; padding: 14px 16px; border-radius: 12px; margin: 14px 0 10px; display: flex; justify-content: space-between; }
+    .section-header.opening { background: linear-gradient(135deg, var(--amber), #d97706); }
+    .section-header.closing { background: linear-gradient(135deg, var(--indigo), #4338ca); }
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    <a href="/m" class="back">‹</a>
+    <h1>Daily Tasks</h1>
+    <a href="/tasks?desktop=1" class="right">Desktop</a>
+  </div>
+  <div class="container" id="tasks-root"><div class="empty">Loading…</div></div>
+
+  <script src="/public/js/mobile.js"></script>
+  <script>
+    async function load() {
+      await bootMobile();
+      const tasks = await api('/api/tasks');
+      if (!tasks.length) {
+        $('tasks-root').innerHTML = `<div class="empty">No daily tasks set up yet${currentUser.role === 'admin' ? '. Use the desktop view to add some.' : '.'}</div>`;
+        return;
+      }
+      const opening = tasks.filter(t => (t.category || 'opening') === 'opening');
+      const closing = tasks.filter(t => t.category === 'closing');
+      $('tasks-root').innerHTML = section('🌅 Opening', 'opening', opening) + section('🌙 Closing', 'closing', closing);
+    }
+
+    function section(label, cls, tasks) {
+      if (!tasks.length) return '';
+      const done = tasks.filter(t => t.completion_id != null).length;
+      const pct = Math.round((done / tasks.length) * 100);
+      const items = tasks.map(t => {
+        const isDone = t.completion_id != null;
+        return `<div class="task ${isDone ? 'done' : ''}" onclick="toggle(${t.id}, ${isDone})">
+          <div class="check">${isDone ? '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg>' : ''}</div>
+          <div class="body">
+            <div class="title">${escapeHtml(t.title)}</div>
+            ${t.description ? `<div class="meta">${escapeHtml(t.description)}</div>` : ''}
+            ${isDone ? `<div class="meta">Done by ${escapeHtml(t.completed_by_name || '-')} at ${formatTime(t.completed_at)}</div>` : ''}
+          </div>
+        </div>`;
+      }).join('');
+      return `<div class="section-header ${cls}"><span>${label}</span><span>${done}/${tasks.length} · ${pct}%</span></div>${items}`;
+    }
+
+    async function toggle(id, isDone) {
+      try {
+        if (isDone) { if (!confirm('Un-check this task?')) return; await api(`/api/tasks/${id}/complete`, { method: 'DELETE' }); }
+        else await api(`/api/tasks/${id}/complete`, { method: 'POST', body: {} });
+        load();
+      } catch (err) { toast(err.message, 'error'); }
+    }
+    load();
+  </script>
+</body>
+</html>

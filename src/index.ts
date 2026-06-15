@@ -83,10 +83,15 @@ app.route("/api/mobile", mobileRoutes);
 // Skip when ?desktop=1 is set (lets you force the full UI from a phone).
 const MOBILE_REDIRECTS: Record<string, string> = {
   "/": "/m",
+  "/pos": "/m/pos",
   "/bills": "/m/bills",
   "/expenses": "/m/expenses",
   "/cash": "/m/cash",
   "/reports": "/m/reports",
+  "/products": "/m/products",
+  "/stock": "/m/stock",
+  "/customers": "/m/customers",
+  "/tasks": "/m/tasks",
 };
 const isMobileUA = (ua: string) => /Android|iPhone|iPod|BlackBerry|IEMobile|Opera Mini/i.test(ua);
 
@@ -103,19 +108,19 @@ for (const [from, to] of Object.entries(MOBILE_REDIRECTS)) {
   });
 }
 
-// Page routes - serve HTML files
+// Page routes - serve HTML files (mobile equivalents + pages with no mobile twin)
 const pages = [
   { path: "/m", file: "views/mobile.html" },
+  { path: "/m/pos", file: "views/m-pos.html" },
   { path: "/m/bills", file: "views/m-bills.html" },
   { path: "/m/expenses", file: "views/m-expenses.html" },
   { path: "/m/cash", file: "views/m-cash.html" },
   { path: "/m/reports", file: "views/m-reports.html" },
-  { path: "/pos", file: "views/pos.html" },
-  { path: "/products", file: "views/products.html" },
+  { path: "/m/products", file: "views/m-products.html" },
+  { path: "/m/stock", file: "views/m-stock.html" },
+  { path: "/m/customers", file: "views/m-customers.html" },
+  { path: "/m/tasks", file: "views/m-tasks.html" },
   { path: "/recipes", file: "views/recipes.html" },
-  { path: "/stock", file: "views/stock.html" },
-  { path: "/customers", file: "views/customers.html" },
-  { path: "/tasks", file: "views/tasks.html" },
   { path: "/income", file: "views/income.html" },
   { path: "/settings", file: "views/settings.html" },
   { path: "/users", file: "views/users.html" },

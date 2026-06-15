@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="theme-color" content="#e83e8c">
+  <title>KUKI · Customers</title>
+  <link rel="icon" href="/public/img/kuki_logo.png">
+  <link rel="stylesheet" href="/public/css/mobile.css">
+</head>
+<body>
+  <div class="topbar">
+    <a href="/m" class="back">‹</a>
+    <h1>Customers</h1>
+    <a href="/customers?desktop=1" class="right">Desktop</a>
+  </div>
+  <div class="filters"><input type="text" id="c-search" placeholder="Search name or phone…"></div>
+  <div id="c-list"><div class="empty">Loading…</div></div>
+
+  <button class="fab" onclick="openAdd()">+</button>
+
+  <div class="sheet" id="c-sheet" onclick="if(event.target===this)closeSheet('c-sheet')">
+    <div class="sheet-inner">
+      <div class="sheet-handle"></div>
+      <h3 id="c-title">Customer</h3>
+      <input type="hidden" id="c-id">
+      <div class="field"><label>Name</label><input type="text" id="c-name"></div>
+      <div class="field"><label>Phone</label><input type="tel" id="c-phone" inputmode="tel"></div>
+      <div class="field"><label>Address (optional)</label><input type="text" id="c-addr"></div>
+      <div class="field"><label>Notes (optional)</label><textarea id="c-notes" rows="2"></textarea></div>
+      <div class="btn-row">
+        <button class="btn btn-outline" onclick="closeSheet('c-sheet')">Cancel</button>
+        <button class="btn btn-primary" onclick="saveCust()">Save</button>
+      </div>
+      <button class="btn btn-danger" style="margin-top:8px;" id="c-del" onclick="delCust()">Delete</button>
+    </div>
+  </div>
+
+  <script src="/public/js/mobile.js"></script>
+  <script>
+    let all = [];
+
+    async function load() {
+      await bootMobile();
+      all = await api('/api/customers');
+      render();
+      $('c-search').addEventListener('input', render);
+    }
+    function render() {
+      const q = $('c-search').value.toLowerCase().trim();
+      const f = q ? all.filter(c => c.name.toLowerCase().includes(q) || (c.phone || '').includes(q)) : all;
+      if (!f.length) { $('c-list').innerHTML = '<div class="empty">No customers</div>'; return; }
+      $('c-list').innerHTML = f.map(c => `<div class="list-item" onclick="editCust(${c.id})">
+        <div class="list-head"><span class="list-title">${escapeHtml(c.name)}</span><span class="list-meta">${escapeHtml(c.phone || '')}</span></div>
+        ${c.address ? `<div class="list-meta">${escapeHtml(c.address)}</div>` : ''}
+      </div>`).join('');
+    }
+
+    function openAdd() {
+      $('c-title').textContent = 'New customer';
+      ['c-id', 'c-name', 'c-phone', 'c-addr', 'c-notes'].forEach(id => $(id).value = '');
+      $('c-del').style.display = 'none';
+      openSheet('c-sheet');
+    }
+    function editCust(id) {
+      const c = all.find(x => x.id === id);
+      $('c-title').textContent = 'Edit · ' + c.name;
+      $('c-id').value = c.id;
+      $('c-name').value = c.name;
+      $('c-phone').value = c.phone || '';
+      $('c-addr').value = c.address || '';
+      $('c-notes').value = c.notes || '';
+      $('c-del').style.display = 'block';
+      openSheet('c-sheet');
+    }
+    async function saveCust() {
+      const id = $('c-id').value;
+      const body = { name: $('c-name').value.trim(), phone: $('c-phone').value.trim(), address: $('c-addr').value.trim(), notes: $('c-notes').value.trim() };
+      if (!body.name) { toast('Name required', 'error'); return; }
+      try {
+        if (id) await api(`/api/customers/${id}`, { method: 'PUT', body });
+        else await api('/api/customers', { method: 'POST', body });
+        closeSheet('c-sheet');
+        toast('Saved');
+        all = await api('/api/customers'); render();
+      } catch (err) { toast(err.message, 'error'); }
+    }
+    async function delCust() {
+      const id = $('c-id').value;
+      if (!id || !confirm('Delete this customer?')) return;
+      try { await api(`/api/customers/${id}`, { method: 'DELETE' }); closeSheet('c-sheet'); toast('Deleted'); all = await api('/api/customers'); render(); }
+      catch (err) { toast(err.message, 'error'); }
+    }
+    load();
+  </script>
+</body>
+</html>

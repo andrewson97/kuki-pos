@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="theme-color" content="#e83e8c">
+  <title>KUKI · Stock</title>
+  <link rel="icon" href="/public/img/kuki_logo.png">
+  <link rel="stylesheet" href="/public/css/mobile.css">
+</head>
+<body>
+  <div class="topbar">
+    <a href="/m" class="back">‹</a>
+    <h1>Stock</h1>
+    <a href="/stock?desktop=1" class="right">Desktop</a>
+  </div>
+  <div class="filters">
+    <input type="text" id="s-search" placeholder="Search stock items…">
+    <select id="s-cat"><option value="">All categories</option></select>
+  </div>
+  <div id="stock-list"><div class="empty">Loading…</div></div>
+
+  <button class="fab" id="fab" onclick="openAdd()" style="display:none;">+</button>
+
+  <!-- Edit / adjust sheet -->
+  <div class="sheet" id="stock-sheet" onclick="if(event.target===this)closeSheet('stock-sheet')">
+    <div class="sheet-inner">
+      <div class="sheet-handle"></div>
+      <h3 id="sh-title">Stock item</h3>
+      <input type="hidden" id="s-id">
+      <div class="field"><label>Name</label><input type="text" id="s-name"></div>
+      <div class="field"><label>Category</label><select id="s-cat-sel"></select></div>
+      <div class="field"><label>Unit (kg, L, pcs)</label><input type="text" id="s-unit"></div>
+      <div class="field"><label>Quantity on hand</label><input type="number" id="s-qty" min="0" step="0.001" inputmode="decimal"></div>
+      <div class="field"><label>Cost per unit (Rs.)</label><input type="number" id="s-cost" min="0" step="0.01" inputmode="decimal"></div>
+      <div class="field"><label>Reorder level</label><input type="number" id="s-reorder" min="0" step="0.001" inputmode="decimal"></div>
+      <div class="btn-row">
+        <button class="btn btn-outline" onclick="closeSheet('stock-sheet')">Cancel</button>
+        <button class="btn btn-primary" onclick="saveItem()">Save</button>
+      </div>
+      <hr style="margin:18px 0;border:none;border-top:1px solid var(--line);">
+      <h3 style="font-size:0.95rem;">Quick stock movement</h3>
+      <div class="field"><label>Quantity change (+ in, − out)</label><input type="number" id="tx-qty" step="0.001" placeholder="e.g., 5 or -2" inputmode="decimal"></div>
+      <div class="field"><label>Type</label><select id="tx-type"><option value="purchase">Purchase / Stock-in</option><option value="adjustment">Adjustment</option><option value="waste">Waste</option></select></div>
+      <div class="field"><label>Reference (optional)</label><input type="text" id="tx-ref" placeholder="e.g., supplier #123"></div>
+      <button class="btn btn-success" onclick="addTx()">Record movement</button>
+    </div>
+  </div>
+
+  <script src="/public/js/mobile.js"></script>
+  <script>
+    let items = [], cats = [];
+
+    async function load() {
+      await bootMobile();
+      if (currentUser.role !== 'admin') { $('fab').style.display = 'none'; toast('Read-only — admin needed to edit'); }
+      else $('fab').style.display = 'block';
+      [items, cats] = await Promise.all([api('/api/stock/items'), api('/api/stock/categories')]);
+      const catOpts = '<option value="">All categories</option>' + cats.map(c => `<option value="${c.id}">${escapeHtml(c.name)}</option>`).join('');
+      $('s-cat').innerHTML = catOpts;
+      $('s-cat-sel').innerHTML = cats.map(c => `<option value="${c.id}">${escapeHtml(c.name)}</option>`).join('');
+      render();
+      $('s-search').addEventListener('input', render);
+      $('s-cat').addEventListener('change', render);
+    }
+
+    function render() {
+      const q = $('s-search').value.toLowerCase().trim();
+      const catId = $('s-cat').value;
+      const filtered = items.filter(it => {
+        if (q && !it.name.toLowerCase().includes(q)) return false;
+        if (catId && String(it.category_id) !== catId) return false;
+        return true;
+      });
+      if (!filtered.length) { $('stock-list').innerHTML = '<div class="empty">No items</div>'; return; }
+      const isAdmin = currentUser.role === 'admin';
+      $('stock-list').innerHTML = filtered.map(it => {
+        const low = it.reorder_level > 0 && it.quantity <= it.reorder_level;
+        return `<div class="list-item" ${isAdmin ? `onclick="editItem(${it.id})"` : ''}>
+          <div class="list-head">
+            <span class="list-title">${escapeHtml(it.name)}${low ? ' <span class="badge danger">LOW</span>' : ''}</span>
+            <span class="list-amount" style="color:${low ? 'var(--red)' : 'var(--ink)'};">${it.quantity} ${escapeHtml(it.unit || '')}</span>
+          </div>
+          <div class="list-meta">${escapeHtml(it.category_name || '-')} · cost ${fmt(it.cost_per_unit)} / ${escapeHtml(it.unit || 'u')} · min ${it.reorder_level}</div>
+        </div>`;
+      }).join('');
+    }
+
+    function openAdd() {
+      $('sh-title').textContent = 'New stock item';
+      $('s-id').value = '';
+      ['s-name', 's-unit', 's-qty', 's-cost', 's-reorder', 'tx-qty', 'tx-ref'].forEach(id => $(id).value = '');
+      if (cats[0]) $('s-cat-sel').value = cats[0].id;
+      openSheet('stock-sheet');
+    }
+    function editItem(id) {
+      const it = items.find(x => x.id === id);
+      $('sh-title').textContent = 'Edit · ' + it.name;
+      $('s-id').value = it.id;
+      $('s-name').value = it.name;
+      $('s-cat-sel').value = it.category_id || (cats[0] && cats[0].id);
+      $('s-unit').value = it.unit || '';
+      $('s-qty').value = it.quantity;
+      $('s-cost').value = it.cost_per_unit || 0;
+      $('s-reorder').value = it.reorder_level || 0;
+      ['tx-qty', 'tx-ref'].forEach(id => $(id).value = '');
+      openSheet('stock-sheet');
+    }
+    async function saveItem() {
+      const id = $('s-id').value;
+      const body = {
+        name: $('s-name').value.trim(),
+        category_id: parseInt($('s-cat-sel').value) || null,
+        unit: $('s-unit').value.trim(),
+        quantity: parseFloat($('s-qty').value) || 0,
+        cost_per_unit: parseFloat($('s-cost').value) || 0,
+        reorder_level: parseFloat($('s-reorder').value) || 0,
+      };
+      if (!body.name) { toast('Name required', 'error'); return; }
+      try {
+        if (id) await api(`/api/stock/items/${id}`, { method: 'PUT', body });
+        else await api('/api/stock/items', { method: 'POST', body });
+        closeSheet('stock-sheet');
+        toast('Saved');
+        items = await api('/api/stock/items');
+        render();
+      } catch (err) { toast(err.message, 'error'); }
+    }
+    async function addTx() {
+      const id = $('s-id').value;
+      if (!id) { toast('Save the item first', 'error'); return; }
+      const qty = parseFloat($('tx-qty').value);
+      if (!qty) { toast('Enter a quantity change', 'error'); return; }
+      try {
+        await api(`/api/stock/items/${id}/transaction`, { method: 'POST', body: {
+          type: $('tx-type').value,
+          quantity: qty,
+          reference: $('tx-ref').value.trim() || null,
+        }});
+        toast('Movement recorded');
+        items = await api('/api/stock/items');
+        const it = items.find(x => x.id === parseInt(id));
+        if (it) { $('s-qty').value = it.quantity; }
+        $('tx-qty').value = '';
+        $('tx-ref').value = '';
+        render();
+      } catch (err) { toast(err.message, 'error'); }
+    }
+
+    load();
+  </script>
+</body>
+</html>
