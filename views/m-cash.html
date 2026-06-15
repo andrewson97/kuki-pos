@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="theme-color" content="#e83e8c">
+  <title>KUKI · Cash Drawer</title>
+  <link rel="icon" href="/public/img/kuki_logo.png">
+  <link rel="stylesheet" href="/public/css/mobile.css">
+  <style>
+    .denom-row {
+      display: grid; grid-template-columns: 70px 1fr 90px;
+      align-items: center; gap: 10px;
+      padding: 8px 0; border-bottom: 1px solid var(--line);
+    }
+    .denom-row .label { font-weight: 700; }
+    .denom-row .qty-controls { display: flex; align-items: center; gap: 6px; }
+    .denom-row .qty-input {
+      flex: 1; text-align: center; padding: 10px;
+      border: 1.5px solid var(--line); border-radius: 8px;
+      font-weight: 700; font-size: 1.05rem;
+    }
+    .denom-row .qty-btn {
+      width: 36px; height: 36px; border-radius: 8px;
+      border: 1.5px solid var(--line); background: white;
+      font-size: 1.2rem; font-weight: 700; color: var(--ink);
+    }
+    .denom-row .line-total { text-align: right; font-weight: 600; color: var(--ink-soft); font-size: 0.9rem; }
+    .summary-row { display: flex; justify-content: space-between; padding: 4px 0; font-size: 0.92rem; }
+    .summary-row.bold { font-weight: 700; font-size: 1.05rem; padding-top: 8px; border-top: 1.5px solid var(--line); margin-top: 6px; }
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    <a href="/m" class="back">‹</a>
+    <h1>Cash Drawer</h1>
+    <a href="/cash?desktop=1" class="right">Desktop</a>
+  </div>
+
+  <div class="container">
+    <div id="status-banner"></div>
+
+    <div class="card">
+      <h2 id="form-title">Counting…</h2>
+      <div id="denom-list"></div>
+      <div class="summary-row bold"><span>Counted Total</span><span id="counted-total">${currency}0.00</span></div>
+
+      <div id="expected-block" style="display:none;margin-top:14px;">
+        <div class="summary-row"><span style="color:var(--ink-soft);">Opening</span><span id="exp-opening">-</span></div>
+        <div class="summary-row"><span style="color:var(--ink-soft);">+ Cash sales</span><span id="exp-sales">-</span></div>
+        <div class="summary-row"><span style="color:var(--ink-soft);">- Refunds</span><span id="exp-refunds">-</span></div>
+        <div class="summary-row"><span style="color:var(--ink-soft);">- Expenses</span><span id="exp-expenses">-</span></div>
+        <div class="summary-row bold"><span>Expected</span><span id="exp-expected">-</span></div>
+        <div class="summary-row bold" style="font-size:1.1rem;"><span>Variance</span><strong id="exp-variance">-</strong></div>
+      </div>
+
+      <div id="pending-warn" style="display:none;background:#fef3c7;color:#92400e;padding:10px;border-radius:8px;margin-top:10px;font-size:0.85rem;"></div>
+
+      <div class="field" style="margin-top:14px;">
+        <label>Notes (optional)</label>
+        <input type="text" id="notes-input" placeholder="e.g., found Rs.100 on floor">
+      </div>
+      <button class="btn btn-primary" id="submit-btn" style="margin-top:6px;">Save</button>
+    </div>
+  </div>
+
+  <script src="/public/js/mobile.js"></script>
+  <script>
+    const DENOMS = [5000, 2000, 1000, 500, 100, 50, 20];
+    let mode = 'open';
+    let todayData = null;
+
+    async function load() {
+      await bootMobile();
+      renderDenoms();
+      todayData = await api('/api/cash/today');
+      renderStatus();
+      decideMode();
+    }
+
+    function renderDenoms() {
+      $('denom-list').innerHTML = DENOMS.map(d => `
+        <div class="denom-row">
+          <div class="label">Rs. ${d}</div>
+          <div class="qty-controls">
+            <button class="qty-btn" onclick="bump(${d}, -1)">−</button>
+            <input type="number" class="qty-input" id="n_${d}" data-d="${d}" min="0" step="1" value="0" inputmode="numeric" oninput="recalc()">
+            <button class="qty-btn" onclick="bump(${d}, 1)">+</button>
+          </div>
+          <div class="line-total" id="lt_${d}">${fmt(0)}</div>
+        </div>`).join('');
+    }
+
+    function bump(d, delta) {
+      const el = document.getElementById('n_' + d);
+      el.value = Math.max(0, (parseInt(el.value) || 0) + delta);
+      recalc();
+    }
+
+    function recalc() {
+      let total = 0;
+      DENOMS.forEach(d => {
+        const q = parseInt($('n_' + d).value) || 0;
+        const line = q * d;
+        total += line;
+        $('lt_' + d).textContent = fmt(line);
+      });
+      $('counted-total').textContent = fmt(total);
+      if (mode === 'close' && todayData) {
+        const expected = (todayData.open?.total_amount || 0) + (todayData.cash_sales || 0) - (todayData.cash_refunds || 0) - (todayData.cash_expenses || 0);
+        const v = total - expected;
+        const el = $('exp-variance');
+        el.textContent = (v > 0 ? '+' : '') + fmt(v);
+        el.style.color = v === 0 ? 'var(--green)' : v > 0 ? 'var(--amber)' : 'var(--red)';
+      }
+    }
+
+    function renderStatus() {
+      const el = $('status-banner');
+      if (!todayData.open) {
+        el.innerHTML = `<div class="card" style="border-left:4px solid var(--blue);">📭 No opening float recorded today.</div>`;
+      } else if (todayData.shift_from_prior_day) {
+        el.innerHTML = `<div class="card" style="border-left:4px solid var(--red);background:#fef2f2;"><strong style="color:var(--red);">⚠️ Shift from ${formatDate(todayData.open.count_date)} still open.</strong><br><span style="font-size:0.85rem;">Opened by ${escapeHtml(todayData.open.user_name)} at ${formatTime(todayData.open.created_at)}. Close it now before today's sales.</span></div>`;
+      } else if (todayData.shift_open) {
+        el.innerHTML = `<div class="card" style="border-left:4px solid var(--amber);background:#fffbeb;"><strong>🟡 Shift in progress.</strong><br><span style="font-size:0.85rem;">Opening float ${fmt(todayData.open.total_amount)} by ${escapeHtml(todayData.open.user_name)} at ${formatTime(todayData.open.created_at)}.</span></div>`;
+      } else {
+        const v = todayData.close.variance;
+        const word = v === 0 ? 'matched exactly' : v > 0 ? `over by ${fmt(Math.abs(v))}` : `short by ${fmt(Math.abs(v))}`;
+        el.innerHTML = `<div class="card" style="border-left:4px solid var(--green);background:var(--green-soft);"><strong>✅ Last shift closed.</strong><br><span style="font-size:0.85rem;">Counted ${fmt(todayData.close.total_amount)}, ${word}. Open a new shift below.</span></div>`;
+      }
+    }
+
+    function decideMode() {
+      if (todayData.shift_open) setMode('close');
+      else setMode('open');
+    }
+
+    function setMode(m) {
+      mode = m;
+      const submit = $('submit-btn');
+      DENOMS.forEach(d => $('n_' + d).value = 0);
+      $('notes-input').value = '';
+      if (m === 'open') {
+        $('form-title').textContent = todayData.close ? 'Open New Shift' : 'Opening Float';
+        submit.textContent = 'Save opening float';
+        submit.className = 'btn btn-primary';
+        $('expected-block').style.display = 'none';
+        $('pending-warn').style.display = 'none';
+        submit.onclick = submitOpen;
+        submit.disabled = false;
+      } else {
+        $('form-title').textContent = 'Closing Count';
+        submit.textContent = 'Save closing count';
+        submit.className = 'btn btn-success';
+        $('expected-block').style.display = 'block';
+        const open = todayData.open?.total_amount || 0;
+        const sales = todayData.cash_sales || 0;
+        const refunds = todayData.cash_refunds || 0;
+        const expenses = todayData.cash_expenses || 0;
+        $('exp-opening').textContent = fmt(open);
+        $('exp-sales').textContent = fmt(sales);
+        $('exp-refunds').textContent = fmt(refunds);
+        $('exp-expenses').textContent = fmt(expenses);
+        $('exp-expected').textContent = fmt(open + sales - refunds - expenses);
+        if (todayData.pending_expenses > 0) {
+          $('pending-warn').textContent = `${todayData.pending_expenses} expense(s) pending admin approval. Shift cannot close until they are approved or rejected.`;
+          $('pending-warn').style.display = 'block';
+          submit.disabled = true;
+        } else {
+          $('pending-warn').style.display = 'none';
+          submit.disabled = false;
+        }
+        submit.onclick = submitClose;
+      }
+      recalc();
+    }
+
+    async function submitOpen() {
+      try {
+        const body = { notes: $('notes-input').value.trim() };
+        DENOMS.forEach(d => body['notes_' + d] = parseInt($('n_' + d).value) || 0);
+        await api('/api/cash/open', { method: 'POST', body });
+        toast('Opening float saved');
+        load();
+      } catch (err) { toast(err.message, 'error'); }
+    }
+
+    async function submitClose() {
+      try {
+        const body = { notes: $('notes-input').value.trim() };
+        DENOMS.forEach(d => body['notes_' + d] = parseInt($('n_' + d).value) || 0);
+        await api('/api/cash/close', { method: 'POST', body });
+        toast('Closing count saved');
+        load();
+      } catch (err) { toast(err.message, 'error'); }
+    }
+
+    load();
+  </script>
+</body>
+</html>

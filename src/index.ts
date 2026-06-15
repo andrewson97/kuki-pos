@@ -79,30 +79,44 @@ app.route("/api/cash", cashRoutes);
 app.route("/api/tasks", taskRoutes);
 app.route("/api/mobile", mobileRoutes);
 
-// Auto-redirect phones hitting the dashboard to the mobile view.
-// (Skip if user explicitly asked for desktop via ?desktop=1)
-app.get("/", async (c) => {
-  const ua = c.req.header("user-agent") || "";
-  const isMobile = /Android|iPhone|iPod|BlackBerry|IEMobile|Opera Mini/i.test(ua);
-  if (isMobile && c.req.query("desktop") !== "1") return c.redirect("/m");
-  const content = await Bun.file("views/dashboard.html").text();
-  return c.html(content);
-});
+// Auto-redirect phones hitting the main admin pages to their mobile equivalents.
+// Skip when ?desktop=1 is set (lets you force the full UI from a phone).
+const MOBILE_REDIRECTS: Record<string, string> = {
+  "/": "/m",
+  "/bills": "/m/bills",
+  "/expenses": "/m/expenses",
+  "/cash": "/m/cash",
+  "/reports": "/m/reports",
+};
+const isMobileUA = (ua: string) => /Android|iPhone|iPod|BlackBerry|IEMobile|Opera Mini/i.test(ua);
+
+for (const [from, to] of Object.entries(MOBILE_REDIRECTS)) {
+  const desktopFile =
+    from === "/" ? "views/dashboard.html"
+    : `views/${from.replace(/^\//, "")}.html`;
+  app.get(from, async (c) => {
+    if (isMobileUA(c.req.header("user-agent") || "") && c.req.query("desktop") !== "1") {
+      return c.redirect(to);
+    }
+    const content = await Bun.file(desktopFile).text();
+    return c.html(content);
+  });
+}
 
 // Page routes - serve HTML files
 const pages = [
   { path: "/m", file: "views/mobile.html" },
+  { path: "/m/bills", file: "views/m-bills.html" },
+  { path: "/m/expenses", file: "views/m-expenses.html" },
+  { path: "/m/cash", file: "views/m-cash.html" },
+  { path: "/m/reports", file: "views/m-reports.html" },
   { path: "/pos", file: "views/pos.html" },
-  { path: "/bills", file: "views/bills.html" },
   { path: "/products", file: "views/products.html" },
   { path: "/recipes", file: "views/recipes.html" },
   { path: "/stock", file: "views/stock.html" },
   { path: "/customers", file: "views/customers.html" },
-  { path: "/cash", file: "views/cash.html" },
   { path: "/tasks", file: "views/tasks.html" },
-  { path: "/expenses", file: "views/expenses.html" },
   { path: "/income", file: "views/income.html" },
-  { path: "/reports", file: "views/reports.html" },
   { path: "/settings", file: "views/settings.html" },
   { path: "/users", file: "views/users.html" },
 ];

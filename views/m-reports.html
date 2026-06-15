@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="theme-color" content="#e83e8c">
+  <title>KUKI · Reports</title>
+  <link rel="icon" href="/public/img/kuki_logo.png">
+  <link rel="stylesheet" href="/public/css/mobile.css">
+</head>
+<body>
+  <div class="topbar">
+    <a href="/m" class="back">‹</a>
+    <h1>Reports</h1>
+    <a href="/reports?desktop=1" class="right">Desktop</a>
+  </div>
+
+  <div class="filters" style="gap:6px;">
+    <button class="btn btn-outline btn-sm" data-range="today" onclick="quickRange('today')">Today</button>
+    <button class="btn btn-outline btn-sm" data-range="yesterday" onclick="quickRange('yesterday')">Yesterday</button>
+    <button class="btn btn-outline btn-sm" data-range="month" onclick="quickRange('month')">This Month</button>
+  </div>
+  <div class="filters">
+    <input type="date" id="filter-date">
+    <button class="btn btn-primary btn-sm" onclick="loadReport()">Load</button>
+  </div>
+
+  <div class="container">
+    <div class="card">
+      <h2 id="report-title">Daily Summary</h2>
+      <div class="stat-grid">
+        <div class="stat-tile"><div class="label">Sales</div><div class="val" id="r-sales">…</div></div>
+        <div class="stat-tile"><div class="label">Bills</div><div class="val" id="r-bills">…</div></div>
+        <div class="stat-tile"><div class="label">Cost of goods</div><div class="val" id="r-cost">…</div></div>
+        <div class="stat-tile"><div class="label">Gross profit</div><div class="val green" id="r-gross">…</div></div>
+        <div class="stat-tile"><div class="label">Expenses</div><div class="val red" id="r-exp">…</div></div>
+        <div class="stat-tile"><div class="label">Net profit</div><div class="val" id="r-net">…</div></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>By payment method</h2>
+      <div id="r-payment"><div class="empty">Loading…</div></div>
+    </div>
+
+    <div class="card">
+      <h2>Top 10 products</h2>
+      <div id="r-top"><div class="empty">Loading…</div></div>
+    </div>
+  </div>
+
+  <script src="/public/js/mobile.js"></script>
+  <script>
+    async function load() {
+      await bootMobile();
+      $('filter-date').value = todayISO();
+      loadReport();
+    }
+
+    function quickRange(r) {
+      const d = new Date(Date.now() - 5 * 60 * 60 * 1000);
+      if (r === 'yesterday') d.setDate(d.getDate() - 1);
+      if (r === 'month') d.setDate(1);
+      $('filter-date').value = d.toLocaleDateString('en-CA', { timeZone: TZ });
+      loadReport();
+    }
+
+    async function loadReport() {
+      try {
+        const date = $('filter-date').value || todayISO();
+        $('report-title').textContent = 'Report — ' + formatDate(date);
+        const r = await api(`/api/reports/daily?date=${date}`);
+        $('r-sales').textContent = fmt(r.sales.total_sales);
+        $('r-bills').textContent = r.sales.bill_count;
+        $('r-cost').textContent = fmt(r.cost_of_goods);
+        $('r-gross').textContent = fmt(r.gross_profit);
+        $('r-gross').className = 'val ' + (r.gross_profit >= 0 ? 'green' : 'red');
+        $('r-exp').textContent = fmt(r.expenses);
+        const net = r.gross_profit - r.expenses;
+        $('r-net').textContent = fmt(net);
+        $('r-net').className = 'val ' + (net >= 0 ? 'green' : 'red');
+
+        if (!r.by_payment.length) {
+          $('r-payment').innerHTML = '<div class="empty">No sales</div>';
+        } else {
+          $('r-payment').innerHTML = r.by_payment.map(p => `
+            <div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--line);">
+              <span>${(p.payment_method || '').toUpperCase()} <span style="color:var(--ink-soft);font-size:0.85rem;">· ${p.count} bills</span></span>
+              <strong>${fmt(p.total)}</strong>
+            </div>`).join('');
+        }
+
+        if (!r.top_products.length) {
+          $('r-top').innerHTML = '<div class="empty">No products sold</div>';
+        } else {
+          $('r-top').innerHTML = r.top_products.map((p, i) => `
+            <div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--line);font-size:0.9rem;">
+              <span><strong>${i + 1}.</strong> ${escapeHtml(p.product_name)} <span style="color:var(--ink-soft);">× ${p.total_qty}</span></span>
+              <strong>${fmt(p.total_revenue)}</strong>
+            </div>`).join('');
+        }
+      } catch (err) { toast(err.message, 'error'); }
+    }
+    load();
+  </script>
+</body>
+</html>

@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="theme-color" content="#e83e8c">
+  <title>KUKI · Bills</title>
+  <link rel="icon" href="/public/img/kuki_logo.png">
+  <link rel="stylesheet" href="/public/css/mobile.css">
+</head>
+<body>
+  <div class="topbar">
+    <a href="/m" class="back">‹</a>
+    <h1>Bills</h1>
+    <a href="/bills?desktop=1" class="right">Desktop</a>
+  </div>
+  <div class="filters">
+    <input type="date" id="filter-date">
+    <input type="text" id="filter-search" placeholder="Token / customer">
+  </div>
+  <div id="bills-list"><div class="empty">Loading…</div></div>
+
+  <!-- Bill detail sheet -->
+  <div class="sheet" id="bill-sheet" onclick="if(event.target===this)closeSheet('bill-sheet')">
+    <div class="sheet-inner">
+      <div class="sheet-handle"></div>
+      <div id="bill-detail"></div>
+    </div>
+  </div>
+
+  <script src="/public/js/mobile.js"></script>
+  <script>
+    let allBills = [];
+
+    async function load() {
+      await bootMobile();
+      $('filter-date').value = todayISO();
+      $('filter-date').addEventListener('change', loadBills);
+      $('filter-search').addEventListener('input', renderBills);
+      loadBills();
+    }
+
+    async function loadBills() {
+      try {
+        const params = new URLSearchParams();
+        if ($('filter-date').value) params.set('date', $('filter-date').value);
+        allBills = await api(`/api/pos/bills?${params}`);
+        renderBills();
+      } catch (err) { toast(err.message, 'error'); }
+    }
+
+    function renderBills() {
+      const q = $('filter-search').value.toLowerCase().trim();
+      const filtered = q
+        ? allBills.filter(b => String(b.token_number).includes(q) || (b.customer_name || '').toLowerCase().includes(q))
+        : allBills;
+
+      if (!filtered.length) { $('bills-list').innerHTML = '<div class="empty">No bills</div>'; return; }
+      $('bills-list').innerHTML = filtered.map(b => `
+        <div class="list-item" onclick="openBill(${b.id})">
+          <div class="list-head">
+            <span class="list-title">#${String(b.token_number).padStart(3,'0')} · ${escapeHtml(b.customer_name || 'Walk-in')}</span>
+            <span class="list-amount">${fmt(b.total)}</span>
+          </div>
+          <div class="list-head" style="margin-top:4px;">
+            <span class="list-meta">${formatTime(b.created_at)} · ${(b.payment_method || '').toUpperCase()}</span>
+            <span class="badge ${b.status === 'completed' ? 'success' : b.status === 'refunded' ? 'warning' : 'danger'}">${b.status}</span>
+          </div>
+        </div>`).join('');
+    }
+
+    async function openBill(id) {
+      try {
+        const bill = await api(`/api/pos/bills/${id}`);
+        const itemsHtml = bill.items.map(i => `
+          <div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--line);font-size:0.9rem;">
+            <span>${escapeHtml(i.product_name)} <span style="color:var(--ink-soft);">× ${i.quantity}</span></span>
+            <span>${fmt(i.total)}</span>
+          </div>`).join('');
+        const canRefund = bill.status === 'completed';
+        $('bill-detail').innerHTML = `
+          <h3>Bill #${String(bill.token_number).padStart(3,'0')}</h3>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:0.85rem;margin-bottom:14px;">
+            <div><span style="color:var(--ink-soft);">Date</span><br>${formatDateTime(bill.created_at)}</div>
+            <div><span style="color:var(--ink-soft);">Cashier</span><br>${escapeHtml(bill.cashier_name || '-')}</div>
+            <div><span style="color:var(--ink-soft);">Customer</span><br>${escapeHtml(bill.customer_name || 'Walk-in')}</div>
+            <div><span style="color:var(--ink-soft);">Payment</span><br>${(bill.payment_method || '').toUpperCase()}</div>
+          </div>
+          <div style="margin-bottom:12px;">${itemsHtml}</div>
+          <div style="display:flex;justify-content:space-between;font-size:0.9rem;padding:4px 0;"><span>Subtotal</span><span>${fmt(bill.subtotal)}</span></div>
+          ${bill.discount > 0 ? `<div style="display:flex;justify-content:space-between;font-size:0.9rem;padding:4px 0;"><span>Discount</span><span>-${fmt(bill.discount)}</span></div>` : ''}
+          ${bill.tax_amount > 0 ? `<div style="display:flex;justify-content:space-between;font-size:0.9rem;padding:4px 0;"><span>Tax</span><span>${fmt(bill.tax_amount)}</span></div>` : ''}
+          <div style="display:flex;justify-content:space-between;font-weight:700;padding:8px 0;border-top:2px solid var(--line);border-bottom:2px solid var(--line);margin:8px 0;font-size:1.05rem;"><span>TOTAL</span><span>${fmt(bill.total)}</span></div>
+          ${bill.refund_reason ? `<div style="background:#fef3c7;padding:10px;border-radius:8px;margin:10px 0;font-size:0.85rem;"><strong>Refunded:</strong> ${escapeHtml(bill.refund_reason)}<br><small>by ${escapeHtml(bill.refunded_by_name || '-')} on ${formatDateTime(bill.refunded_at)}</small></div>` : ''}
+          <div class="btn-row" style="margin-top:14px;">
+            <button class="btn btn-outline" onclick="reprint(${id})">Reprint</button>
+            ${canRefund ? `<button class="btn btn-danger" onclick="refundBill(${id}, ${bill.total})">Refund</button>` : ''}
+          </div>
+          <button class="btn btn-outline" style="margin-top:8px;" onclick="closeSheet('bill-sheet')">Close</button>`;
+        openSheet('bill-sheet');
+      } catch (err) { toast(err.message, 'error'); }
+    }
+
+    async function reprint(id) {
+      try {
+        const res = await api(`/api/pos/bills/${id}/receipt`);
+        const w = window.open('', '_blank', 'width=350,height=700');
+        const logoUrl = window.location.origin + '/public/img/kuki_logo.png';
+        w.document.write(`<html><head><style>@page{size:58mm auto;margin:0;}body{font-family:monospace;width:58mm;margin:0;}.slip{width:58mm;padding:0 0 2mm;text-align:center;}.slip img{max-width:45mm;max-height:22mm;display:block;margin:0 auto 2px;}pre{font-size:13px;font-weight:600;white-space:pre-wrap;text-align:left;padding:0 1mm;}</style></head><body><div class="slip"><img src="${logoUrl}"><pre>${res.text}</pre></div><script>window.addEventListener('load',()=>{window.addEventListener('afterprint',()=>setTimeout(()=>window.close(),200));window.print();});<\/script></body></html>`);
+        w.document.close();
+      } catch (err) { toast(err.message, 'error'); }
+    }
+
+    async function refundBill(id, total) {
+      const reason = prompt(`Refund Rs. ${total.toFixed(2)} — reason (required):`);
+      if (reason === null) return;
+      const trimmed = reason.trim();
+      if (!trimmed) { toast('Reason is required', 'error'); return; }
+      if (!confirm('Refund this bill? Stock will be restored.')) return;
+      try {
+        await api(`/api/pos/bills/${id}/refund`, { method: 'POST', body: { reason: trimmed } });
+        toast('Bill refunded');
+        closeSheet('bill-sheet');
+        loadBills();
+      } catch (err) { toast(err.message, 'error'); }
+    }
+
+    load();
+  </script>
+</body>
+</html>

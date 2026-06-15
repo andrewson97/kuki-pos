@@ -6,114 +6,32 @@
   <meta name="theme-color" content="#e83e8c">
   <title>KUKI · Mobile</title>
   <link rel="icon" href="/public/img/kuki_logo.png">
+  <link rel="stylesheet" href="/public/css/mobile.css">
   <style>
-    :root {
-      --pink: #e83e8c;
-      --pink-dark: #d63384;
-      --bg: #f6f6f8;
-      --card: #ffffff;
-      --ink: #1f2937;
-      --ink-soft: #6b7280;
-      --line: #e5e7eb;
-      --green: #16a34a;
-      --amber: #f59e0b;
-      --red: #dc2626;
-      --indigo: #4f46e5;
-    }
-    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
-    body {
-      margin: 0;
-      font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
-      background: var(--bg);
-      color: var(--ink);
-      padding-bottom: 100px;
-      -webkit-font-smoothing: antialiased;
-    }
-    .topbar {
-      background: linear-gradient(135deg, var(--pink) 0%, var(--pink-dark) 100%);
-      color: white;
-      padding: 18px 16px 22px;
-      display: flex; align-items: center; justify-content: space-between;
-      position: sticky; top: 0; z-index: 10;
-    }
-    .topbar img { height: 36px; filter: brightness(0) invert(1); }
-    .topbar .who { font-size: 0.78rem; opacity: 0.9; text-align: right; }
-    .topbar .who strong { font-size: 0.95rem; display: block; }
-    .topbar .desk-link {
-      color: white; opacity: 0.85; font-size: 0.7rem;
-      text-decoration: underline; margin-top: 2px; display: inline-block;
-    }
-    .container { padding: 0 14px; }
-    .card {
-      background: var(--card);
-      border-radius: 14px;
-      padding: 16px;
-      margin-top: 14px;
-      box-shadow: 0 1px 3px rgba(0,0,0,0.04);
-    }
-    .card h2 {
-      margin: 0 0 12px;
-      font-size: 0.78rem;
-      text-transform: uppercase;
-      letter-spacing: 0.1em;
-      color: var(--ink-soft);
-      font-weight: 700;
-    }
-
-    /* Today stats hero */
     .stats-hero {
       background: linear-gradient(135deg, var(--pink) 0%, var(--pink-dark) 100%);
       color: white;
       margin: -14px 14px 0;
       border-radius: 16px;
-      padding: 18px 18px;
+      padding: 18px;
       transform: translateY(-12px);
       box-shadow: 0 6px 18px rgba(232, 62, 140, 0.25);
     }
-    .stats-hero .label {
-      font-size: 0.72rem; opacity: 0.85;
-      text-transform: uppercase; letter-spacing: 0.12em;
-      margin-bottom: 4px;
-    }
-    .stats-hero .big {
-      font-size: 2rem; font-weight: 700; line-height: 1.1;
-    }
+    .stats-hero .label { font-size: 0.72rem; opacity: 0.85; text-transform: uppercase; letter-spacing: 0.12em; margin-bottom: 4px; }
+    .stats-hero .big { font-size: 2rem; font-weight: 700; line-height: 1.1; }
     .stats-hero .sub { font-size: 0.85rem; opacity: 0.9; margin-top: 4px; }
     .stats-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 16px; }
     .stats-row .mini { background: rgba(255,255,255,0.18); border-radius: 10px; padding: 10px 12px; }
     .stats-row .mini .label { font-size: 0.65rem; }
     .stats-row .mini .val { font-size: 1.05rem; font-weight: 700; margin-top: 2px; }
-
-    /* Expense list */
-    .exp-item {
-      padding: 12px 0;
-      border-bottom: 1px solid var(--line);
-    }
+    .exp-item { padding: 12px 0; border-bottom: 1px solid var(--line); }
     .exp-item:last-child { border-bottom: none; }
-    .exp-head {
-      display: flex; justify-content: space-between; align-items: baseline;
-      margin-bottom: 4px;
-    }
+    .exp-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 4px; }
     .exp-amount { font-weight: 700; color: var(--ink); font-size: 1.05rem; }
-    .exp-cat {
-      font-size: 0.7rem; background: #f3f4f6; color: var(--ink-soft);
-      padding: 2px 8px; border-radius: 999px;
-    }
+    .exp-cat { font-size: 0.7rem; background: #f3f4f6; color: var(--ink-soft); padding: 2px 8px; border-radius: 999px; }
     .exp-desc { font-size: 0.88rem; color: var(--ink); margin-bottom: 2px; }
     .exp-meta { font-size: 0.75rem; color: var(--ink-soft); }
     .exp-actions { display: flex; gap: 8px; margin-top: 10px; }
-    .btn {
-      flex: 1; padding: 10px; border-radius: 8px;
-      font-size: 0.9rem; font-weight: 600;
-      border: none; cursor: pointer;
-      transition: transform 0.1s, opacity 0.1s;
-    }
-    .btn:active { transform: scale(0.97); }
-    .btn.approve { background: var(--green); color: white; }
-    .btn.reject  { background: white; color: var(--red); border: 1.5px solid var(--red); }
-    .empty { padding: 16px 0; text-align: center; color: var(--ink-soft); font-size: 0.9rem; }
-
-    /* Task progress bars */
     .task-row { margin-bottom: 12px; }
     .task-row:last-child { margin-bottom: 0; }
     .task-head { display: flex; justify-content: space-between; font-size: 0.85rem; margin-bottom: 5px; }
@@ -121,56 +39,26 @@
     .task-fill { height: 100%; transition: width 0.3s; }
     .task-fill.opening { background: var(--amber); }
     .task-fill.closing { background: var(--indigo); }
-
-    /* Low stock */
-    .stock-item {
-      display: flex; justify-content: space-between; align-items: center;
-      padding: 9px 0; border-bottom: 1px solid var(--line);
-      font-size: 0.9rem;
-    }
+    .stock-item { display: flex; justify-content: space-between; align-items: center; padding: 9px 0; border-bottom: 1px solid var(--line); font-size: 0.9rem; }
     .stock-item:last-child { border-bottom: none; }
     .stock-name { color: var(--ink); }
     .stock-qty { color: var(--red); font-weight: 600; font-size: 0.85rem; }
-
-    /* Bottom quick links */
-    .quick-links {
-      display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px;
-      margin-top: 14px;
-    }
-    .quick-link {
-      background: var(--card); border-radius: 12px;
-      padding: 14px; text-align: center; color: var(--ink);
-      text-decoration: none; font-weight: 600; font-size: 0.85rem;
-      box-shadow: 0 1px 3px rgba(0,0,0,0.04);
-    }
+    .quick-links { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin-top: 14px; }
+    .quick-link { background: var(--card); border-radius: 12px; padding: 14px; text-align: center; color: var(--ink); font-weight: 600; font-size: 0.85rem; box-shadow: 0 1px 3px rgba(0,0,0,0.04); }
     .quick-link .qi { font-size: 1.5rem; display: block; margin-bottom: 4px; }
-
-    /* Loading skeleton */
-    .skeleton { background: linear-gradient(90deg, #eee, #f5f5f5, #eee); background-size: 200% 100%; animation: shimmer 1.2s infinite; border-radius: 4px; }
-    @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
-
-    /* Toast */
-    #toast-area {
-      position: fixed; bottom: 80px; left: 50%; transform: translateX(-50%);
-      display: flex; flex-direction: column; gap: 6px; z-index: 100;
-      pointer-events: none;
-    }
-    .toast {
-      background: rgba(31, 41, 55, 0.96); color: white;
-      padding: 10px 16px; border-radius: 999px;
-      font-size: 0.85rem; box-shadow: 0 4px 12px rgba(0,0,0,0.2);
-      animation: slideUp 0.2s;
-    }
-    .toast.err { background: var(--red); }
-    @keyframes slideUp { from { transform: translateY(20px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+    .topbar img { height: 32px; filter: brightness(0) invert(1); }
+    .who { font-size: 0.78rem; opacity: 0.9; text-align: right; }
+    .who strong { font-size: 0.92rem; display: block; }
+    .who .desk-link { color: white; opacity: 0.85; font-size: 0.7rem; text-decoration: underline; }
   </style>
 </head>
 <body>
   <div class="topbar">
     <img src="/public/img/kuki_logo.png" alt="KUKI">
+    <h1 style="margin-left:8px;">Dashboard</h1>
     <div class="who">
       <strong id="user-name">…</strong>
-      <a href="/?desktop=1" class="desk-link">Desktop view</a>
+      <a href="/?desktop=1" class="desk-link">Desktop</a>
     </div>
   </div>
 
@@ -184,76 +72,34 @@
       <h2>Pending expense approvals <span id="pending-count" style="color:var(--red);"></span></h2>
       <div id="pending-list"><div class="empty">Loading…</div></div>
     </div>
-
     <div class="card">
       <h2>Today's tasks</h2>
-      <div id="task-section">
-        <div class="empty">Loading…</div>
-      </div>
+      <div id="task-section"><div class="empty">Loading…</div></div>
     </div>
-
     <div class="card">
       <h2>Low stock alerts</h2>
-      <div id="stock-section">
-        <div class="empty">Loading…</div>
-      </div>
+      <div id="stock-section"><div class="empty">Loading…</div></div>
     </div>
-
     <div class="quick-links">
-      <a class="quick-link" href="/bills"><span class="qi">🧾</span>Bills</a>
-      <a class="quick-link" href="/cash"><span class="qi">💵</span>Cash Drawer</a>
-      <a class="quick-link" href="/expenses"><span class="qi">💸</span>Expenses</a>
-      <a class="quick-link" href="/reports"><span class="qi">📊</span>Reports</a>
+      <a class="quick-link" href="/m/bills"><span class="qi">🧾</span>Bills</a>
+      <a class="quick-link" href="/m/cash"><span class="qi">💵</span>Cash Drawer</a>
+      <a class="quick-link" href="/m/expenses"><span class="qi">💸</span>Expenses</a>
+      <a class="quick-link" href="/m/reports"><span class="qi">📊</span>Reports</a>
     </div>
   </div>
 
-  <div id="toast-area"></div>
-
+  <script src="/public/js/mobile.js"></script>
   <script>
-    const TZ = 'Asia/Colombo';
-    let currency = 'Rs. ';
-
-    function $(id) { return document.getElementById(id); }
-    function fmt(amount) { return currency + parseFloat(amount || 0).toFixed(2); }
-    function escapeHtml(s) {
-      return String(s || '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
-    }
-    function toast(msg, isErr) {
-      const el = document.createElement('div');
-      el.className = 'toast' + (isErr ? ' err' : '');
-      el.textContent = msg;
-      $('toast-area').appendChild(el);
-      setTimeout(() => el.remove(), 2400);
-    }
-
-    async function api(url, opts = {}) {
-      const res = await fetch(url, {
-        ...opts,
-        headers: { 'Content-Type': 'application/json', ...opts.headers },
-        body: opts.body ? JSON.stringify(opts.body) : undefined,
-      });
-      if (res.status === 401) { window.location.href = '/login'; throw new Error('Unauthorized'); }
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Request failed');
-      return data;
-    }
-
     async function load() {
       try {
-        const [me, settings, data] = await Promise.all([
-          api('/api/auth/me'),
-          api('/api/settings'),
-          api('/api/mobile/dashboard'),
-        ]);
-        currency = settings.currency_symbol || 'Rs. ';
-        $('user-name').textContent = me.user.full_name;
+        await bootMobile();
+        const data = await api('/api/mobile/dashboard');
+        $('user-name').textContent = currentUser.full_name;
         renderHero(data.today);
-        renderPending(data.pending_expenses, me.user.role === 'admin');
+        renderPending(data.pending_expenses, currentUser.role === 'admin');
         renderTasks(data.tasks);
         renderStock(data.low_stock);
-      } catch (err) {
-        toast(err.message, true);
-      }
+      } catch (err) { toast(err.message, 'error'); }
     }
 
     function renderHero(t) {
@@ -266,16 +112,12 @@
           <div class="mini"><div class="label">Profit</div><div class="val">${fmt(t.profit)}</div></div>
           <div class="mini"><div class="label">Expenses</div><div class="val">${fmt(t.expenses_approved)}</div></div>
           <div class="mini"><div class="label">Margin</div><div class="val">${t.sales > 0 ? Math.round(t.profit / t.sales * 100) : 0}%</div></div>
-        </div>
-      `;
+        </div>`;
     }
 
     function renderPending(items, isAdmin) {
       $('pending-count').textContent = items.length ? '· ' + items.length : '';
-      if (!items.length) {
-        $('pending-list').innerHTML = '<div class="empty">All caught up 🎉</div>';
-        return;
-      }
+      if (!items.length) { $('pending-list').innerHTML = '<div class="empty">All caught up 🎉</div>'; return; }
       $('pending-list').innerHTML = items.map(e => `
         <div class="exp-item" data-id="${e.id}">
           <div class="exp-head">
@@ -285,11 +127,10 @@
           <div class="exp-desc">${escapeHtml(e.description || '(no description)')}</div>
           <div class="exp-meta">${(e.payment_source || 'cash').toUpperCase()} · ${escapeHtml(e.submitted_by || '-')}</div>
           ${isAdmin ? `<div class="exp-actions">
-            <button class="btn approve" onclick="approve(${e.id})">Approve</button>
-            <button class="btn reject" onclick="reject(${e.id})">Reject</button>
+            <button class="btn btn-success btn-sm" onclick="approve(${e.id})">Approve</button>
+            <button class="btn btn-danger btn-sm" onclick="reject(${e.id})">Reject</button>
           </div>` : ''}
-        </div>
-      `).join('');
+        </div>`).join('');
     }
 
     function renderTasks(tasks) {
@@ -297,7 +138,7 @@
       if (tasks.opening.total > 0) sections.push(renderTaskBar('🌅 Opening', 'opening', tasks.opening));
       if (tasks.closing.total > 0) sections.push(renderTaskBar('🌙 Closing', 'closing', tasks.closing));
       $('task-section').innerHTML = sections.length
-        ? sections.join('') + '<a href="/tasks" style="font-size:0.8rem;color:var(--pink);text-decoration:none;display:block;margin-top:8px;">Open full list →</a>'
+        ? sections.join('') + '<a href="/tasks" style="font-size:0.8rem;color:var(--pink);display:block;margin-top:8px;">Open full list →</a>'
         : '<div class="empty">No tasks set up</div>';
     }
     function renderTaskBar(label, cls, s) {
@@ -307,39 +148,26 @@
         <div class="task-bar"><div class="task-fill ${cls}" style="width:${pct}%;"></div></div>
       </div>`;
     }
-
     function renderStock(items) {
-      if (!items.length) {
-        $('stock-section').innerHTML = '<div class="empty">All stock levels OK 👍</div>';
-        return;
-      }
+      if (!items.length) { $('stock-section').innerHTML = '<div class="empty">All stock levels OK 👍</div>'; return; }
       $('stock-section').innerHTML = items.map(s => `
         <div class="stock-item">
           <span class="stock-name">${escapeHtml(s.name)}</span>
           <span class="stock-qty">${s.quantity} ${escapeHtml(s.unit || '')} / min ${s.reorder_level}</span>
-        </div>
-      `).join('') + '<a href="/stock" style="font-size:0.8rem;color:var(--pink);text-decoration:none;display:block;margin-top:10px;">See all stock →</a>';
+        </div>`).join('');
     }
 
     async function approve(id) {
-      try {
-        await api(`/api/expenses/${id}/approve`, { method: 'POST', body: {} });
-        toast('Approved');
-        load();
-      } catch (err) { toast(err.message, true); }
+      try { await api(`/api/expenses/${id}/approve`, { method: 'POST', body: {} }); toast('Approved'); load(); }
+      catch (err) { toast(err.message, 'error'); }
     }
     async function reject(id) {
       const reason = prompt('Reason for rejection:');
       if (reason === null) return;
-      try {
-        await api(`/api/expenses/${id}/reject`, { method: 'POST', body: { reason: reason.trim() } });
-        toast('Rejected');
-        load();
-      } catch (err) { toast(err.message, true); }
+      try { await api(`/api/expenses/${id}/reject`, { method: 'POST', body: { reason: reason.trim() } }); toast('Rejected'); load(); }
+      catch (err) { toast(err.message, 'error'); }
     }
-
     load();
-    // Auto-refresh every 60s so admin sees new approvals/sales without pulling
     setInterval(load, 60000);
   </script>
 </body>

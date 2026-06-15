@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="theme-color" content="#e83e8c">
+  <title>KUKI · Expenses</title>
+  <link rel="icon" href="/public/img/kuki_logo.png">
+  <link rel="stylesheet" href="/public/css/mobile.css">
+</head>
+<body>
+  <div class="topbar">
+    <a href="/m" class="back">‹</a>
+    <h1>Expenses</h1>
+    <a href="/expenses?desktop=1" class="right">Desktop</a>
+  </div>
+  <div class="filters">
+    <select id="filter-status">
+      <option value="">All statuses</option>
+      <option value="pending">Pending</option>
+      <option value="approved">Approved</option>
+      <option value="rejected">Rejected</option>
+    </select>
+    <input type="date" id="filter-start">
+    <input type="date" id="filter-end">
+  </div>
+
+  <div class="container" style="padding-top:12px;">
+    <div class="stat-tile" style="margin-bottom:10px;">
+      <div class="label">Total approved (filter range)</div>
+      <div class="val" id="total-amount">…</div>
+    </div>
+  </div>
+
+  <div id="expenses-list"><div class="empty">Loading…</div></div>
+
+  <button class="fab" onclick="openAdd()">+</button>
+
+  <!-- Add sheet -->
+  <div class="sheet" id="add-sheet" onclick="if(event.target===this)closeSheet('add-sheet')">
+    <div class="sheet-inner">
+      <div class="sheet-handle"></div>
+      <h3>New expense</h3>
+      <div class="field">
+        <label>Category</label>
+        <select id="ex-cat"></select>
+      </div>
+      <div class="field">
+        <label>Amount (Rs.)</label>
+        <input type="number" id="ex-amt" step="0.01" min="0" inputmode="decimal">
+      </div>
+      <div class="field">
+        <label>Paid from</label>
+        <select id="ex-source">
+          <option value="cash">Cash (drawer)</option>
+          <option value="card">Card</option>
+          <option value="bank">Bank Transfer</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Description / note</label>
+        <input type="text" id="ex-desc" placeholder="e.g., emergency cream purchase">
+      </div>
+      <div class="field">
+        <label>Date</label>
+        <input type="date" id="ex-date">
+      </div>
+      <div class="btn-row">
+        <button class="btn btn-outline" onclick="closeSheet('add-sheet')">Cancel</button>
+        <button class="btn btn-primary" onclick="saveExpense()">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/public/js/mobile.js"></script>
+  <script>
+    let allCats = [];
+
+    async function load() {
+      await bootMobile();
+      const today = todayISO();
+      $('filter-start').value = today.substring(0, 8) + '01';
+      $('filter-end').value = today;
+      $('ex-date').value = today;
+      $('filter-status').addEventListener('change', loadExpenses);
+      $('filter-start').addEventListener('change', loadExpenses);
+      $('filter-end').addEventListener('change', loadExpenses);
+      allCats = await api('/api/expenses/categories');
+      $('ex-cat').innerHTML = allCats.map(c => `<option value="${c.id}">${escapeHtml(c.name)}</option>`).join('');
+      loadExpenses();
+    }
+
+    async function loadExpenses() {
+      try {
+        const p = new URLSearchParams();
+        if ($('filter-start').value) p.set('start_date', $('filter-start').value);
+        if ($('filter-end').value) p.set('end_date', $('filter-end').value);
+        if ($('filter-status').value) p.set('status', $('filter-status').value);
+        const items = await api(`/api/expenses?${p}`);
+        const approvedTotal = items.filter(x => x.status === 'approved').reduce((s, e) => s + e.amount, 0);
+        $('total-amount').textContent = fmt(approvedTotal);
+        renderList(items);
+      } catch (err) { toast(err.message, 'error'); }
+    }
+
+    function renderList(items) {
+      if (!items.length) { $('expenses-list').innerHTML = '<div class="empty">No expenses</div>'; return; }
+      const isAdmin = currentUser?.role === 'admin';
+      $('expenses-list').innerHTML = items.map(e => {
+        const cls = e.status === 'approved' ? 'success' : e.status === 'pending' ? 'warning' : 'danger';
+        return `<div class="list-item">
+          <div class="list-head">
+            <span class="list-title">${escapeHtml(e.description || e.category_name || 'Expense')}</span>
+            <span class="list-amount">${fmt(e.amount)}</span>
+          </div>
+          <div class="list-head" style="margin-top:4px;">
+            <span class="list-meta">${escapeHtml(e.category_name || '-')} · ${(e.payment_source || 'cash').toUpperCase()} · ${formatDate(e.expense_date)}</span>
+            <span class="badge ${cls}">${e.status}</span>
+          </div>
+          <div class="list-meta">by ${escapeHtml(e.user_name || '-')}${e.approver_name && e.status !== 'pending' ? ` · ${e.status} by ${escapeHtml(e.approver_name)}` : ''}${e.rejected_reason ? ` · "${escapeHtml(e.rejected_reason)}"` : ''}</div>
+          ${isAdmin && e.status === 'pending' ? `<div class="btn-row" style="margin-top:8px;">
+            <button class="btn btn-success btn-sm" onclick="approve(${e.id})">Approve</button>
+            <button class="btn btn-danger btn-sm" onclick="reject(${e.id})">Reject</button>
+          </div>` : ''}
+        </div>`;
+      }).join('');
+    }
+
+    function openAdd() {
+      $('ex-amt').value = '';
+      $('ex-desc').value = '';
+      $('ex-date').value = todayISO();
+      $('ex-source').value = 'cash';
+      openSheet('add-sheet');
+    }
+
+    async function saveExpense() {
+      const desc = $('ex-desc').value.trim();
+      const amt = parseFloat($('ex-amt').value);
+      if (!amt || amt <= 0) { toast('Enter an amount', 'error'); return; }
+      if (currentUser.role !== 'admin' && !desc) { toast('Description required', 'error'); return; }
+      try {
+        const res = await api('/api/expenses', { method: 'POST', body: {
+          category_id: parseInt($('ex-cat').value),
+          amount: amt,
+          description: desc,
+          expense_date: $('ex-date').value,
+          payment_source: $('ex-source').value,
+        }});
+        closeSheet('add-sheet');
+        toast(res.status === 'pending' ? 'Submitted for approval' : 'Saved');
+        loadExpenses();
+      } catch (err) { toast(err.message, 'error'); }
+    }
+
+    async function approve(id) {
+      try { await api(`/api/expenses/${id}/approve`, { method: 'POST', body: {} }); toast('Approved'); loadExpenses(); }
+      catch (err) { toast(err.message, 'error'); }
+    }
+    async function reject(id) {
+      const reason = prompt('Reason:');
+      if (reason === null) return;
+      try { await api(`/api/expenses/${id}/reject`, { method: 'POST', body: { reason: reason.trim() } }); toast('Rejected'); loadExpenses(); }
+      catch (err) { toast(err.message, 'error'); }
+    }
+
+    load();
+  </script>
+</body>
+</html>
