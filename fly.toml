@@ -1,5 +1,10 @@
-app = "kuki-pos"
-primary_region = "bom"
+# fly.toml app configuration file generated for kuki-pos on 2026-05-26T07:31:57Z
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'kuki-pos'
+primary_region = 'ams'
 
 [build]
 
@@ -11,15 +16,11 @@ primary_region = "bom"
 [http_service]
   internal_port = 8080
   force_https = true
-  auto_stop_machines = "stop"
+  auto_stop_machines = 'stop'
   auto_start_machines = true
   min_machines_running = 0
 
-[[mounts]]
-  source = "shop_data"
-  destination = "/data"
-
 [[vm]]
-  cpu_kind = "shared"
+  cpu_kind = 'shared'
   cpus = 1
   memory_mb = 512
