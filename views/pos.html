@@ -97,6 +97,24 @@
     </div>
   </div>
 
+  <!-- Held Carts Modal -->
+  <div class="modal fade" id="heldModal" tabindex="-1">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title">Held carts</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body">
+          <div id="held-cards" class="row g-3"></div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Receipt Modal -->
   <div class="modal fade" id="receiptModal" tabindex="-1">
     <div class="modal-dialog">
@@ -413,17 +431,55 @@
       showToast('Cart parked');
     }
     function openHeld() {
+      renderHeldCards();
+      new bootstrap.Modal(document.getElementById('heldModal')).show();
+    }
+
+    function renderHeldCards() {
       const held = getHeld();
-      if (!held.length) { showToast('No held carts'); return; }
-      const lines = held.map(h => {
+      const wrap = document.getElementById('held-cards');
+      if (!held.length) {
+        wrap.innerHTML = '<div class="col-12 text-center text-muted py-4">No held carts. Park a cart from the POS to see it here.</div>';
+        return;
+      }
+      wrap.innerHTML = held.map(h => {
         const total = h.items.reduce((s, i) => s + i.quantity * i.unit_price, 0);
-        return `${h.label} — ${formatCurrency(total)} (${h.items.length} items)`;
-      });
-      const choice = prompt('Held carts:\n\n' + lines.map((l, i) => (i + 1) + '. ' + l).join('\n') + '\n\nEnter the number to resume, or 0 to cancel:');
-      if (!choice) return;
-      const idx = parseInt(choice) - 1;
-      if (idx < 0 || idx >= held.length) return;
-      resumeHeld(held[idx].id);
+        const itemCount = h.items.reduce((s, i) => s + i.quantity, 0);
+        const preview = h.items.slice(0, 4).map(i => `<li>${i.quantity}× ${i.product_name} <span class="text-muted">${formatCurrency(i.quantity * i.unit_price)}</span></li>`).join('');
+        const more = h.items.length > 4 ? `<li class="text-muted">+ ${h.items.length - 4} more…</li>` : '';
+        const time = new Date(h.created_at).toLocaleTimeString('en-LK', { timeZone: 'Asia/Colombo', hour: '2-digit', minute: '2-digit' });
+        return `
+          <div class="col-md-6">
+            <div class="card h-100" style="border:2px solid #e9ecef;border-radius:12px;">
+              <div class="card-body d-flex flex-column">
+                <div class="d-flex justify-content-between align-items-start mb-2">
+                  <div>
+                    <h6 class="card-title mb-0 fw-bold">${h.label}</h6>
+                    <small class="text-muted">Parked at ${time}${h.customer_label ? ' · ' + h.customer_label : ''}</small>
+                  </div>
+                  <span class="badge bg-primary fs-6">${formatCurrency(total)}</span>
+                </div>
+                <ul class="small mb-2 ps-3" style="line-height:1.5;">${preview}${more}</ul>
+                <div class="text-muted small mb-3">${itemCount} item${itemCount === 1 ? '' : 's'}</div>
+                <div class="mt-auto d-flex gap-2">
+                  <button class="btn btn-primary flex-fill" onclick="resumeAndClose(${h.id})">Resume</button>
+                  <button class="btn btn-outline-danger" onclick="deleteHeldFromModal(${h.id})">Delete</button>
+                </div>
+              </div>
+            </div>
+          </div>`;
+      }).join('');
+    }
+
+    function resumeAndClose(id) {
+      bootstrap.Modal.getInstance(document.getElementById('heldModal')).hide();
+      resumeHeld(id);
+    }
+
+    function deleteHeldFromModal(id) {
+      if (!confirm('Delete this held cart? Items will not be billed.')) return;
+      setHeld(getHeld().filter(x => x.id !== id));
+      renderHeldCards();
     }
     function resumeHeld(id) {
       const held = getHeld();
