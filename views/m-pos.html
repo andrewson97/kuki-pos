@@ -49,7 +49,8 @@
   <div class="topbar">
     <a href="/m" class="back">‹</a>
     <h1 id="title-bar">POS · <span id="token-badge">#---</span></h1>
-    <a href="/pos?desktop=1" class="right">Desktop</a>
+    <button class="right" id="held-btn" onclick="openHeld()" style="background:rgba(255,255,255,0.18);border:none;color:white;padding:4px 12px;border-radius:999px;font-size:0.85rem;display:none;">⏸ <span id="held-count">0</span></button>
+    <a href="/pos?desktop=1" class="right" style="margin-left:8px;">Desktop</a>
   </div>
 
   <div id="shift-banner"></div>
@@ -69,7 +70,10 @@
   <div class="sheet" id="cart-sheet" onclick="if(event.target===this)closeSheet('cart-sheet')">
     <div class="sheet-inner">
       <div class="sheet-handle"></div>
-      <h3>Cart <button class="btn-sm" style="float:right;background:none;border:none;color:var(--red);font-weight:600;" onclick="clearCart()">Clear</button></h3>
+      <h3>Cart
+        <button class="btn-sm" style="float:right;background:none;border:none;color:var(--red);font-weight:600;" onclick="clearCart()">Clear</button>
+        <button class="btn-sm" style="float:right;background:none;border:none;color:var(--blue);font-weight:600;margin-right:10px;" onclick="parkCurrent()">⏸ Park</button>
+      </h3>
       <div id="cart-items"></div>
       <div style="margin-top:14px;">
         <div class="sum-row"><span>Subtotal</span><span id="s-subtotal">${currency}0.00</span></div>
@@ -112,6 +116,15 @@
         <button class="btn btn-outline" onclick="closeSheet('cash-sheet')">Cancel</button>
         <button class="btn btn-success" id="cash-confirm" disabled>Confirm sale</button>
       </div>
+    </div>
+  </div>
+
+  <!-- Held carts sheet -->
+  <div class="sheet" id="held-sheet" onclick="if(event.target===this)closeSheet('held-sheet')">
+    <div class="sheet-inner">
+      <div class="sheet-handle"></div>
+      <h3>Held carts</h3>
+      <div id="held-list"></div>
     </div>
   </div>
 
@@ -158,6 +171,7 @@
       $('cust-search').addEventListener('blur', () => setTimeout(() => $('cust-dropdown').style.display = 'none', 200));
       $('s-discount').addEventListener('input', recalc);
       checkShift();
+      renderHeldBadge();
     }
 
     async function checkShift() {
@@ -261,6 +275,86 @@
     function qty(idx, d) { cart[idx].quantity += d; if (cart[idx].quantity <= 0) cart.splice(idx, 1); recalc(); }
     function rm(idx) { cart.splice(idx, 1); recalc(); }
     function clearCart() { cart = []; $('s-discount').value = 0; clearCust(); recalc(); }
+
+    // ===== Held carts (parked, stored in localStorage per device) =====
+    const HELD_KEY = 'kuki_held_carts';
+    function getHeld() { try { return JSON.parse(localStorage.getItem(HELD_KEY) || '[]'); } catch { return []; } }
+    function setHeld(arr) { localStorage.setItem(HELD_KEY, JSON.stringify(arr)); renderHeldBadge(); }
+    function renderHeldBadge() {
+      const held = getHeld();
+      const btn = $('held-btn');
+      $('held-count').textContent = held.length;
+      btn.style.display = held.length > 0 ? 'inline-block' : 'none';
+    }
+    function parkCurrent() {
+      if (!cart.length) { toast('Cart is empty'); return; }
+      const custName = $('cust-selected').textContent.replace(/^✓ /, '').replace(/ \(tap × to clear\)$/, '').trim();
+      const defaultLabel = custName || ('Hold ' + new Date().toLocaleTimeString('en-LK', { timeZone: TZ, hour: '2-digit', minute: '2-digit' }));
+      const label = prompt('Name this held cart:', defaultLabel);
+      if (label === null) return;
+      const held = getHeld();
+      held.push({
+        id: Date.now(),
+        label: label.trim() || defaultLabel,
+        items: cart.slice(),
+        customer_id: $('cust-id').value || '',
+        customer_label: custName,
+        discount: parseFloat($('s-discount').value) || 0,
+        created_at: new Date().toISOString(),
+      });
+      setHeld(held);
+      clearCart();
+      closeSheet('cart-sheet');
+      toast('Cart parked');
+    }
+    function openHeld() {
+      const held = getHeld();
+      if (!held.length) { $('held-list').innerHTML = '<div class="empty">No held carts</div>'; }
+      else {
+        $('held-list').innerHTML = held.map(h => {
+          const total = h.items.reduce((s, i) => s + i.quantity * i.unit_price, 0);
+          const itemSummary = h.items.slice(0, 3).map(i => `${i.quantity}× ${escapeHtml(i.product_name)}`).join(', ') + (h.items.length > 3 ? ` +${h.items.length - 3} more` : '');
+          return `<div class="list-item" style="display:flex;align-items:center;gap:10px;">
+            <div style="flex:1;min-width:0;" onclick="resumeHeld(${h.id})">
+              <div class="list-head"><span class="list-title">${escapeHtml(h.label)}</span><span class="list-amount">${fmt(total)}</span></div>
+              <div class="list-meta">${itemSummary}</div>
+              <div class="list-meta">Parked at ${formatTime(h.created_at)}${h.customer_label ? ' · ' + escapeHtml(h.customer_label) : ''}</div>
+            </div>
+            <button class="qbtn" style="color:var(--red);font-size:1.4rem;" onclick="deleteHeld(${h.id})">×</button>
+          </div>`;
+        }).join('');
+      }
+      openSheet('held-sheet');
+    }
+    function resumeHeld(id) {
+      const held = getHeld();
+      const h = held.find(x => x.id === id);
+      if (!h) return;
+      const swap = () => {
+        cart = h.items.slice();
+        $('s-discount').value = h.discount || 0;
+        if (h.customer_id && h.customer_label) pickCust(parseInt(h.customer_id), h.customer_label);
+        else clearCust();
+        setHeld(held.filter(x => x.id !== id));
+        closeSheet('held-sheet');
+        recalc();
+        toast('Resumed');
+      };
+      if (cart.length > 0) {
+        if (confirm('You have items in the current cart. Park the current one and switch?')) {
+          parkCurrent();
+          // parkCurrent prompted for a name and is synchronous about it — proceed
+          setTimeout(swap, 50);
+        }
+        return;
+      }
+      swap();
+    }
+    function deleteHeld(id) {
+      if (!confirm('Delete this held cart? Items will not be billed.')) return;
+      setHeld(getHeld().filter(x => x.id !== id));
+      openHeld();
+    }
     function openCart() { if (!cart.length) { toast('Cart is empty'); return; } openSheet('cart-sheet'); }
 
     function custSearch() {

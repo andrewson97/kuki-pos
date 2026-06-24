@@ -31,7 +31,11 @@
       <div class="cart-panel">
         <div class="cart-header">
           <span>Cart <span class="badge bg-secondary" id="cart-count">0</span></span>
-          <button class="btn btn-sm btn-outline-danger" onclick="clearCart()">Clear</button>
+          <div class="d-flex gap-2">
+            <button class="btn btn-sm btn-outline-primary" onclick="openHeld()">⏸ Held <span class="badge bg-primary" id="held-count" style="display:none;">0</span></button>
+            <button class="btn btn-sm btn-outline-info" onclick="parkCurrent()">Park</button>
+            <button class="btn btn-sm btn-outline-danger" onclick="clearCart()">Clear</button>
+          </div>
         </div>
         <div class="cart-items" id="cart-items">
           <div class="text-center text-muted py-5" id="cart-empty">No items in cart</div>
@@ -150,6 +154,7 @@
       renderProducts();
       setupCustomerSearch();
       await checkShiftState();
+      renderHeldBadge();
 
       document.getElementById('product-search').addEventListener('input', renderProducts);
     }
@@ -375,6 +380,71 @@
       document.getElementById('row-savings').style.display = 'none';
       clearCustomer();
       renderCart();
+    }
+
+    // ===== Held carts (parked, stored in localStorage per device) =====
+    const HELD_KEY = 'kuki_held_carts';
+    function getHeld() { try { return JSON.parse(localStorage.getItem(HELD_KEY) || '[]'); } catch { return []; } }
+    function setHeld(arr) { localStorage.setItem(HELD_KEY, JSON.stringify(arr)); renderHeldBadge(); }
+    function renderHeldBadge() {
+      const held = getHeld();
+      const badge = document.getElementById('held-count');
+      if (held.length) { badge.style.display = 'inline-block'; badge.textContent = held.length; }
+      else { badge.style.display = 'none'; }
+    }
+    function parkCurrent() {
+      if (!cart.length) { showToast('Cart is empty', 'warning'); return; }
+      const custLabel = document.getElementById('customer-selected-name').textContent || '';
+      const defaultLabel = custLabel || ('Hold ' + new Date().toLocaleTimeString());
+      const label = prompt('Name this held cart:', defaultLabel);
+      if (label === null) return;
+      const held = getHeld();
+      held.push({
+        id: Date.now(),
+        label: label.trim() || defaultLabel,
+        items: cart.slice(),
+        customer_id: document.getElementById('customer-id').value || '',
+        customer_label: custLabel,
+        discount: parseFloat(document.getElementById('discount-input').value) || 0,
+        created_at: new Date().toISOString(),
+      });
+      setHeld(held);
+      clearCart();
+      showToast('Cart parked');
+    }
+    function openHeld() {
+      const held = getHeld();
+      if (!held.length) { showToast('No held carts'); return; }
+      const lines = held.map(h => {
+        const total = h.items.reduce((s, i) => s + i.quantity * i.unit_price, 0);
+        return `${h.label} — ${formatCurrency(total)} (${h.items.length} items)`;
+      });
+      const choice = prompt('Held carts:\n\n' + lines.map((l, i) => (i + 1) + '. ' + l).join('\n') + '\n\nEnter the number to resume, or 0 to cancel:');
+      if (!choice) return;
+      const idx = parseInt(choice) - 1;
+      if (idx < 0 || idx >= held.length) return;
+      resumeHeld(held[idx].id);
+    }
+    function resumeHeld(id) {
+      const held = getHeld();
+      const h = held.find(x => x.id === id);
+      if (!h) return;
+      const swap = () => {
+        cart = h.items.slice();
+        document.getElementById('discount-input').value = h.discount || 0;
+        if (h.customer_id && h.customer_label) selectCustomer(parseInt(h.customer_id), h.customer_label);
+        else clearCustomer();
+        setHeld(held.filter(x => x.id !== id));
+        renderCart();
+        showToast('Resumed');
+      };
+      if (cart.length > 0) {
+        if (!confirm('You have items in the current cart. Park the current one and switch?')) return;
+        parkCurrent();
+        setTimeout(swap, 50);
+        return;
+      }
+      swap();
     }
 
     function updateCartTotals() {
