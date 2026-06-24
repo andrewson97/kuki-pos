@@ -289,13 +289,11 @@
     function parkCurrent() {
       if (!cart.length) { toast('Cart is empty'); return; }
       const custName = $('cust-selected').textContent.replace(/^✓ /, '').replace(/ \(tap × to clear\)$/, '').trim();
-      const defaultLabel = custName || ('Hold ' + new Date().toLocaleTimeString('en-LK', { timeZone: TZ, hour: '2-digit', minute: '2-digit' }));
-      const label = prompt('Name this held cart:', defaultLabel);
-      if (label === null) return;
+      const label = custName || ('Hold ' + new Date().toLocaleTimeString('en-LK', { timeZone: TZ, hour: '2-digit', minute: '2-digit' }));
       const held = getHeld();
       held.push({
         id: Date.now(),
-        label: label.trim() || defaultLabel,
+        label,
         items: cart.slice(),
         customer_id: $('cust-id').value || '',
         customer_label: custName,
@@ -327,26 +325,22 @@
       openSheet('held-sheet');
     }
     function resumeHeld(id) {
-      const held = getHeld();
-      const h = held.find(x => x.id === id);
+      const h = getHeld().find(x => x.id === id);
       if (!h) return;
       const swap = () => {
         cart = h.items.slice();
         $('s-discount').value = h.discount || 0;
         if (h.customer_id && h.customer_label) pickCust(parseInt(h.customer_id), h.customer_label);
         else clearCust();
-        setHeld(held.filter(x => x.id !== id));
+        // Refetch inside swap — parkCurrent may have just added an entry.
+        setHeld(getHeld().filter(x => x.id !== id));
         closeSheet('held-sheet');
         recalc();
         toast('Resumed');
       };
       if (cart.length > 0) {
-        if (confirm('You have items in the current cart. Park the current one and switch?')) {
-          parkCurrent();
-          // parkCurrent prompted for a name and is synchronous about it — proceed
-          setTimeout(swap, 50);
-        }
-        return;
+        if (!confirm('You have items in the current cart. Park the current one and switch?')) return;
+        parkCurrent();
       }
       swap();
     }

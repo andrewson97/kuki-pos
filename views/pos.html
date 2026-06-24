@@ -413,13 +413,11 @@
     function parkCurrent() {
       if (!cart.length) { showToast('Cart is empty', 'warning'); return; }
       const custLabel = document.getElementById('customer-selected-name').textContent || '';
-      const defaultLabel = custLabel || ('Hold ' + new Date().toLocaleTimeString());
-      const label = prompt('Name this held cart:', defaultLabel);
-      if (label === null) return;
+      const label = custLabel || ('Hold ' + new Date().toLocaleTimeString());
       const held = getHeld();
       held.push({
         id: Date.now(),
-        label: label.trim() || defaultLabel,
+        label,
         items: cart.slice(),
         customer_id: document.getElementById('customer-id').value || '',
         customer_label: custLabel,
@@ -482,23 +480,21 @@
       renderHeldCards();
     }
     function resumeHeld(id) {
-      const held = getHeld();
-      const h = held.find(x => x.id === id);
+      const h = getHeld().find(x => x.id === id);
       if (!h) return;
       const swap = () => {
         cart = h.items.slice();
         document.getElementById('discount-input').value = h.discount || 0;
         if (h.customer_id && h.customer_label) selectCustomer(parseInt(h.customer_id), h.customer_label);
         else clearCustomer();
-        setHeld(held.filter(x => x.id !== id));
+        // Refetch held inside swap — parkCurrent may have added to it.
+        setHeld(getHeld().filter(x => x.id !== id));
         renderCart();
         showToast('Resumed');
       };
       if (cart.length > 0) {
         if (!confirm('You have items in the current cart. Park the current one and switch?')) return;
         parkCurrent();
-        setTimeout(swap, 50);
-        return;
       }
       swap();
     }
