@@ -202,6 +202,28 @@ export function runMigrations(): void {
   addColumn("expenses", "approved_at", "TEXT");
   addColumn("expenses", "rejected_reason", "TEXT");
   addColumn("daily_tasks", "category", "TEXT NOT NULL DEFAULT 'opening'");
+
+  // One-shot: merge product categories that differ only by casing.
+  // For each lowercase key, pick the most common casing as canonical.
+  try {
+    const rows = db.query(
+      "SELECT category, COUNT(*) as n FROM products WHERE category IS NOT NULL GROUP BY category"
+    ).all() as { category: string; n: number }[];
+    const byKey: Record<string, { category: string; n: number }> = {};
+    for (const r of rows) {
+      const key = r.category.trim().toLowerCase();
+      if (!byKey[key] || byKey[key].n < r.n) byKey[key] = { category: r.category.trim(), n: r.n };
+    }
+    for (const r of rows) {
+      const key = r.category.trim().toLowerCase();
+      const canonical = byKey[key].category;
+      if (r.category !== canonical) {
+        db.query("UPDATE products SET category = ? WHERE category = ?").run(canonical, r.category);
+      }
+    }
+  } catch {
+    // Silent — fine if products table is empty or anything odd.
+  }
 }
 
 export function seedDefaults(): void {

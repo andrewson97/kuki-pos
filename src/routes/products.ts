@@ -26,14 +26,28 @@ products.get("/:id", (c) => {
   return c.json(product);
 });
 
+// Pick a canonical casing for a category: trim, and reuse the existing casing
+// of any product whose category matches case-insensitively. So "cakes" and
+// "Cakes" merge into whichever was created first.
+function canonicalCategory(input: string | undefined | null): string {
+  const trimmed = (input || "General").trim() || "General";
+  const db = getDb();
+  const existing = db.query(
+    "SELECT category FROM products WHERE LOWER(category) = LOWER(?) LIMIT 1"
+  ).get(trimmed) as { category: string } | null;
+  return existing?.category || trimmed;
+}
+
 products.post("/", adminOnly, async (c) => {
   const { name, category, cost_price, selling_price, discount_price, is_active } = await c.req.json();
   const db = getDb();
   const dp = discount_price && discount_price > 0 && discount_price < selling_price ? discount_price : null;
+  const cat = canonicalCategory(category);
+  const cleanName = (name || "").trim();
   const result = db.query(
     "INSERT INTO products (name, category, cost_price, selling_price, discount_price, is_active) VALUES (?, ?, ?, ?, ?, ?)"
-  ).run(name, category || "General", cost_price || 0, selling_price, dp, is_active ?? 1);
-  return c.json({ id: Number(result.lastInsertRowid), name, category, cost_price, selling_price, discount_price: dp });
+  ).run(cleanName, cat, cost_price || 0, selling_price, dp, is_active ?? 1);
+  return c.json({ id: Number(result.lastInsertRowid), name: cleanName, category: cat, cost_price, selling_price, discount_price: dp });
 });
 
 products.put("/:id", adminOnly, async (c) => {
@@ -41,9 +55,11 @@ products.put("/:id", adminOnly, async (c) => {
   const { name, category, cost_price, selling_price, discount_price, is_active } = await c.req.json();
   const db = getDb();
   const dp = discount_price && discount_price > 0 && discount_price < selling_price ? discount_price : null;
+  const cat = canonicalCategory(category);
+  const cleanName = (name || "").trim();
   db.query(
     "UPDATE products SET name = ?, category = ?, cost_price = ?, selling_price = ?, discount_price = ?, is_active = ? WHERE id = ?"
-  ).run(name, category, cost_price || 0, selling_price, dp, is_active, id);
+  ).run(cleanName, cat, cost_price || 0, selling_price, dp, is_active, id);
   return c.json({ success: true });
 });
 

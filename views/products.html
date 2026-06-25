@@ -44,7 +44,9 @@
           </div>
           <div class="mb-3">
             <label class="form-label">Category</label>
-            <input type="text" class="form-control" id="product-category" placeholder="e.g., Cakes, Pastries, Beverages">
+            <input type="text" class="form-control" id="product-category" list="category-options" placeholder="e.g., Cakes, Pastries, Beverages">
+            <datalist id="category-options"></datalist>
+            <small class="text-muted">Pick from the list to keep names consistent — "cakes" and "Cakes" are treated as the same.</small>
           </div>
           <div class="row mb-3">
             <div class="col">
@@ -95,7 +97,13 @@
     async function loadProducts() {
       allProducts = await api('/api/products');
       renderProducts();
+      renderCategoryOptions();
       document.getElementById('product-search').addEventListener('input', renderProducts);
+    }
+
+    function renderCategoryOptions() {
+      const cats = [...new Set(allProducts.map(p => p.category).filter(Boolean))].sort();
+      document.getElementById('category-options').innerHTML = cats.map(c => `<option value="${c.replace(/"/g, '&quot;')}">`).join('');
     }
 
     function renderProducts() {
@@ -220,7 +228,7 @@
 
       bootstrap.Modal.getInstance(document.getElementById('productModal')).hide();
       showToast('Product saved!');
-      loadProducts();
+      await loadProducts();
     }
 
     async function removeProductImage() {
