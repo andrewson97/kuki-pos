@@ -27,7 +27,11 @@
       <h3 id="sheet-title">Edit product</h3>
       <input type="hidden" id="p-id">
       <div class="field"><label>Name</label><input type="text" id="p-name"></div>
-      <div class="field"><label>Category</label><input type="text" id="p-cat" list="cat-opts" placeholder="e.g., Cakes"><datalist id="cat-opts"></datalist></div>
+      <div class="field">
+        <label>Category</label>
+        <select id="p-cat-sel" onchange="onCatChange()"></select>
+        <input type="text" id="p-cat-new" placeholder="Type a new category name" style="display:none;margin-top:6px;">
+      </div>
       <div class="field"><label>Cost price (Rs.)</label><input type="number" id="p-cost" min="0" step="0.01" inputmode="decimal"></div>
       <div class="field"><label>Selling price (Rs.)</label><input type="number" id="p-price" min="0" step="0.01" inputmode="decimal"></div>
       <div class="field"><label>Discount price (optional)</label><input type="number" id="p-disc" min="0" step="0.01" inputmode="decimal" placeholder="leave blank for none"></div>
@@ -62,10 +66,30 @@
       $('prod-search').addEventListener('input', render);
     }
 
-    function renderCatOptions() {
-      const cats = [...new Set(allProds.map(p => p.category).filter(Boolean))].sort();
-      $('cat-opts').innerHTML = cats.map(c => `<option value="${c.replace(/"/g, '&quot;')}">`).join('');
+    function buildCatSelect(currentValue) {
+      const sel = $('p-cat-sel');
+      const newInput = $('p-cat-new');
+      const cats = [...new Set(allProds.map(p => p.category).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+      if (currentValue && !cats.some(c => c.toLowerCase() === currentValue.toLowerCase())) cats.push(currentValue);
+      sel.innerHTML =
+        '<option value="">-- Pick a category --</option>' +
+        cats.map(c => `<option value="${c.replace(/"/g, '&quot;')}" ${currentValue && c.toLowerCase() === currentValue.toLowerCase() ? 'selected' : ''}>${escapeHtml(c)}</option>`).join('') +
+        '<option value="__new__">+ Add new category…</option>';
+      newInput.value = '';
+      newInput.style.display = 'none';
     }
+    function onCatChange() {
+      const sel = $('p-cat-sel');
+      const newInput = $('p-cat-new');
+      if (sel.value === '__new__') { newInput.style.display = 'block'; newInput.focus(); }
+      else { newInput.style.display = 'none'; newInput.value = ''; }
+    }
+    function getCatValue() {
+      const sel = $('p-cat-sel');
+      if (sel.value === '__new__') return $('p-cat-new').value.trim();
+      return sel.value.trim();
+    }
+    function renderCatOptions() { /* kept for compatibility — select is built per-open */ }
 
     function render() {
       const q = $('prod-search').value.toLowerCase().trim();
@@ -94,7 +118,8 @@
     function openAdd() {
       $('sheet-title').textContent = 'New product';
       $('p-id').value = '';
-      ['p-name', 'p-cat', 'p-cost', 'p-price', 'p-disc'].forEach(id => $(id).value = '');
+      ['p-name', 'p-cost', 'p-price', 'p-disc'].forEach(id => $(id).value = '');
+      buildCatSelect('');
       $('p-active').checked = true;
       $('p-img').value = '';
       $('p-preview').style.display = 'none';
@@ -108,7 +133,7 @@
       $('sheet-title').textContent = 'Edit product';
       $('p-id').value = p.id;
       $('p-name').value = p.name;
-      $('p-cat').value = p.category || '';
+      buildCatSelect(p.category || '');
       $('p-cost').value = p.cost_price || 0;
       $('p-price').value = p.selling_price;
       $('p-disc').value = p.discount_price || '';
@@ -131,7 +156,7 @@
       const disc = $('p-disc').value;
       const body = {
         name: $('p-name').value.trim(),
-        category: $('p-cat').value.trim() || 'General',
+        category: getCatValue() || 'General',
         cost_price: parseFloat($('p-cost').value) || 0,
         selling_price: parseFloat($('p-price').value),
         discount_price: disc ? parseFloat(disc) : null,

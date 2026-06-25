@@ -44,9 +44,8 @@
           </div>
           <div class="mb-3">
             <label class="form-label">Category</label>
-            <input type="text" class="form-control" id="product-category" list="category-options" placeholder="e.g., Cakes, Pastries, Beverages">
-            <datalist id="category-options"></datalist>
-            <small class="text-muted">Pick from the list to keep names consistent — "cakes" and "Cakes" are treated as the same.</small>
+            <select class="form-select" id="product-category-select" onchange="onCategoryChange()"></select>
+            <input type="text" class="form-control mt-2" id="product-category-new" placeholder="Type a new category name" style="display:none;">
           </div>
           <div class="row mb-3">
             <div class="col">
@@ -101,9 +100,38 @@
       document.getElementById('product-search').addEventListener('input', renderProducts);
     }
 
-    function renderCategoryOptions() {
-      const cats = [...new Set(allProducts.map(p => p.category).filter(Boolean))].sort();
-      document.getElementById('category-options').innerHTML = cats.map(c => `<option value="${c.replace(/"/g, '&quot;')}">`).join('');
+    function buildCategorySelect(currentValue) {
+      const sel = document.getElementById('product-category-select');
+      const newInput = document.getElementById('product-category-new');
+      const cats = [...new Set(allProducts.map(p => p.category).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+      // Make sure the product's own (possibly orphan) value shows up too.
+      if (currentValue && !cats.some(c => c.toLowerCase() === currentValue.toLowerCase())) {
+        cats.push(currentValue);
+      }
+      sel.innerHTML =
+        '<option value="">-- Pick a category --</option>' +
+        cats.map(c => `<option value="${c.replace(/"/g, '&quot;')}" ${currentValue && c.toLowerCase() === currentValue.toLowerCase() ? 'selected' : ''}>${c}</option>`).join('') +
+        '<option value="__new__">+ Add new category…</option>';
+      newInput.value = '';
+      newInput.style.display = 'none';
+    }
+
+    function onCategoryChange() {
+      const sel = document.getElementById('product-category-select');
+      const newInput = document.getElementById('product-category-new');
+      if (sel.value === '__new__') {
+        newInput.style.display = 'block';
+        newInput.focus();
+      } else {
+        newInput.style.display = 'none';
+        newInput.value = '';
+      }
+    }
+
+    function getCategoryValue() {
+      const sel = document.getElementById('product-category-select');
+      if (sel.value === '__new__') return document.getElementById('product-category-new').value.trim();
+      return sel.value.trim();
     }
 
     function renderProducts() {
@@ -149,7 +177,7 @@
       document.getElementById('product-modal-title').textContent = 'Add Product';
       document.getElementById('product-id').value = '';
       document.getElementById('product-name').value = '';
-      document.getElementById('product-category').value = '';
+      buildCategorySelect('');
       document.getElementById('product-cost').value = '';
       document.getElementById('product-price').value = '';
       document.getElementById('product-discount').value = '';
@@ -168,7 +196,7 @@
       document.getElementById('product-modal-title').textContent = 'Edit Product';
       document.getElementById('product-id').value = p.id;
       document.getElementById('product-name').value = p.name;
-      document.getElementById('product-category').value = p.category;
+      buildCategorySelect(p.category);
       document.getElementById('product-cost').value = p.cost_price || 0;
       document.getElementById('product-price').value = p.selling_price;
       document.getElementById('product-discount').value = p.discount_price || '';
@@ -195,7 +223,7 @@
       const discountInput = document.getElementById('product-discount').value;
       const data = {
         name: document.getElementById('product-name').value,
-        category: document.getElementById('product-category').value || 'General',
+        category: getCategoryValue() || 'General',
         cost_price: parseFloat(document.getElementById('product-cost').value) || 0,
         selling_price: parseFloat(document.getElementById('product-price').value),
         discount_price: discountInput ? parseFloat(discountInput) : null,
