@@ -50,6 +50,17 @@ products.post("/", adminOnly, async (c) => {
   return c.json({ id: Number(result.lastInsertRowid), name: cleanName, category: cat, cost_price, selling_price, discount_price: dp });
 });
 
+// IMPORTANT: register before PUT "/:id" so Hono doesn't treat
+// "category-order" as a product id.
+products.put("/category-order", adminOnly, async (c) => {
+  const { order } = await c.req.json();
+  if (!Array.isArray(order)) return c.json({ error: "order must be an array of category names" }, 400);
+  const cleaned = order.map(x => String(x || "").trim()).filter(Boolean);
+  const db = getDb();
+  db.query("INSERT OR REPLACE INTO settings (key, value) VALUES ('category_order', ?)").run(JSON.stringify(cleaned));
+  return c.json({ success: true, order: cleaned });
+});
+
 products.put("/:id", adminOnly, async (c) => {
   const id = c.req.param("id");
   const { name, category, cost_price, selling_price, discount_price, is_active } = await c.req.json();
@@ -61,16 +72,6 @@ products.put("/:id", adminOnly, async (c) => {
     "UPDATE products SET name = ?, category = ?, cost_price = ?, selling_price = ?, discount_price = ?, is_active = ? WHERE id = ?"
   ).run(cleanName, cat, cost_price || 0, selling_price, dp, is_active, id);
   return c.json({ success: true });
-});
-
-// Admin sets the display order for categories on the POS.
-products.put("/category-order", adminOnly, async (c) => {
-  const { order } = await c.req.json();
-  if (!Array.isArray(order)) return c.json({ error: "order must be an array of category names" }, 400);
-  const cleaned = order.map(x => String(x || "").trim()).filter(Boolean);
-  const db = getDb();
-  db.query("INSERT OR REPLACE INTO settings (key, value) VALUES ('category_order', ?)").run(JSON.stringify(cleaned));
-  return c.json({ success: true, order: cleaned });
 });
 
 products.post("/:id/image", adminOnly, async (c) => {
