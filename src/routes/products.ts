@@ -63,6 +63,16 @@ products.put("/:id", adminOnly, async (c) => {
   return c.json({ success: true });
 });
 
+// Admin sets the display order for categories on the POS.
+products.put("/category-order", adminOnly, async (c) => {
+  const { order } = await c.req.json();
+  if (!Array.isArray(order)) return c.json({ error: "order must be an array of category names" }, 400);
+  const cleaned = order.map(x => String(x || "").trim()).filter(Boolean);
+  const db = getDb();
+  db.query("INSERT OR REPLACE INTO settings (key, value) VALUES ('category_order', ?)").run(JSON.stringify(cleaned));
+  return c.json({ success: true, order: cleaned });
+});
+
 products.post("/:id/image", adminOnly, async (c) => {
   const id = c.req.param("id");
   const db = getDb();

@@ -36,6 +36,22 @@ function formatDateTime(d) {
   return parseDbDate(d).toLocaleString('en-LK', { timeZone: TZ, year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 }
 
+// Sort category names by the admin-defined order in settings.category_order.
+// Categories not in the saved order are appended alphabetically.
+function sortCategoriesPOS(cats) {
+  let saved = [];
+  try { saved = JSON.parse(appSettings.category_order || '[]'); } catch {}
+  const order = saved.map(s => String(s).toLowerCase());
+  const indexOf = c => order.indexOf(String(c).toLowerCase());
+  return [...cats].sort((a, b) => {
+    const ia = indexOf(a), ib = indexOf(b);
+    if (ia === -1 && ib === -1) return a.localeCompare(b);
+    if (ia === -1) return 1;
+    if (ib === -1) return -1;
+    return ia - ib;
+  });
+}
+
 async function api(url, opts = {}) {
   const res = await fetch(url, {
     ...opts,

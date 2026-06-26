@@ -217,7 +217,7 @@
     function renderCategoryTabs() {
       const counts = {};
       products.forEach(p => { counts[p.category] = (counts[p.category] || 0) + 1; });
-      const cats = Object.keys(counts).sort();
+      const cats = sortCategories(Object.keys(counts));
       const pills = [{ key: '', label: 'All', count: products.length }, ...cats.map(c => ({ key: c, label: c, count: counts[c] }))];
       document.getElementById('category-tabs').innerHTML = pills.map(p => `
         <button type="button" class="cat-pill ${activeCategory === p.key ? 'active' : ''}" onclick="selectCategory('${p.key.replace(/'/g, "\\'")}')">${p.label} <span class="cat-count">${p.count}</span></button>
@@ -313,7 +313,7 @@
       } else {
         const groups = {};
         filtered.forEach(p => { (groups[p.category] = groups[p.category] || []).push(p); });
-        container.innerHTML = `<div class="cat-sections">${Object.keys(groups).sort().map(cat => `
+        container.innerHTML = `<div class="cat-sections">${sortCategories(Object.keys(groups)).map(cat => `
           <div class="cat-section">
             <h6 class="cat-section-title">${cat} <small class="text-muted">(${groups[cat].length})</small></h6>
             <div class="product-grid">${groups[cat].map(card).join('')}</div>

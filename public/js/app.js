@@ -79,6 +79,22 @@ function todayISO() {
   return adjusted.toLocaleDateString('en-CA', { timeZone: TZ });
 }
 
+// Sort category names by the admin-defined order in settings.category_order.
+// Categories not in the saved order are appended alphabetically.
+function sortCategories(cats) {
+  let saved = [];
+  try { saved = JSON.parse(appSettings.category_order || '[]'); } catch {}
+  const order = saved.map(s => String(s).toLowerCase());
+  const indexOf = c => order.indexOf(String(c).toLowerCase());
+  return [...cats].sort((a, b) => {
+    const ia = indexOf(a), ib = indexOf(b);
+    if (ia === -1 && ib === -1) return a.localeCompare(b);
+    if (ia === -1) return 1;
+    if (ib === -1) return -1;
+    return ia - ib;
+  });
+}
+
 async function loadUser() {
   try {
     const data = await api('/api/auth/me');

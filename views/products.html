@@ -16,8 +16,23 @@
     </div>
     <div class="content-area">
       <div class="d-flex justify-content-between mb-3">
-        <input type="text" class="form-control" id="product-search" placeholder="Search products..." style="width:300px;">
+        <div class="d-flex gap-2">
+          <input type="text" class="form-control" id="product-search" placeholder="Search products..." style="width:300px;">
+          <button class="btn btn-outline-secondary" onclick="toggleArrangePanel()">⇅ Arrange Categories</button>
+        </div>
         <button class="btn btn-primary" onclick="showAddProduct()">+ Add Product</button>
+      </div>
+
+      <div class="table-container p-3 mb-3" id="arrange-panel" style="display:none;">
+        <div class="d-flex justify-content-between align-items-center mb-2">
+          <h6 class="fw-bold mb-0">Category order on POS</h6>
+          <div class="d-flex gap-2">
+            <button class="btn btn-sm btn-outline-secondary" onclick="resetArrangeAlpha()">Reset (A–Z)</button>
+            <button class="btn btn-sm btn-primary" onclick="saveArrange()">Save order</button>
+          </div>
+        </div>
+        <small class="text-muted">Click the ↑ / ↓ to move a category. The order here is exactly what cashiers see on the POS.</small>
+        <ul id="arrange-list" class="list-group mt-2"></ul>
       </div>
       <div class="table-container">
         <table class="table table-hover mb-0">
@@ -98,6 +113,49 @@
       renderProducts();
       renderCategoryOptions();
       document.getElementById('product-search').addEventListener('input', renderProducts);
+    }
+
+    // ===== Arrange categories =====
+    let arrangeList = [];
+    function toggleArrangePanel() {
+      const p = document.getElementById('arrange-panel');
+      if (p.style.display === 'none') {
+        arrangeList = sortCategories([...new Set(allProducts.map(p => p.category).filter(Boolean))]);
+        renderArrange();
+        p.style.display = 'block';
+      } else {
+        p.style.display = 'none';
+      }
+    }
+    function renderArrange() {
+      document.getElementById('arrange-list').innerHTML = arrangeList.map((c, i) => `
+        <li class="list-group-item d-flex justify-content-between align-items-center">
+          <span><span class="text-muted me-2">${i + 1}.</span> ${c}</span>
+          <div class="btn-group">
+            <button class="btn btn-sm btn-outline-secondary" onclick="moveArrange(${i}, -1)" ${i === 0 ? 'disabled' : ''}>↑</button>
+            <button class="btn btn-sm btn-outline-secondary" onclick="moveArrange(${i}, 1)" ${i === arrangeList.length - 1 ? 'disabled' : ''}>↓</button>
+          </div>
+        </li>`).join('');
+    }
+    function moveArrange(i, d) {
+      const j = i + d;
+      if (j < 0 || j >= arrangeList.length) return;
+      [arrangeList[i], arrangeList[j]] = [arrangeList[j], arrangeList[i]];
+      renderArrange();
+    }
+    function resetArrangeAlpha() {
+      arrangeList = [...arrangeList].sort((a, b) => a.localeCompare(b));
+      renderArrange();
+    }
+    async function saveArrange() {
+      try {
+        await api('/api/products/category-order', { method: 'PUT', body: { order: arrangeList } });
+        appSettings.category_order = JSON.stringify(arrangeList);
+        showToast('Category order saved');
+        document.getElementById('arrange-panel').style.display = 'none';
+      } catch (err) {
+        showToast('Save failed: ' + err.message, 'error');
+      }
     }
 
     function buildCategorySelect(currentValue) {

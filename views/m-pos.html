@@ -191,7 +191,7 @@
     function renderCats() {
       const counts = {};
       products.forEach(p => { counts[p.category] = (counts[p.category] || 0) + 1; });
-      const cats = Object.keys(counts).sort();
+      const cats = sortCategoriesPOS(Object.keys(counts));
       const pills = [{key: '', label: 'All', n: products.length}, ...cats.map(c => ({key: c, label: c, n: counts[c]}))];
       $('cat-strip').innerHTML = pills.map(p => `
         <button class="pill ${activeCat === p.key ? 'active' : ''}" onclick="setCat('${p.key.replace(/'/g, "\\'")}')">${escapeHtml(p.label)} <span style="opacity:.7;font-size:.7rem;">${p.n}</span></button>
