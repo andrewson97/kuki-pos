@@ -214,11 +214,17 @@
       }
     }
 
+    // Out-of-stock tracked products are hidden from the POS entirely. They still
+    // exist in the DB and on the Products/Stock pages; this is purely a cashier
+    // view filter so they can't accidentally try to sell what isn't there.
+    function inStock(p) { return !(p.track_stock && p.stock_quantity <= 0); }
+
     function renderCategoryTabs() {
+      const visible = products.filter(inStock);
       const counts = {};
-      products.forEach(p => { counts[p.category] = (counts[p.category] || 0) + 1; });
+      visible.forEach(p => { counts[p.category] = (counts[p.category] || 0) + 1; });
       const cats = sortCategories(Object.keys(counts));
-      const pills = [{ key: '', label: 'All', count: products.length }, ...cats.map(c => ({ key: c, label: c, count: counts[c] }))];
+      const pills = [{ key: '', label: 'All', count: visible.length }, ...cats.map(c => ({ key: c, label: c, count: counts[c] }))];
       document.getElementById('category-tabs').innerHTML = pills.map(p => `
         <button type="button" class="cat-pill ${activeCategory === p.key ? 'active' : ''}" onclick="selectCategory('${p.key.replace(/'/g, "\\'")}')">${p.label} <span class="cat-count">${p.count}</span></button>
       `).join('');
@@ -279,6 +285,7 @@
     function renderProducts() {
       const search = document.getElementById('product-search').value.toLowerCase();
       const filtered = products.filter(p => {
+        if (!inStock(p)) return false; // hide out-of-stock tracked products
         if (search && !p.name.toLowerCase().includes(search)) return false;
         if (activeCategory && p.category !== activeCategory) return false;
         return true;
@@ -292,14 +299,14 @@
         const imgHtml = p.image_path
           ? `<div class="product-image" style="background-image:url('/uploads/${p.image_path}')"></div>`
           : `<div class="product-image product-image-placeholder">&#127874;</div>`;
-        const out = p.track_stock && p.stock_quantity <= 0;
-        const low = p.track_stock && !out && p.stock_reorder_level > 0 && p.stock_quantity <= p.stock_reorder_level;
-        const badge = out ? `<div style="position:absolute;top:4px;right:4px;background:#dc3545;color:white;font-size:0.65rem;padding:1px 6px;border-radius:999px;font-weight:700;">OUT</div>`
-          : low ? `<div style="position:absolute;top:4px;right:4px;background:#f59e0b;color:white;font-size:0.65rem;padding:1px 6px;border-radius:999px;font-weight:700;">${p.stock_quantity}</div>` : '';
-        const cardStyle = out ? 'opacity:0.5;cursor:not-allowed;position:relative;' : 'position:relative;';
-        const onClick = out ? `onclick="showToast('${p.name.replace(/'/g, "\\'")} is out of stock','warning')"` : `onclick="addToCart(${p.id})"`;
+        // For tracked products, always show the count. Larger + red when at or
+        // below the per-product reorder threshold; small dark pill otherwise.
+        const low = p.track_stock && p.stock_reorder_level > 0 && p.stock_quantity <= p.stock_reorder_level;
+        const badge = !p.track_stock ? '' : (low
+          ? `<div style="position:absolute;top:4px;right:4px;background:#dc3545;color:white;font-size:0.85rem;padding:3px 10px;border-radius:999px;font-weight:800;box-shadow:0 2px 6px rgba(220,53,69,0.4);">${p.stock_quantity}</div>`
+          : `<div style="position:absolute;top:4px;right:4px;background:rgba(31,41,55,0.78);color:white;font-size:0.62rem;padding:1px 6px;border-radius:999px;font-weight:700;">${p.stock_quantity}</div>`);
         return `
-        <div class="product-card" ${onClick} style="${cardStyle}">
+        <div class="product-card" onclick="addToCart(${p.id})" style="position:relative;">
           ${badge}
           ${imgHtml}
           <div class="product-name">${p.name}</div>

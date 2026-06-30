@@ -188,11 +188,14 @@
       } catch {}
     }
 
+    function inStock(p) { return !(p.track_stock && p.stock_quantity <= 0); }
+
     function renderCats() {
+      const visible = products.filter(inStock);
       const counts = {};
-      products.forEach(p => { counts[p.category] = (counts[p.category] || 0) + 1; });
+      visible.forEach(p => { counts[p.category] = (counts[p.category] || 0) + 1; });
       const cats = sortCategoriesPOS(Object.keys(counts));
-      const pills = [{key: '', label: 'All', n: products.length}, ...cats.map(c => ({key: c, label: c, n: counts[c]}))];
+      const pills = [{key: '', label: 'All', n: visible.length}, ...cats.map(c => ({key: c, label: c, n: counts[c]}))];
       $('cat-strip').innerHTML = pills.map(p => `
         <button class="pill ${activeCat === p.key ? 'active' : ''}" onclick="setCat('${p.key.replace(/'/g, "\\'")}')">${escapeHtml(p.label)} <span style="opacity:.7;font-size:.7rem;">${p.n}</span></button>
       `).join('');
@@ -203,6 +206,7 @@
     function renderProducts() {
       const q = $('prod-search').value.toLowerCase().trim();
       const filtered = products.filter(p => {
+        if (!inStock(p)) return false; // hide out-of-stock tracked products
         if (q && !p.name.toLowerCase().includes(q)) return false;
         if (activeCat && p.category !== activeCat) return false;
         return true;
@@ -216,13 +220,12 @@
         const img = p.image_path
           ? `<div class="img" style="background-image:url('/uploads/${p.image_path}');"></div>`
           : `<div class="img">🎂</div>`;
-        const out = p.track_stock && p.stock_quantity <= 0;
-        const low = p.track_stock && !out && p.stock_reorder_level > 0 && p.stock_quantity <= p.stock_reorder_level;
-        const badge = out ? `<div style="position:absolute;top:2px;right:2px;background:#dc2626;color:white;font-size:0.6rem;padding:1px 5px;border-radius:999px;font-weight:700;">OUT</div>`
-          : low ? `<div style="position:absolute;top:2px;right:2px;background:#f59e0b;color:white;font-size:0.6rem;padding:1px 5px;border-radius:999px;font-weight:700;">${p.stock_quantity}</div>` : '';
-        const style = out ? 'opacity:0.5;cursor:not-allowed;position:relative;' : 'position:relative;';
-        const click = out ? `onclick="toast('${p.name.replace(/'/g, "\\'")} is out of stock','error')"` : `onclick="addToCart(${p.id})"`;
-        return `<div class="prod-card" ${click} style="${style}">${badge}${img}<div class="name">${escapeHtml(p.name)}</div>${priceHtml}</div>`;
+        // Always show the count when tracked. Larger + red when low.
+        const low = p.track_stock && p.stock_reorder_level > 0 && p.stock_quantity <= p.stock_reorder_level;
+        const badge = !p.track_stock ? '' : (low
+          ? `<div style="position:absolute;top:2px;right:2px;background:#dc2626;color:white;font-size:0.78rem;padding:3px 9px;border-radius:999px;font-weight:800;box-shadow:0 2px 5px rgba(220,38,38,0.4);">${p.stock_quantity}</div>`
+          : `<div style="position:absolute;top:2px;right:2px;background:rgba(31,41,55,0.78);color:white;font-size:0.58rem;padding:1px 5px;border-radius:999px;font-weight:700;">${p.stock_quantity}</div>`);
+        return `<div class="prod-card" onclick="addToCart(${p.id})" style="position:relative;">${badge}${img}<div class="name">${escapeHtml(p.name)}</div>${priceHtml}</div>`;
       }).join('');
     }
 
