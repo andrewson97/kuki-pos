@@ -63,7 +63,12 @@
 
       <!-- Tracked products: quick restock -->
       <div class="table-container mt-4" id="tracked-products-panel">
-        <h6 class="px-3 pt-3 fw-bold mb-0" style="color:#6b5a4a;">Tracked Finished Products <small class="text-muted fw-normal">— add stock or dispose expired</small></h6>
+        <div class="d-flex align-items-center justify-content-between px-3 pt-3 mb-2 flex-wrap gap-2">
+          <h6 class="fw-bold mb-0" style="color:#6b5a4a;">Tracked Finished Products <small class="text-muted fw-normal">— add stock or dispose expired</small></h6>
+          <select class="form-select form-select-sm" id="product-cat-filter" style="width:200px;" onchange="renderTrackedProducts()">
+            <option value="">All product categories</option>
+          </select>
+        </div>
         <table class="table table-hover mb-0">
           <thead><tr><th></th><th>Product</th><th>Category</th><th>On Hand</th><th>Reorder Level</th><th>Add to Stock</th><th>Actions</th></tr></thead>
           <tbody id="tracked-products-table"></tbody>
@@ -149,17 +154,30 @@
       categories = cats;
       trackedProducts = allProducts.filter(p => p.is_active && p.track_stock);
       renderCategoryOptions();
+      renderProductCategoryOptions();
       renderStock();
       renderTrackedProducts();
       document.getElementById('stock-search').addEventListener('input', () => { renderStock(); renderTrackedProducts(); });
       document.getElementById('stock-cat-filter').addEventListener('change', renderStock);
     }
 
+    function renderProductCategoryOptions() {
+      const filter = document.getElementById('product-cat-filter');
+      const cats = sortCategories([...new Set(trackedProducts.map(p => p.category).filter(Boolean))]);
+      const prev = filter.value;
+      filter.innerHTML = '<option value="">All product categories</option>' +
+        cats.map(c => `<option value="${c.replace(/"/g, '&quot;')}">${c}</option>`).join('');
+      if (prev) filter.value = prev;
+    }
+
     function renderTrackedProducts() {
       const search = document.getElementById('stock-search').value.toLowerCase().trim();
-      const list = search
-        ? trackedProducts.filter(p => p.name.toLowerCase().includes(search) || (p.category || '').toLowerCase().includes(search))
-        : trackedProducts;
+      const catFilter = document.getElementById('product-cat-filter').value;
+      const list = trackedProducts.filter(p => {
+        if (catFilter && (p.category || '').toLowerCase() !== catFilter.toLowerCase()) return false;
+        if (search && !(p.name.toLowerCase().includes(search) || (p.category || '').toLowerCase().includes(search))) return false;
+        return true;
+      });
       const tbody = document.getElementById('tracked-products-table');
       const panel = document.getElementById('tracked-products-panel');
       if (!trackedProducts.length) {

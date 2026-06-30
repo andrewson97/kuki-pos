@@ -22,6 +22,9 @@
 
   <div id="tracked-section" style="display:none;">
     <div style="background:white;padding:12px 14px 4px;font-weight:700;color:var(--ink-soft);text-transform:uppercase;letter-spacing:0.1em;font-size:0.72rem;border-top:8px solid var(--bg);">Tracked Products</div>
+    <div style="padding:8px 14px;background:white;border-bottom:1px solid var(--line);">
+      <select id="prod-cat-filter" onchange="renderTracked()" style="width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:white;"><option value="">All product categories</option></select>
+    </div>
     <div id="tracked-list"></div>
   </div>
 
@@ -95,8 +98,20 @@
     function renderTracked() {
       const sec = $('tracked-section');
       if (!tracked.length) { sec.style.display = 'none'; return; }
+      // Populate the product-category select (preserves selection across re-renders)
+      const filter = $('prod-cat-filter');
+      const cats = sortCategoriesPOS([...new Set(tracked.map(p => p.category).filter(Boolean))]);
+      const prev = filter.value;
+      filter.innerHTML = '<option value="">All product categories</option>' +
+        cats.map(c => `<option value="${c.replace(/"/g, '&quot;')}">${escapeHtml(c)}</option>`).join('');
+      if (prev) filter.value = prev;
+      const catFilter = filter.value;
       const q = $('s-search').value.toLowerCase().trim();
-      const list = q ? tracked.filter(p => p.name.toLowerCase().includes(q) || (p.category || '').toLowerCase().includes(q)) : tracked;
+      const list = tracked.filter(p => {
+        if (catFilter && (p.category || '').toLowerCase() !== catFilter.toLowerCase()) return false;
+        if (q && !(p.name.toLowerCase().includes(q) || (p.category || '').toLowerCase().includes(q))) return false;
+        return true;
+      });
       sec.style.display = 'block';
       if (!list.length) { $('tracked-list').innerHTML = '<div class="empty">No matches</div>'; return; }
       $('tracked-list').innerHTML = list.map(p => {
