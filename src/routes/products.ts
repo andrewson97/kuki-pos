@@ -2,8 +2,9 @@ import { Hono } from "hono";
 import path from "path";
 import { unlinkSync } from "fs";
 import { getDb } from "../db/database";
-import { adminOnly } from "../middleware/auth";
+import { adminOnly, getUser } from "../middleware/auth";
 import { UPLOADS_DIR } from "../utils/paths";
+import { todayDate } from "../utils/helpers";
 
 const products = new Hono();
 
@@ -39,15 +40,74 @@ function canonicalCategory(input: string | undefined | null): string {
 }
 
 products.post("/", adminOnly, async (c) => {
-  const { name, category, cost_price, selling_price, discount_price, is_active } = await c.req.json();
+  const { name, category, cost_price, selling_price, discount_price, is_active, track_stock, stock_quantity, stock_reorder_level } = await c.req.json();
   const db = getDb();
   const dp = discount_price && discount_price > 0 && discount_price < selling_price ? discount_price : null;
   const cat = canonicalCategory(category);
   const cleanName = (name || "").trim();
+  const ts = track_stock ? 1 : 0;
   const result = db.query(
-    "INSERT INTO products (name, category, cost_price, selling_price, discount_price, is_active) VALUES (?, ?, ?, ?, ?, ?)"
-  ).run(cleanName, cat, cost_price || 0, selling_price, dp, is_active ?? 1);
+    "INSERT INTO products (name, category, cost_price, selling_price, discount_price, is_active, track_stock, stock_quantity, stock_reorder_level) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+  ).run(cleanName, cat, cost_price || 0, selling_price, dp, is_active ?? 1, ts, ts ? (stock_quantity || 0) : 0, ts ? (stock_reorder_level || 0) : 0);
   return c.json({ id: Number(result.lastInsertRowid), name: cleanName, category: cat, cost_price, selling_price, discount_price: dp });
+});
+
+// --- Disposal / wastage tracking ---
+// History across a date range, optionally filtered by product.
+products.get("/disposals", (c) => {
+  const db = getDb();
+  const start = c.req.query("start_date");
+  const end = c.req.query("end_date");
+  const productId = c.req.query("product_id");
+  let query = `
+    SELECT d.*, p.name AS product_name, p.cost_price, u.full_name AS user_name
+    FROM product_disposals d
+    LEFT JOIN products p ON p.id = d.product_id
+    LEFT JOIN users u ON u.id = d.user_id
+  `;
+  const conds: string[] = [];
+  const params: any[] = [];
+  if (start) { conds.push("d.business_date >= ?"); params.push(start); }
+  if (end) { conds.push("d.business_date <= ?"); params.push(end); }
+  if (productId) { conds.push("d.product_id = ?"); params.push(productId); }
+  if (conds.length) query += " WHERE " + conds.join(" AND ");
+  query += " ORDER BY d.business_date DESC, d.created_at DESC";
+  const rows = db.query(query).all(...params);
+  return c.json(rows);
+});
+
+// Record a disposal: deducts product stock and stores cost_loss = qty × cost_price.
+products.post("/:id/dispose", adminOnly, async (c) => {
+  const id = c.req.param("id");
+  const user = getUser(c)!;
+  const body = await c.req.json();
+  const qty = parseFloat(body.quantity);
+  const reason = (body.reason || "").trim() || null;
+  if (!qty || qty <= 0) return c.json({ error: "Quantity must be greater than zero" }, 400);
+
+  const db = getDb();
+  const product = db.query(
+    "SELECT id, name, cost_price, track_stock, stock_quantity FROM products WHERE id = ?"
+  ).get(id) as any;
+  if (!product) return c.json({ error: "Product not found" }, 404);
+
+  const costLoss = qty * (product.cost_price || 0);
+  const businessDate = todayDate();
+
+  db.transaction(() => {
+    if (product.track_stock) {
+      // Subtract from stock (allow going negative — admin's call)
+      db.query("UPDATE products SET stock_quantity = stock_quantity - ? WHERE id = ?").run(qty, id);
+    }
+    db.query(
+      "INSERT INTO product_disposals (product_id, quantity, cost_loss, reason, business_date, user_id) VALUES (?, ?, ?, ?, ?, ?)"
+    ).run(id, qty, costLoss, reason, businessDate, user.id);
+    db.query("INSERT INTO activity_log (user_id, action, details) VALUES (?, 'disposed_product', ?)").run(
+      user.id, JSON.stringify({ product_id: id, name: product.name, quantity: qty, cost_loss: costLoss, reason })
+    );
+  })();
+
+  return c.json({ success: true, cost_loss: costLoss, business_date: businessDate });
 });
 
 // IMPORTANT: register before PUT "/:id" so Hono doesn't treat
@@ -63,14 +123,15 @@ products.put("/category-order", adminOnly, async (c) => {
 
 products.put("/:id", adminOnly, async (c) => {
   const id = c.req.param("id");
-  const { name, category, cost_price, selling_price, discount_price, is_active } = await c.req.json();
+  const { name, category, cost_price, selling_price, discount_price, is_active, track_stock, stock_quantity, stock_reorder_level } = await c.req.json();
   const db = getDb();
   const dp = discount_price && discount_price > 0 && discount_price < selling_price ? discount_price : null;
   const cat = canonicalCategory(category);
   const cleanName = (name || "").trim();
+  const ts = track_stock ? 1 : 0;
   db.query(
-    "UPDATE products SET name = ?, category = ?, cost_price = ?, selling_price = ?, discount_price = ?, is_active = ? WHERE id = ?"
-  ).run(cleanName, cat, cost_price || 0, selling_price, dp, is_active, id);
+    "UPDATE products SET name = ?, category = ?, cost_price = ?, selling_price = ?, discount_price = ?, is_active = ?, track_stock = ?, stock_quantity = ?, stock_reorder_level = ? WHERE id = ?"
+  ).run(cleanName, cat, cost_price || 0, selling_price, dp, is_active, ts, ts ? (stock_quantity || 0) : 0, ts ? (stock_reorder_level || 0) : 0, id);
   return c.json({ success: true });
 });
 

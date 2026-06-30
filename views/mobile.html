@@ -157,7 +157,7 @@
       if (!items.length) { $('stock-section').innerHTML = '<div class="empty">All stock levels OK 👍</div>'; return; }
       $('stock-section').innerHTML = items.map(s => `
         <div class="stock-item">
-          <span class="stock-name">${escapeHtml(s.name)}</span>
+          <span class="stock-name">${escapeHtml(s.name)} <small style="color:var(--ink-soft);font-size:0.7rem;">${s.kind === 'product' ? '· product' : ''}</small></span>
           <span class="stock-qty">${s.quantity} ${escapeHtml(s.unit || '')} / min ${s.reorder_level}</span>
         </div>`).join('');
     }

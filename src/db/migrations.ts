@@ -159,6 +159,17 @@ export function runMigrations(): void {
       UNIQUE(task_id, business_date)
     );
 
+    CREATE TABLE IF NOT EXISTS product_disposals (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      product_id INTEGER NOT NULL REFERENCES products(id),
+      quantity REAL NOT NULL,
+      cost_loss REAL NOT NULL DEFAULT 0,
+      reason TEXT,
+      business_date TEXT NOT NULL,
+      user_id INTEGER REFERENCES users(id),
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
     CREATE TABLE IF NOT EXISTS cash_counts (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       count_type TEXT NOT NULL CHECK(count_type IN ('open', 'close')),
@@ -202,6 +213,9 @@ export function runMigrations(): void {
   addColumn("expenses", "approved_at", "TEXT");
   addColumn("expenses", "rejected_reason", "TEXT");
   addColumn("daily_tasks", "category", "TEXT NOT NULL DEFAULT 'opening'");
+  addColumn("products", "track_stock", "INTEGER NOT NULL DEFAULT 0");
+  addColumn("products", "stock_quantity", "REAL NOT NULL DEFAULT 0");
+  addColumn("products", "stock_reorder_level", "REAL NOT NULL DEFAULT 0");
 
   // One-shot: merge product categories that differ only by casing.
   // For each lowercase key, pick the most common casing as canonical.

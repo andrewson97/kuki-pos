@@ -19,8 +19,11 @@ dashboard.get("/stats", (c) => {
   `).get(today) as any;
 
   const lowStockCount = db.query(`
-    SELECT COUNT(*) as count FROM stock_items
-    WHERE quantity <= reorder_level AND reorder_level > 0
+    SELECT
+      (SELECT COUNT(*) FROM stock_items WHERE quantity <= reorder_level AND reorder_level > 0)
+      +
+      (SELECT COUNT(*) FROM products WHERE track_stock = 1 AND is_active = 1 AND stock_quantity <= stock_reorder_level)
+      AS count
   `).get() as any;
 
   const totalProducts = db.query("SELECT COUNT(*) as count FROM products WHERE is_active = 1").get() as any;
@@ -36,15 +39,22 @@ dashboard.get("/stats", (c) => {
     LIMIT 10
   `).all(today);
 
-  // Low stock items
-  const lowStockItems = db.query(`
-    SELECT si.name, si.quantity, si.unit, si.reorder_level, sc.name as category_name
+  // Low stock — combine ingredients (stock_items) and tracked products.
+  const lowIngredients = db.query(`
+    SELECT 'ingredient' AS kind, si.name, si.quantity, si.unit, si.reorder_level, sc.name AS category_name
     FROM stock_items si
     LEFT JOIN stock_categories sc ON si.category_id = sc.id
     WHERE si.quantity <= si.reorder_level AND si.reorder_level > 0
-    ORDER BY (si.quantity / si.reorder_level) ASC
-    LIMIT 10
-  `).all();
+  `).all() as any[];
+  const lowProducts = db.query(`
+    SELECT 'product' AS kind, name, stock_quantity AS quantity, 'unit' AS unit,
+           stock_reorder_level AS reorder_level, category AS category_name
+    FROM products
+    WHERE track_stock = 1 AND is_active = 1 AND stock_quantity <= stock_reorder_level
+  `).all() as any[];
+  const lowStockItems = [...lowIngredients, ...lowProducts]
+    .sort((a, b) => (a.quantity / Math.max(1, a.reorder_level)) - (b.quantity / Math.max(1, b.reorder_level)))
+    .slice(0, 10);
 
   const todayCost = db.query(`
     SELECT COALESCE(SUM(bi.cost_price * bi.quantity), 0) as total_cost

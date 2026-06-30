@@ -48,15 +48,20 @@ pos.post("/bill", async (c) => {
     }
   }
 
-  const bill = createBill({
-    items: body.items,
-    customer_id: body.customer_id || null,
-    discount: body.discount || 0,
-    tax_rate,
-    payment_method: body.payment_method || "cash",
-    user_id: user.id,
-    amount_given: body.amount_given ?? null,
-  });
+  let bill;
+  try {
+    bill = createBill({
+      items: body.items,
+      customer_id: body.customer_id || null,
+      discount: body.discount || 0,
+      tax_rate,
+      payment_method: body.payment_method || "cash",
+      user_id: user.id,
+      amount_given: body.amount_given ?? null,
+    });
+  } catch (err: any) {
+    return c.json({ error: err?.message || "Failed to create bill" }, 400);
+  }
 
   // Generate receipt
   const db = getDb();
@@ -159,7 +164,14 @@ pos.post("/bills/:id/refund", async (c) => {
 
   db.transaction(() => {
     for (const item of items) {
-      if (item.product_id) {
+      if (!item.product_id) continue;
+      const product = db.query("SELECT track_stock FROM products WHERE id = ?").get(item.product_id) as any;
+      if (product?.track_stock) {
+        // Tracked product → put units back on the shelf.
+        db.query("UPDATE products SET stock_quantity = stock_quantity + ? WHERE id = ?").run(item.quantity, item.product_id);
+      } else {
+        // Non-tracked product → restore via recipe (recipes still don't auto-deduct,
+        // but this keeps existing behaviour for refunds that did go through recipes).
         restoreStockForBill(item.product_id, item.quantity, Number(id), user.id);
       }
     }

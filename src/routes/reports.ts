@@ -40,12 +40,37 @@ reports.get("/daily", (c) => {
 
   const expenses = db.query(`
     SELECT COALESCE(SUM(amount), 0) as total_expenses
-    FROM expenses WHERE expense_date = ?
+    FROM expenses WHERE expense_date = ? AND status = 'approved'
   `).get(date) as any;
+
+  const disposals = db.query(`
+    SELECT COALESCE(SUM(cost_loss), 0) AS total_loss, COUNT(*) AS count
+    FROM product_disposals WHERE business_date = ?
+  `).get(date) as any;
+
+  const disposalItems = db.query(`
+    SELECT d.quantity, d.cost_loss, d.reason, d.created_at, p.name AS product_name, u.full_name AS user_name
+    FROM product_disposals d
+    LEFT JOIN products p ON p.id = d.product_id
+    LEFT JOIN users u ON u.id = d.user_id
+    WHERE d.business_date = ?
+    ORDER BY d.created_at DESC
+  `).all(date);
 
   const grossProfit = sales.total_sales - totalCost.total_cost;
 
-  return c.json({ date, sales, cost_of_goods: totalCost.total_cost, gross_profit: grossProfit, by_payment: byPayment, top_products: topProducts, expenses: expenses.total_expenses });
+  return c.json({
+    date,
+    sales,
+    cost_of_goods: totalCost.total_cost,
+    gross_profit: grossProfit,
+    by_payment: byPayment,
+    top_products: topProducts,
+    expenses: expenses.total_expenses,
+    disposal_loss: disposals.total_loss,
+    disposal_count: disposals.count,
+    disposals: disposalItems,
+  });
 });
 
 reports.get("/monthly", (c) => {

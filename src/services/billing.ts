@@ -51,6 +51,16 @@ export function createBill(params: CreateBillParams): any {
   `);
 
   const transaction = db.transaction(() => {
+    // Pre-flight: any tracked product short on stock aborts the whole sale.
+    for (const item of items) {
+      const p = db.query(
+        "SELECT name, track_stock, stock_quantity FROM products WHERE id = ?"
+      ).get(item.product_id) as any;
+      if (p?.track_stock && p.stock_quantity < item.quantity) {
+        throw new Error(`${p.name} is out of stock (only ${p.stock_quantity} left)`);
+      }
+    }
+
     const result = insertBill.run(
       token_number, bill_date, customer_id || null,
       subtotal, discount, tax_rate, tax_amount, total,
@@ -59,11 +69,17 @@ export function createBill(params: CreateBillParams): any {
     const billId = Number(result.lastInsertRowid);
 
     for (const item of items) {
-      // Look up cost price from products table
-      const product = db.query("SELECT cost_price FROM products WHERE id = ?").get(item.product_id) as any;
+      // Look up cost price + tracking flag from products table
+      const product = db.query("SELECT cost_price, track_stock FROM products WHERE id = ?").get(item.product_id) as any;
       const costPrice = product?.cost_price || 0;
       const original = item.original_price ?? item.unit_price;
       insertItem.run(billId, item.product_id, item.product_name, item.quantity, item.unit_price, original, costPrice, item.quantity * item.unit_price);
+      // Deduct product-level stock for tracked products. (Recipe-based deduction
+      // for non-tracked products is handled separately and only runs if the
+      // product is not tracked — user chose "only one or the other".)
+      if (product?.track_stock) {
+        db.query("UPDATE products SET stock_quantity = stock_quantity - ? WHERE id = ?").run(item.quantity, item.product_id);
+      }
     }
 
     // Log activity

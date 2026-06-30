@@ -216,7 +216,13 @@
         const img = p.image_path
           ? `<div class="img" style="background-image:url('/uploads/${p.image_path}');"></div>`
           : `<div class="img">🎂</div>`;
-        return `<div class="prod-card" onclick="addToCart(${p.id})">${img}<div class="name">${escapeHtml(p.name)}</div>${priceHtml}</div>`;
+        const out = p.track_stock && p.stock_quantity <= 0;
+        const low = p.track_stock && !out && p.stock_reorder_level > 0 && p.stock_quantity <= p.stock_reorder_level;
+        const badge = out ? `<div style="position:absolute;top:2px;right:2px;background:#dc2626;color:white;font-size:0.6rem;padding:1px 5px;border-radius:999px;font-weight:700;">OUT</div>`
+          : low ? `<div style="position:absolute;top:2px;right:2px;background:#f59e0b;color:white;font-size:0.6rem;padding:1px 5px;border-radius:999px;font-weight:700;">${p.stock_quantity}</div>` : '';
+        const style = out ? 'opacity:0.5;cursor:not-allowed;position:relative;' : 'position:relative;';
+        const click = out ? `onclick="toast('${p.name.replace(/'/g, "\\'")} is out of stock','error')"` : `onclick="addToCart(${p.id})"`;
+        return `<div class="prod-card" ${click} style="${style}">${badge}${img}<div class="name">${escapeHtml(p.name)}</div>${priceHtml}</div>`;
       }).join('');
     }
 

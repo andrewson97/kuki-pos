@@ -44,6 +44,12 @@
         <button class="btn btn-danger btn-sm" id="p-rmimg" style="display:none;margin-top:6px;" onclick="removeImage()">Remove current image</button>
       </div>
       <div class="field"><label><input type="checkbox" id="p-active" checked> Active (shown in POS)</label></div>
+      <div class="field"><label><input type="checkbox" id="p-track" onchange="onTrackToggle()"> Track finished-product inventory</label></div>
+      <div id="stock-fields" style="display:none;">
+        <div class="field"><label>Quantity on hand</label><input type="number" id="p-qty" min="0" step="1" value="0" inputmode="numeric"></div>
+        <div class="field"><label>Reorder level (alert below)</label><input type="number" id="p-reorder" min="0" step="1" value="0" inputmode="numeric"></div>
+        <button class="btn btn-danger" id="p-dispose" style="display:none;" onclick="disposeProduct()">Dispose (expired)…</button>
+      </div>
       <div class="btn-row">
         <button class="btn btn-outline" onclick="closeSheet('prod-sheet')">Cancel</button>
         <button class="btn btn-primary" onclick="saveProd()">Save</button>
@@ -121,11 +127,22 @@
       ['p-name', 'p-cost', 'p-price', 'p-disc'].forEach(id => $(id).value = '');
       buildCatSelect('');
       $('p-active').checked = true;
+      $('p-track').checked = false;
+      $('p-qty').value = 0;
+      $('p-reorder').value = 0;
+      $('stock-fields').style.display = 'none';
+      $('p-dispose').style.display = 'none';
       $('p-img').value = '';
       $('p-preview').style.display = 'none';
       $('p-rmimg').style.display = 'none';
       $('p-delete').style.display = 'none';
       openSheet('prod-sheet');
+    }
+
+    function onTrackToggle() {
+      const on = $('p-track').checked;
+      $('stock-fields').style.display = on ? 'block' : 'none';
+      $('p-dispose').style.display = (on && $('p-id').value) ? 'block' : 'none';
     }
 
     function editProd(id) {
@@ -138,6 +155,11 @@
       $('p-price').value = p.selling_price;
       $('p-disc').value = p.discount_price || '';
       $('p-active').checked = !!p.is_active;
+      $('p-track').checked = !!p.track_stock;
+      $('p-qty').value = p.stock_quantity || 0;
+      $('p-reorder').value = p.stock_reorder_level || 0;
+      $('stock-fields').style.display = p.track_stock ? 'block' : 'none';
+      $('p-dispose').style.display = p.track_stock ? 'block' : 'none';
       $('p-img').value = '';
       if (p.image_path) {
         $('p-preview').src = '/uploads/' + p.image_path;
@@ -161,6 +183,9 @@
         selling_price: parseFloat($('p-price').value),
         discount_price: disc ? parseFloat(disc) : null,
         is_active: $('p-active').checked ? 1 : 0,
+        track_stock: $('p-track').checked ? 1 : 0,
+        stock_quantity: parseFloat($('p-qty').value) || 0,
+        stock_reorder_level: parseFloat($('p-reorder').value) || 0,
       };
       if (!body.name) { toast('Name required', 'error'); return; }
       if (!body.selling_price) { toast('Selling price required', 'error'); return; }
@@ -192,6 +217,25 @@
         $('p-rmimg').style.display = 'none';
         toast('Image removed');
         allProds = await api('/api/products');
+      } catch (err) { toast(err.message, 'error'); }
+    }
+
+    async function disposeProduct() {
+      const id = $('p-id').value;
+      if (!id) { toast('Save the product first', 'error'); return; }
+      const qtyStr = prompt('How many units to dispose?', '1');
+      if (qtyStr === null) return;
+      const qty = parseFloat(qtyStr);
+      if (!qty || qty <= 0) { toast('Invalid quantity', 'error'); return; }
+      const reason = prompt('Reason (e.g., expired, damaged)?', 'expired');
+      if (reason === null) return;
+      try {
+        const r = await api(`/api/products/${id}/dispose`, { method: 'POST', body: { quantity: qty, reason } });
+        toast(`Disposed ${qty} — loss ${fmt(r.cost_loss)}`);
+        allProds = await api('/api/products');
+        const updated = allProds.find(x => x.id === parseInt(id));
+        if (updated) $('p-qty').value = updated.stock_quantity || 0;
+        render(); renderCatOptions();
       } catch (err) { toast(err.message, 'error'); }
     }
 

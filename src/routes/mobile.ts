@@ -52,13 +52,19 @@ mobile.get("/dashboard", (c) => {
     closing: { done: closing.filter(t => t.completion_id != null).length, total: closing.length },
   };
 
-  const lowStock = db.query(`
-    SELECT si.id, si.name, si.quantity, si.unit, si.reorder_level
-    FROM stock_items si
-    WHERE si.quantity <= si.reorder_level AND si.reorder_level > 0
-    ORDER BY (si.quantity / si.reorder_level) ASC
-    LIMIT 5
-  `).all();
+  const lowIngredients = db.query(`
+    SELECT 'ingredient' AS kind, id, name, quantity, unit, reorder_level
+    FROM stock_items
+    WHERE quantity <= reorder_level AND reorder_level > 0
+  `).all() as any[];
+  const lowProducts = db.query(`
+    SELECT 'product' AS kind, id, name, stock_quantity AS quantity, 'unit' AS unit, stock_reorder_level AS reorder_level
+    FROM products
+    WHERE track_stock = 1 AND is_active = 1 AND stock_quantity <= stock_reorder_level
+  `).all() as any[];
+  const lowStock = [...lowIngredients, ...lowProducts]
+    .sort((a, b) => (a.quantity / Math.max(1, a.reorder_level)) - (b.quantity / Math.max(1, b.reorder_level)))
+    .slice(0, 5);
 
   return c.json({
     date: today,

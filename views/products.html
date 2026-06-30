@@ -79,6 +79,25 @@
           <div class="mb-3">
             <div id="product-margin" class="text-muted" style="font-size:0.85rem;"></div>
           </div>
+          <hr>
+          <div class="form-check form-switch mb-2">
+            <input class="form-check-input" type="checkbox" id="product-track-stock" onchange="onTrackStockToggle()">
+            <label class="form-check-label" for="product-track-stock">Track finished-product inventory</label>
+            <div class="text-muted" style="font-size:0.8rem;">When on, every sale deducts 1 from the count; recipes are NOT used.</div>
+          </div>
+          <div class="row mb-3" id="stock-fields" style="display:none;">
+            <div class="col">
+              <label class="form-label">Quantity on hand</label>
+              <input type="number" class="form-control" id="product-qty" step="1" min="0" value="0">
+            </div>
+            <div class="col">
+              <label class="form-label">Reorder level (alert below)</label>
+              <input type="number" class="form-control" id="product-reorder" step="1" min="0" value="0">
+            </div>
+            <div class="col d-flex align-items-end">
+              <button type="button" class="btn btn-outline-danger w-100" id="btn-dispose" onclick="disposeProduct()" style="display:none;">Dispose (expired)…</button>
+            </div>
+          </div>
           <div class="mb-3">
             <label class="form-label">Image <small class="text-muted">(optional, max 3MB)</small></label>
             <div class="d-flex align-items-center gap-3">
@@ -113,6 +132,34 @@
       renderProducts();
       renderCategoryOptions();
       document.getElementById('product-search').addEventListener('input', renderProducts);
+    }
+
+    function onTrackStockToggle() {
+      const on = document.getElementById('product-track-stock').checked;
+      document.getElementById('stock-fields').style.display = on ? 'flex' : 'none';
+      const id = document.getElementById('product-id').value;
+      document.getElementById('btn-dispose').style.display = (on && id) ? 'block' : 'none';
+    }
+
+    async function disposeProduct() {
+      const id = document.getElementById('product-id').value;
+      if (!id) { showToast('Save the product first', 'warning'); return; }
+      const qtyStr = prompt('How many units to dispose?', '1');
+      if (qtyStr === null) return;
+      const qty = parseFloat(qtyStr);
+      if (!qty || qty <= 0) { showToast('Invalid quantity', 'error'); return; }
+      const reason = prompt('Reason (e.g., expired, damaged)?', 'expired');
+      if (reason === null) return;
+      try {
+        const r = await api(`/api/products/${id}/dispose`, { method: 'POST', body: { quantity: qty, reason } });
+        showToast(`Disposed ${qty} unit(s) — loss ${formatCurrency(r.cost_loss)}`);
+        await loadProducts();
+        // refresh form fields from cache
+        const updated = allProducts.find(x => x.id === parseInt(id));
+        if (updated) document.getElementById('product-qty').value = updated.stock_quantity || 0;
+      } catch (err) {
+        showToast('Dispose failed: ' + err.message, 'error');
+      }
     }
 
     // ===== Arrange categories =====
@@ -202,9 +249,15 @@
         const thumb = p.image_path
           ? `<img src="/uploads/${p.image_path}" alt="" style="width:42px;height:42px;object-fit:cover;border-radius:6px;">`
           : `<div style="width:42px;height:42px;background:#e9ecef;border-radius:6px;display:flex;align-items:center;justify-content:center;color:#adb5bd;font-size:1.2rem;">&#127874;</div>`;
+        let stockLabel = '';
+        if (p.track_stock) {
+          const out = p.stock_quantity <= 0;
+          const low = p.stock_reorder_level > 0 && p.stock_quantity <= p.stock_reorder_level;
+          stockLabel = out ? '<span class="badge bg-danger ms-1">Out</span>' : (low ? '<span class="badge bg-warning text-dark ms-1">Low</span>' : `<span class="badge bg-light text-dark ms-1">${p.stock_quantity}</span>`);
+        }
         return `<tr>
           <td>${thumb}</td>
-          <td class="fw-bold">${p.name}</td>
+          <td class="fw-bold">${p.name} ${stockLabel}</td>
           <td>${p.category}</td>
           <td>${formatCurrency(p.cost_price || 0)}</td>
           <td>${p.discount_price ? `<s class="text-muted">${formatCurrency(p.selling_price)}</s> <span class="text-danger fw-bold">${formatCurrency(p.discount_price)}</span>` : formatCurrency(p.selling_price)}</td>
@@ -244,6 +297,11 @@
       document.getElementById('product-image').value = '';
       document.getElementById('product-image-preview').style.display = 'none';
       document.getElementById('btn-remove-image').style.display = 'none';
+      document.getElementById('product-track-stock').checked = false;
+      document.getElementById('product-qty').value = 0;
+      document.getElementById('product-reorder').value = 0;
+      document.getElementById('stock-fields').style.display = 'none';
+      document.getElementById('btn-dispose').style.display = 'none';
       document.getElementById('product-cost').oninput = updateMarginPreview;
       document.getElementById('product-price').oninput = updateMarginPreview;
       new bootstrap.Modal(document.getElementById('productModal')).show();
@@ -259,6 +317,11 @@
       document.getElementById('product-price').value = p.selling_price;
       document.getElementById('product-discount').value = p.discount_price || '';
       document.getElementById('product-active').checked = !!p.is_active;
+      document.getElementById('product-track-stock').checked = !!p.track_stock;
+      document.getElementById('product-qty').value = p.stock_quantity || 0;
+      document.getElementById('product-reorder').value = p.stock_reorder_level || 0;
+      document.getElementById('stock-fields').style.display = p.track_stock ? 'flex' : 'none';
+      document.getElementById('btn-dispose').style.display = p.track_stock ? 'block' : 'none';
       document.getElementById('product-image').value = '';
       const preview = document.getElementById('product-image-preview');
       const removeBtn = document.getElementById('btn-remove-image');
@@ -286,6 +349,9 @@
         selling_price: parseFloat(document.getElementById('product-price').value),
         discount_price: discountInput ? parseFloat(discountInput) : null,
         is_active: document.getElementById('product-active').checked ? 1 : 0,
+        track_stock: document.getElementById('product-track-stock').checked ? 1 : 0,
+        stock_quantity: parseFloat(document.getElementById('product-qty').value) || 0,
+        stock_reorder_level: parseFloat(document.getElementById('product-reorder').value) || 0,
       };
       let productId;
       if (id) {

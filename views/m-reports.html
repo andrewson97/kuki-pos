@@ -35,7 +35,13 @@
         <div class="stat-tile"><div class="label">Gross profit</div><div class="val green" id="r-gross">…</div></div>
         <div class="stat-tile"><div class="label">Expenses</div><div class="val red" id="r-exp">…</div></div>
         <div class="stat-tile"><div class="label">Net profit</div><div class="val" id="r-net">…</div></div>
+        <div class="stat-tile"><div class="label">Disposal loss</div><div class="val red" id="r-disposal">…</div></div>
       </div>
+    </div>
+
+    <div class="card" id="disposals-card" style="display:none;">
+      <h2>Disposals today</h2>
+      <div id="r-disposals"></div>
     </div>
 
     <div class="card">
@@ -79,6 +85,17 @@
         const net = r.gross_profit - r.expenses;
         $('r-net').textContent = fmt(net);
         $('r-net').className = 'val ' + (net >= 0 ? 'green' : 'red');
+        $('r-disposal').textContent = fmt(r.disposal_loss || 0);
+        if (r.disposals && r.disposals.length) {
+          $('disposals-card').style.display = 'block';
+          $('r-disposals').innerHTML = r.disposals.map(d => `
+            <div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--line);font-size:0.9rem;">
+              <span>${escapeHtml(d.product_name)} <span style="color:var(--ink-soft);">× ${d.quantity}</span>${d.reason ? ` <small style="color:var(--ink-soft);">— ${escapeHtml(d.reason)}</small>` : ''}</span>
+              <strong style="color:var(--red);">-${fmt(d.cost_loss)}</strong>
+            </div>`).join('');
+        } else {
+          $('disposals-card').style.display = 'none';
+        }
 
         if (!r.by_payment.length) {
           $('r-payment').innerHTML = '<div class="empty">No sales</div>';

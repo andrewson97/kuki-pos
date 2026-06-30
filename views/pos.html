@@ -292,8 +292,15 @@
         const imgHtml = p.image_path
           ? `<div class="product-image" style="background-image:url('/uploads/${p.image_path}')"></div>`
           : `<div class="product-image product-image-placeholder">&#127874;</div>`;
+        const out = p.track_stock && p.stock_quantity <= 0;
+        const low = p.track_stock && !out && p.stock_reorder_level > 0 && p.stock_quantity <= p.stock_reorder_level;
+        const badge = out ? `<div style="position:absolute;top:4px;right:4px;background:#dc3545;color:white;font-size:0.65rem;padding:1px 6px;border-radius:999px;font-weight:700;">OUT</div>`
+          : low ? `<div style="position:absolute;top:4px;right:4px;background:#f59e0b;color:white;font-size:0.65rem;padding:1px 6px;border-radius:999px;font-weight:700;">${p.stock_quantity}</div>` : '';
+        const cardStyle = out ? 'opacity:0.5;cursor:not-allowed;position:relative;' : 'position:relative;';
+        const onClick = out ? `onclick="showToast('${p.name.replace(/'/g, "\\'")} is out of stock','warning')"` : `onclick="addToCart(${p.id})"`;
         return `
-        <div class="product-card" onclick="addToCart(${p.id})">
+        <div class="product-card" ${onClick} style="${cardStyle}">
+          ${badge}
           ${imgHtml}
           <div class="product-name">${p.name}</div>
           ${priceHtml}
