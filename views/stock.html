@@ -54,9 +54,19 @@
       </div>
 
       <div class="table-container">
+        <h6 class="px-3 pt-3 fw-bold mb-0" style="color:#6b5a4a;">Ingredients</h6>
         <table class="table table-hover mb-0">
           <thead><tr><th>Name</th><th>Category</th><th>Quantity</th><th>Unit</th><th>Cost/Unit</th><th>Reorder Level</th><th>Expiry</th><th>Actions</th></tr></thead>
           <tbody id="stock-table"></tbody>
+        </table>
+      </div>
+
+      <!-- Tracked products: quick restock -->
+      <div class="table-container mt-4" id="tracked-products-panel">
+        <h6 class="px-3 pt-3 fw-bold mb-0" style="color:#6b5a4a;">Tracked Finished Products <small class="text-muted fw-normal">— add stock or dispose expired</small></h6>
+        <table class="table table-hover mb-0">
+          <thead><tr><th></th><th>Product</th><th>Category</th><th>On Hand</th><th>Reorder Level</th><th>Add to Stock</th><th>Actions</th></tr></thead>
+          <tbody id="tracked-products-table"></tbody>
         </table>
       </div>
     </div>
@@ -126,15 +136,97 @@
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
   <script src="/public/js/app.js"></script>
   <script>
-    let stockItems = [], categories = [];
+    let stockItems = [], categories = [], trackedProducts = [];
     initApp('/stock', loadStock);
 
     async function loadStock() {
-      [stockItems, categories] = await Promise.all([api('/api/stock/items'), api('/api/stock/categories')]);
+      const [items, cats, allProducts] = await Promise.all([
+        api('/api/stock/items'),
+        api('/api/stock/categories'),
+        api('/api/products'),
+      ]);
+      stockItems = items;
+      categories = cats;
+      trackedProducts = allProducts.filter(p => p.is_active && p.track_stock);
       renderCategoryOptions();
       renderStock();
-      document.getElementById('stock-search').addEventListener('input', renderStock);
+      renderTrackedProducts();
+      document.getElementById('stock-search').addEventListener('input', () => { renderStock(); renderTrackedProducts(); });
       document.getElementById('stock-cat-filter').addEventListener('change', renderStock);
+    }
+
+    function renderTrackedProducts() {
+      const search = document.getElementById('stock-search').value.toLowerCase().trim();
+      const list = search
+        ? trackedProducts.filter(p => p.name.toLowerCase().includes(search) || (p.category || '').toLowerCase().includes(search))
+        : trackedProducts;
+      const tbody = document.getElementById('tracked-products-table');
+      const panel = document.getElementById('tracked-products-panel');
+      if (!trackedProducts.length) {
+        panel.style.display = 'none';
+        return;
+      }
+      panel.style.display = 'block';
+      if (!list.length) {
+        tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted py-3">No matches</td></tr>';
+        return;
+      }
+      tbody.innerHTML = list.map(p => {
+        const out = p.stock_quantity <= 0;
+        const low = !out && p.stock_reorder_level > 0 && p.stock_quantity <= p.stock_reorder_level;
+        const status = out ? '<span class="badge bg-danger">OUT</span>'
+          : low ? '<span class="badge bg-warning text-dark">LOW</span>'
+          : '';
+        const thumb = p.image_path
+          ? `<img src="/uploads/${p.image_path}" style="width:36px;height:36px;border-radius:6px;object-fit:cover;">`
+          : `<div style="width:36px;height:36px;border-radius:6px;background:#f3f4f6;display:flex;align-items:center;justify-content:center;font-size:1rem;color:#adb5bd;">🎂</div>`;
+        return `<tr class="${out ? 'table-danger' : (low ? 'table-warning' : '')}">
+          <td>${thumb}</td>
+          <td class="fw-bold">${escapeHtml(p.name)} ${status}</td>
+          <td>${escapeHtml(p.category || '-')}</td>
+          <td class="${out ? 'text-danger' : (low ? 'text-warning' : '')} fw-bold">${p.stock_quantity}</td>
+          <td>${p.stock_reorder_level}</td>
+          <td>
+            <div class="d-flex gap-1" style="max-width:200px;">
+              <input type="number" class="form-control form-control-sm" id="restock-qty-${p.id}" min="0.01" step="1" placeholder="qty">
+              <button class="btn btn-sm btn-success" onclick="restock(${p.id})">Add</button>
+            </div>
+          </td>
+          <td><button class="btn btn-sm btn-outline-danger" onclick="dispose(${p.id})" title="Dispose expired">Dispose</button></td>
+        </tr>`;
+      }).join('');
+    }
+
+    function escapeHtml(s) {
+      return String(s == null ? '' : s).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+    }
+
+    async function restock(id) {
+      const input = document.getElementById('restock-qty-' + id);
+      const qty = parseFloat(input.value);
+      if (!qty || qty <= 0) { showToast('Enter a quantity', 'warning'); return; }
+      const note = prompt('Optional note (supplier, batch, etc):') || '';
+      try {
+        await api(`/api/products/${id}/restock`, { method: 'POST', body: { quantity: qty, note } });
+        showToast(`Added ${qty} to stock`);
+        loadStock();
+      } catch (err) { showToast(err.message, 'error'); }
+    }
+
+    async function dispose(id) {
+      const p = trackedProducts.find(x => x.id === id);
+      if (!p) return;
+      const qtyStr = prompt(`Dispose how many units of "${p.name}"?`, '1');
+      if (qtyStr === null) return;
+      const qty = parseFloat(qtyStr);
+      if (!qty || qty <= 0) { showToast('Invalid quantity', 'error'); return; }
+      const reason = prompt('Reason (e.g., expired, damaged)?', 'expired');
+      if (reason === null) return;
+      try {
+        const r = await api(`/api/products/${id}/dispose`, { method: 'POST', body: { quantity: qty, reason } });
+        showToast(`Disposed ${qty} — loss ${formatCurrency(r.cost_loss)}`);
+        loadStock();
+      } catch (err) { showToast(err.message, 'error'); }
     }
 
     function renderCategoryOptions() {

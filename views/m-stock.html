@@ -20,6 +20,27 @@
   </div>
   <div id="stock-list"><div class="empty">Loading…</div></div>
 
+  <div id="tracked-section" style="display:none;">
+    <div style="background:white;padding:12px 14px 4px;font-weight:700;color:var(--ink-soft);text-transform:uppercase;letter-spacing:0.1em;font-size:0.72rem;border-top:8px solid var(--bg);">Tracked Products</div>
+    <div id="tracked-list"></div>
+  </div>
+
+  <div class="sheet" id="restock-sheet" onclick="if(event.target===this)closeSheet('restock-sheet')">
+    <div class="sheet-inner">
+      <div class="sheet-handle"></div>
+      <h3 id="restock-title">Add stock</h3>
+      <input type="hidden" id="restock-id">
+      <div class="field"><label>Current quantity</label><input type="text" id="restock-current" readonly></div>
+      <div class="field"><label>Add (units)</label><input type="number" id="restock-add" min="1" step="1" inputmode="numeric"></div>
+      <div class="field"><label>Note (optional)</label><input type="text" id="restock-note" placeholder="supplier, batch, etc."></div>
+      <div class="btn-row">
+        <button class="btn btn-outline" onclick="closeSheet('restock-sheet')">Cancel</button>
+        <button class="btn btn-success" onclick="submitRestock()">Add to stock</button>
+      </div>
+      <button class="btn btn-danger" style="margin-top:8px;" onclick="disposeFromSheet()">Dispose expired…</button>
+    </div>
+  </div>
+
   <button class="fab" id="fab" onclick="openAdd()" style="display:none;">+</button>
 
   <!-- Edit / adjust sheet -->
@@ -49,19 +70,88 @@
 
   <script src="/public/js/mobile.js"></script>
   <script>
-    let items = [], cats = [];
+    let items = [], cats = [], tracked = [];
 
     async function load() {
       await bootMobile();
       if (currentUser.role !== 'admin') { $('fab').style.display = 'none'; toast('Read-only — admin needed to edit'); }
       else $('fab').style.display = 'block';
-      [items, cats] = await Promise.all([api('/api/stock/items'), api('/api/stock/categories')]);
+      const [stocks, allCats, prods] = await Promise.all([
+        api('/api/stock/items'),
+        api('/api/stock/categories'),
+        api('/api/products'),
+      ]);
+      items = stocks; cats = allCats;
+      tracked = prods.filter(p => p.is_active && p.track_stock);
       const catOpts = '<option value="">All categories</option>' + cats.map(c => `<option value="${c.id}">${escapeHtml(c.name)}</option>`).join('');
       $('s-cat').innerHTML = catOpts;
       $('s-cat-sel').innerHTML = cats.map(c => `<option value="${c.id}">${escapeHtml(c.name)}</option>`).join('');
       render();
-      $('s-search').addEventListener('input', render);
+      renderTracked();
+      $('s-search').addEventListener('input', () => { render(); renderTracked(); });
       $('s-cat').addEventListener('change', render);
+    }
+
+    function renderTracked() {
+      const sec = $('tracked-section');
+      if (!tracked.length) { sec.style.display = 'none'; return; }
+      const q = $('s-search').value.toLowerCase().trim();
+      const list = q ? tracked.filter(p => p.name.toLowerCase().includes(q) || (p.category || '').toLowerCase().includes(q)) : tracked;
+      sec.style.display = 'block';
+      if (!list.length) { $('tracked-list').innerHTML = '<div class="empty">No matches</div>'; return; }
+      $('tracked-list').innerHTML = list.map(p => {
+        const out = p.stock_quantity <= 0;
+        const low = !out && p.stock_reorder_level > 0 && p.stock_quantity <= p.stock_reorder_level;
+        const status = out ? '<span class="badge danger">OUT</span>' : low ? '<span class="badge warning">LOW</span>' : '';
+        return `<div class="list-item" onclick="openRestock(${p.id})">
+          <div class="list-head">
+            <span class="list-title">${escapeHtml(p.name)} ${status}</span>
+            <span class="list-amount" style="color:${out ? 'var(--red)' : (low ? '#92400e' : 'var(--ink)')};">${p.stock_quantity}</span>
+          </div>
+          <div class="list-meta">${escapeHtml(p.category || '-')} · min ${p.stock_reorder_level} · tap to add stock</div>
+        </div>`;
+      }).join('');
+    }
+
+    function openRestock(id) {
+      const p = tracked.find(x => x.id === id);
+      if (!p) return;
+      $('restock-title').textContent = p.name;
+      $('restock-id').value = id;
+      $('restock-current').value = p.stock_quantity;
+      $('restock-add').value = '';
+      $('restock-note').value = '';
+      openSheet('restock-sheet');
+    }
+
+    async function submitRestock() {
+      const id = $('restock-id').value;
+      const qty = parseFloat($('restock-add').value);
+      if (!qty || qty <= 0) { toast('Enter a quantity', 'error'); return; }
+      try {
+        await api(`/api/products/${id}/restock`, { method: 'POST', body: { quantity: qty, note: $('restock-note').value.trim() } });
+        closeSheet('restock-sheet');
+        toast(`Added ${qty} to stock`);
+        load();
+      } catch (err) { toast(err.message, 'error'); }
+    }
+
+    async function disposeFromSheet() {
+      const id = $('restock-id').value;
+      const p = tracked.find(x => x.id === parseInt(id));
+      if (!p) return;
+      const qtyStr = prompt(`Dispose how many units of "${p.name}"?`, '1');
+      if (qtyStr === null) return;
+      const qty = parseFloat(qtyStr);
+      if (!qty || qty <= 0) { toast('Invalid quantity', 'error'); return; }
+      const reason = prompt('Reason (e.g., expired, damaged)?', 'expired');
+      if (reason === null) return;
+      try {
+        const r = await api(`/api/products/${id}/dispose`, { method: 'POST', body: { quantity: qty, reason } });
+        closeSheet('restock-sheet');
+        toast(`Disposed ${qty} — loss ${fmt(r.cost_loss)}`);
+        load();
+      } catch (err) { toast(err.message, 'error'); }
     }
 
     function render() {

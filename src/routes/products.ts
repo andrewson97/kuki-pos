@@ -76,6 +76,33 @@ products.get("/disposals", (c) => {
   return c.json(rows);
 });
 
+// Add units to a tracked product's stock (purchase / restock / adjustment).
+products.post("/:id/restock", adminOnly, async (c) => {
+  const id = c.req.param("id");
+  const user = getUser(c)!;
+  const body = await c.req.json();
+  const qty = parseFloat(body.quantity);
+  const note = (body.note || "").trim() || null;
+  if (!qty || qty <= 0) return c.json({ error: "Quantity must be greater than zero" }, 400);
+
+  const db = getDb();
+  const product = db.query(
+    "SELECT id, name, track_stock, stock_quantity FROM products WHERE id = ?"
+  ).get(id) as any;
+  if (!product) return c.json({ error: "Product not found" }, 404);
+  if (!product.track_stock) return c.json({ error: "Inventory tracking is off for this product" }, 400);
+
+  db.transaction(() => {
+    db.query("UPDATE products SET stock_quantity = stock_quantity + ? WHERE id = ?").run(qty, id);
+    db.query("INSERT INTO activity_log (user_id, action, details) VALUES (?, 'restocked_product', ?)").run(
+      user.id, JSON.stringify({ product_id: id, name: product.name, quantity: qty, note })
+    );
+  })();
+
+  const updated = db.query("SELECT stock_quantity FROM products WHERE id = ?").get(id) as any;
+  return c.json({ success: true, stock_quantity: updated.stock_quantity });
+});
+
 // Record a disposal: deducts product stock and stores cost_loss = qty × cost_price.
 products.post("/:id/dispose", adminOnly, async (c) => {
   const id = c.req.param("id");
