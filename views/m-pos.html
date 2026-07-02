@@ -188,7 +188,15 @@
       } catch {}
     }
 
-    function inStock(p) { return !(p.track_stock && p.stock_quantity <= 0); }
+    function inStock(p) {
+      if (p.track_stock && p.stock_quantity <= 0) return false;
+      if (Array.isArray(p.components)) {
+        for (const c of p.components) {
+          if (c.component_track_stock && (c.component_stock_quantity ?? 0) < c.quantity) return false;
+        }
+      }
+      return true;
+    }
 
     function renderCats() {
       const visible = products.filter(inStock);

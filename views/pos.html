@@ -214,10 +214,18 @@
       }
     }
 
-    // Out-of-stock tracked products are hidden from the POS entirely. They still
-    // exist in the DB and on the Products/Stock pages; this is purely a cashier
-    // view filter so they can't accidentally try to sell what isn't there.
-    function inStock(p) { return !(p.track_stock && p.stock_quantity <= 0); }
+    // Out-of-stock tracked products are hidden from the POS entirely. Also
+    // hidden: composite products whose tracked components can't cover a single
+    // unit (e.g. Brownie w/ Ice Cream disappears when Brownie hits 0).
+    function inStock(p) {
+      if (p.track_stock && p.stock_quantity <= 0) return false;
+      if (Array.isArray(p.components)) {
+        for (const c of p.components) {
+          if (c.component_track_stock && (c.component_stock_quantity ?? 0) < c.quantity) return false;
+        }
+      }
+      return true;
+    }
 
     function renderCategoryTabs() {
       const visible = products.filter(inStock);

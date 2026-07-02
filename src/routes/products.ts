@@ -8,16 +8,30 @@ import { todayDate } from "../utils/helpers";
 
 const products = new Hono();
 
+function attachComponents(rows: any[]): any[] {
+  const db = getDb();
+  const comps = db.query(
+    "SELECT pc.product_id, pc.component_product_id, pc.quantity, p.name AS component_name, p.track_stock AS component_track_stock, p.stock_quantity AS component_stock_quantity FROM product_components pc JOIN products p ON p.id = pc.component_product_id"
+  ).all() as any[];
+  const byProduct = new Map<number, any[]>();
+  for (const c of comps) {
+    if (!byProduct.has(c.product_id)) byProduct.set(c.product_id, []);
+    byProduct.get(c.product_id)!.push(c);
+  }
+  for (const r of rows) r.components = byProduct.get(r.id) || [];
+  return rows;
+}
+
 products.get("/", (c) => {
   const db = getDb();
-  const all = db.query("SELECT * FROM products ORDER BY name").all();
-  return c.json(all);
+  const all = db.query("SELECT * FROM products ORDER BY name").all() as any[];
+  return c.json(attachComponents(all));
 });
 
 products.get("/active", (c) => {
   const db = getDb();
-  const all = db.query("SELECT * FROM products WHERE is_active = 1 ORDER BY category, name").all();
-  return c.json(all);
+  const all = db.query("SELECT * FROM products WHERE is_active = 1 ORDER BY category, name").all() as any[];
+  return c.json(attachComponents(all));
 });
 
 products.get("/:id", (c) => {
@@ -39,8 +53,23 @@ function canonicalCategory(input: string | undefined | null): string {
   return existing?.category || trimmed;
 }
 
+function saveComponents(productId: number, components: any[] | undefined) {
+  if (!Array.isArray(components)) return;
+  const db = getDb();
+  db.query("DELETE FROM product_components WHERE product_id = ?").run(productId);
+  const insert = db.query(
+    "INSERT INTO product_components (product_id, component_product_id, quantity) VALUES (?, ?, ?)"
+  );
+  for (const c of components) {
+    const cid = parseInt(c.component_product_id);
+    const qty = parseFloat(c.quantity);
+    if (!cid || cid === productId || !qty || qty <= 0) continue;
+    try { insert.run(productId, cid, qty); } catch { /* dup / bad row */ }
+  }
+}
+
 products.post("/", adminOnly, async (c) => {
-  const { name, category, cost_price, selling_price, discount_price, is_active, track_stock, stock_quantity, stock_reorder_level } = await c.req.json();
+  const { name, category, cost_price, selling_price, discount_price, is_active, track_stock, stock_quantity, stock_reorder_level, components } = await c.req.json();
   const db = getDb();
   const dp = discount_price && discount_price > 0 && discount_price < selling_price ? discount_price : null;
   const cat = canonicalCategory(category);
@@ -49,7 +78,9 @@ products.post("/", adminOnly, async (c) => {
   const result = db.query(
     "INSERT INTO products (name, category, cost_price, selling_price, discount_price, is_active, track_stock, stock_quantity, stock_reorder_level) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
   ).run(cleanName, cat, cost_price || 0, selling_price, dp, is_active ?? 1, ts, ts ? (stock_quantity || 0) : 0, ts ? (stock_reorder_level || 0) : 0);
-  return c.json({ id: Number(result.lastInsertRowid), name: cleanName, category: cat, cost_price, selling_price, discount_price: dp });
+  const id = Number(result.lastInsertRowid);
+  saveComponents(id, components);
+  return c.json({ id, name: cleanName, category: cat, cost_price, selling_price, discount_price: dp });
 });
 
 // --- Disposal / wastage tracking ---
@@ -150,7 +181,7 @@ products.put("/category-order", adminOnly, async (c) => {
 
 products.put("/:id", adminOnly, async (c) => {
   const id = c.req.param("id");
-  const { name, category, cost_price, selling_price, discount_price, is_active, track_stock, stock_quantity, stock_reorder_level } = await c.req.json();
+  const { name, category, cost_price, selling_price, discount_price, is_active, track_stock, stock_quantity, stock_reorder_level, components } = await c.req.json();
   const db = getDb();
   const dp = discount_price && discount_price > 0 && discount_price < selling_price ? discount_price : null;
   const cat = canonicalCategory(category);
@@ -159,6 +190,7 @@ products.put("/:id", adminOnly, async (c) => {
   db.query(
     "UPDATE products SET name = ?, category = ?, cost_price = ?, selling_price = ?, discount_price = ?, is_active = ?, track_stock = ?, stock_quantity = ?, stock_reorder_level = ? WHERE id = ?"
   ).run(cleanName, cat, cost_price || 0, selling_price, dp, is_active, ts, ts ? (stock_quantity || 0) : 0, ts ? (stock_reorder_level || 0) : 0, id);
+  saveComponents(parseInt(id), components);
   return c.json({ success: true });
 });
 

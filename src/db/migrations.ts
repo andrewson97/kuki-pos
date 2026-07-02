@@ -159,6 +159,14 @@ export function runMigrations(): void {
       UNIQUE(task_id, business_date)
     );
 
+    CREATE TABLE IF NOT EXISTS product_components (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+      component_product_id INTEGER NOT NULL REFERENCES products(id),
+      quantity REAL NOT NULL DEFAULT 1,
+      UNIQUE(product_id, component_product_id)
+    );
+
     CREATE TABLE IF NOT EXISTS product_disposals (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       product_id INTEGER NOT NULL REFERENCES products(id),

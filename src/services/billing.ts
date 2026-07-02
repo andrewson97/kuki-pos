@@ -51,13 +51,38 @@ export function createBill(params: CreateBillParams): any {
   `);
 
   const transaction = db.transaction(() => {
-    // Pre-flight: any tracked product short on stock aborts the whole sale.
+    // Aggregate stock needs across all items — a product's own count + any
+    // components (composite/BoM). Same underlying product referenced multiple
+    // times in the cart or across item+component sums correctly.
+    const needs = new Map<number, { name: string; needed: number }>();
+    const bump = (pid: number, name: string, qty: number) => {
+      const cur = needs.get(pid) || { name, needed: 0 };
+      cur.needed += qty;
+      needs.set(pid, cur);
+    };
+
     for (const item of items) {
       const p = db.query(
-        "SELECT name, track_stock, stock_quantity FROM products WHERE id = ?"
+        "SELECT id, name, track_stock FROM products WHERE id = ?"
       ).get(item.product_id) as any;
-      if (p?.track_stock && p.stock_quantity < item.quantity) {
-        throw new Error(`${p.name} is out of stock (only ${p.stock_quantity} left)`);
+      if (p?.track_stock) bump(p.id, p.name, item.quantity);
+
+      const components = db.query(
+        "SELECT component_product_id, quantity FROM product_components WHERE product_id = ?"
+      ).all(item.product_id) as any[];
+      for (const c of components) {
+        const comp = db.query(
+          "SELECT id, name, track_stock FROM products WHERE id = ?"
+        ).get(c.component_product_id) as any;
+        if (comp?.track_stock) bump(comp.id, comp.name, c.quantity * item.quantity);
+      }
+    }
+
+    // Validate every aggregated need against current stock.
+    for (const [pid, need] of needs) {
+      const row = db.query("SELECT stock_quantity FROM products WHERE id = ?").get(pid) as any;
+      if ((row?.stock_quantity ?? 0) < need.needed) {
+        throw new Error(`${need.name} is out of stock (need ${need.needed}, have ${row?.stock_quantity ?? 0})`);
       }
     }
 
@@ -69,17 +94,15 @@ export function createBill(params: CreateBillParams): any {
     const billId = Number(result.lastInsertRowid);
 
     for (const item of items) {
-      // Look up cost price + tracking flag from products table
-      const product = db.query("SELECT cost_price, track_stock FROM products WHERE id = ?").get(item.product_id) as any;
+      const product = db.query("SELECT cost_price FROM products WHERE id = ?").get(item.product_id) as any;
       const costPrice = product?.cost_price || 0;
       const original = item.original_price ?? item.unit_price;
       insertItem.run(billId, item.product_id, item.product_name, item.quantity, item.unit_price, original, costPrice, item.quantity * item.unit_price);
-      // Deduct product-level stock for tracked products. (Recipe-based deduction
-      // for non-tracked products is handled separately and only runs if the
-      // product is not tracked — user chose "only one or the other".)
-      if (product?.track_stock) {
-        db.query("UPDATE products SET stock_quantity = stock_quantity - ? WHERE id = ?").run(item.quantity, item.product_id);
-      }
+    }
+
+    // Deduct all aggregated needs in one pass.
+    for (const [pid, need] of needs) {
+      db.query("UPDATE products SET stock_quantity = stock_quantity - ? WHERE id = ?").run(need.needed, pid);
     }
 
     // Log activity

@@ -166,13 +166,23 @@ pos.post("/bills/:id/refund", async (c) => {
     for (const item of items) {
       if (!item.product_id) continue;
       const product = db.query("SELECT track_stock FROM products WHERE id = ?").get(item.product_id) as any;
+
+      // Restore this product's own stock if it's tracked.
       if (product?.track_stock) {
-        // Tracked product → put units back on the shelf.
         db.query("UPDATE products SET stock_quantity = stock_quantity + ? WHERE id = ?").run(item.quantity, item.product_id);
       } else {
-        // Non-tracked product → restore via recipe (recipes still don't auto-deduct,
-        // but this keeps existing behaviour for refunds that did go through recipes).
         restoreStockForBill(item.product_id, item.quantity, Number(id), user.id);
+      }
+
+      // Restore any tracked components (composite/BoM).
+      const components = db.query(
+        "SELECT component_product_id, quantity FROM product_components WHERE product_id = ?"
+      ).all(item.product_id) as any[];
+      for (const c of components) {
+        const comp = db.query("SELECT track_stock FROM products WHERE id = ?").get(c.component_product_id) as any;
+        if (comp?.track_stock) {
+          db.query("UPDATE products SET stock_quantity = stock_quantity + ? WHERE id = ?").run(c.quantity * item.quantity, c.component_product_id);
+        }
       }
     }
     db.query(

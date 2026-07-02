@@ -99,6 +99,15 @@
             </div>
           </div>
           <div class="mb-3">
+            <label class="form-label">Also deducts stock from <small class="text-muted">(components — e.g. "Brownie w/ Ice Cream" deducts 1 Brownie)</small></label>
+            <div id="components-list"></div>
+            <div class="d-flex gap-2 mt-2">
+              <select class="form-select" id="component-picker" style="flex:1;"></select>
+              <input type="number" class="form-control" id="component-qty" style="width:80px;" step="0.01" min="0.01" value="1" placeholder="Qty">
+              <button type="button" class="btn btn-outline-primary" onclick="addComponent()">Add</button>
+            </div>
+          </div>
+          <div class="mb-3">
             <label class="form-label">Image <small class="text-muted">(optional, max 3MB)</small></label>
             <div class="d-flex align-items-center gap-3">
               <img id="product-image-preview" src="" alt="" style="display:none;width:80px;height:80px;object-fit:cover;border-radius:8px;border:1px solid #dee2e6;">
@@ -132,6 +141,49 @@
       renderProducts();
       renderCategoryOptions();
       document.getElementById('product-search').addEventListener('input', renderProducts);
+    }
+
+    // ===== Components (composite products) =====
+    let currentComponents = []; // in-memory buffer for the open modal
+
+    function refreshComponentPicker() {
+      const currentId = parseInt(document.getElementById('product-id').value) || 0;
+      const used = new Set(currentComponents.map(c => c.component_product_id));
+      const options = allProducts
+        .filter(p => p.id !== currentId && !used.has(p.id))
+        .sort((a, b) => a.name.localeCompare(b.name));
+      document.getElementById('component-picker').innerHTML =
+        '<option value="">-- Pick a product to link --</option>' +
+        options.map(p => `<option value="${p.id}">${p.name}${p.track_stock ? ' · tracked' : ''}</option>`).join('');
+    }
+
+    function renderComponents() {
+      const box = document.getElementById('components-list');
+      if (!currentComponents.length) {
+        box.innerHTML = '<div class="text-muted small">No linked products yet.</div>';
+      } else {
+        box.innerHTML = currentComponents.map((c, i) => {
+          const p = allProducts.find(x => x.id === c.component_product_id);
+          const name = p ? p.name : `#${c.component_product_id}`;
+          return `<div class="d-flex align-items-center gap-2 py-1 border-bottom">
+            <span class="flex-fill"><strong>${name}</strong> ${p?.track_stock ? '<span class="badge bg-success">tracked</span>' : '<span class="badge bg-light text-dark">not tracked</span>'}</span>
+            <input type="number" class="form-control form-control-sm" style="width:80px;" value="${c.quantity}" step="0.01" min="0.01" onchange="currentComponents[${i}].quantity = parseFloat(this.value) || 0">
+            <button type="button" class="btn btn-sm btn-outline-danger" onclick="currentComponents.splice(${i},1); renderComponents(); refreshComponentPicker();">×</button>
+          </div>`;
+        }).join('');
+      }
+      refreshComponentPicker();
+    }
+
+    function addComponent() {
+      const cid = parseInt(document.getElementById('component-picker').value);
+      const qty = parseFloat(document.getElementById('component-qty').value);
+      if (!cid) { showToast('Pick a product first', 'warning'); return; }
+      if (!qty || qty <= 0) { showToast('Enter a valid quantity', 'warning'); return; }
+      currentComponents.push({ component_product_id: cid, quantity: qty });
+      document.getElementById('component-picker').value = '';
+      document.getElementById('component-qty').value = '1';
+      renderComponents();
     }
 
     function onTrackStockToggle() {
@@ -302,6 +354,8 @@
       document.getElementById('product-reorder').value = 0;
       document.getElementById('stock-fields').style.display = 'none';
       document.getElementById('btn-dispose').style.display = 'none';
+      currentComponents = [];
+      renderComponents();
       document.getElementById('product-cost').oninput = updateMarginPreview;
       document.getElementById('product-price').oninput = updateMarginPreview;
       new bootstrap.Modal(document.getElementById('productModal')).show();
@@ -322,6 +376,8 @@
       document.getElementById('product-reorder').value = p.stock_reorder_level || 0;
       document.getElementById('stock-fields').style.display = p.track_stock ? 'flex' : 'none';
       document.getElementById('btn-dispose').style.display = p.track_stock ? 'block' : 'none';
+      currentComponents = (p.components || []).map(c => ({ component_product_id: c.component_product_id, quantity: c.quantity }));
+      renderComponents();
       document.getElementById('product-image').value = '';
       const preview = document.getElementById('product-image-preview');
       const removeBtn = document.getElementById('btn-remove-image');
@@ -352,6 +408,7 @@
         track_stock: document.getElementById('product-track-stock').checked ? 1 : 0,
         stock_quantity: parseFloat(document.getElementById('product-qty').value) || 0,
         stock_reorder_level: parseFloat(document.getElementById('product-reorder').value) || 0,
+        components: currentComponents.filter(c => c.component_product_id && c.quantity > 0),
       };
       let productId;
       if (id) {
