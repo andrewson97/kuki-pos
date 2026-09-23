@@ -300,9 +300,36 @@
           <td>
             <button class="btn btn-sm btn-outline-success" onclick="showTransaction(${i.id})">+/-</button>
             <button class="btn btn-sm btn-outline-primary" onclick="editItem(${i.id})">Edit</button>
+            ${currentUser.role === 'admin' ? `<button class="btn btn-sm btn-outline-danger" onclick="deleteStockItem(${i.id}, this)">Delete</button>` : ''}
           </td>
         </tr>`;
       }).join('') || '<tr><td colspan="8" class="text-center text-muted py-4">No stock items</td></tr>';
+    }
+
+    // Deleting a stock item also deletes its movement history, so the server
+    // answers 409 the first time and we ask again naming the count. Recipes that
+    // use the item are refused outright (400) - that must be fixed first.
+    async function deleteStockItem(id, btn) {
+      const item = stockItems.find(i => i.id === id);
+      const label = item ? item.name : 'this stock item';
+      if (!confirm(`Delete "${label}"? This cannot be undone.`)) return;
+
+      await withBusy(btn, async () => {
+        let res;
+        try {
+          res = await api(`/api/stock/items/${id}`, { method: 'DELETE' });
+        } catch (err) {
+          // api() throws the server's message; a history conflict asks for confirmation.
+          if (err && err.data && err.data.needs_confirm) {
+            if (!confirm(err.message + ' Delete it anyway?')) return;
+            res = await api(`/api/stock/items/${id}?force=1`, { method: 'DELETE' });
+          } else {
+            throw err;
+          }
+        }
+        showToast(`Deleted ${res.deleted}`);
+        await loadStock();
+      }, 'Deleting...');
     }
 
     function showAddItem() {

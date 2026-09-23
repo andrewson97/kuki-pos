@@ -23,7 +23,15 @@ async function api(url, options = {}) {
   } catch {
     throw new Error(res.ok ? 'Unexpected response from server' : `Server error (${res.status})`);
   }
-  if (!res.ok) throw new Error(data.error || 'Request failed');
+  if (!res.ok) {
+    // Carry the status and the parsed body on the error too, so a caller that
+    // needs more than the message (e.g. a 409 asking for confirmation) can read
+    // it. Additive: err.message is unchanged for everyone else.
+    const err = new Error(data.error || 'Request failed');
+    err.status = res.status;
+    err.data = data;
+    throw err;
+  }
   return data;
 }
 

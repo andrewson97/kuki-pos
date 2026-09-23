@@ -73,6 +73,7 @@
         <button class="btn btn-outline" onclick="closeSheet('stock-sheet')">Cancel</button>
         <button class="btn btn-primary" onclick="saveItem(this)">Save</button>
       </div>
+      <button class="btn btn-danger" id="s-delete" style="display:none;margin-top:8px;" onclick="deleteStockItem(this)">Delete this stock item</button>
       <hr style="margin:18px 0;border:none;border-top:1px solid var(--line);">
       <h3 style="font-size:0.95rem;">Quick stock movement</h3>
       <div class="field"><label>Quantity change (+ in, − out)</label><input type="number" id="tx-qty" step="0.001" placeholder="e.g., 5 or -2" inputmode="decimal"></div>
@@ -217,6 +218,7 @@
       $('s-id').value = '';
       ['s-name', 's-unit', 's-qty', 's-cost', 's-reorder', 'tx-qty', 'tx-ref'].forEach(id => $(id).value = '');
       if (cats[0]) $('s-cat-sel').value = cats[0].id;
+      $('s-delete').style.display = 'none';   // nothing to delete yet
       openSheet('stock-sheet');
     }
     function editItem(id) {
@@ -230,8 +232,35 @@
       $('s-cost').value = it.cost_per_unit || 0;
       $('s-reorder').value = it.reorder_level || 0;
       ['tx-qty', 'tx-ref'].forEach(id => $(id).value = '');
+      $('s-delete').style.display = currentUser.role === 'admin' ? 'block' : 'none';
       openSheet('stock-sheet');
     }
+    // Deleting also removes the item's movement history, so the server answers
+    // 409 first and we ask again naming the count. Items used by a recipe are
+    // refused outright (400) and must be removed from the recipe first.
+    async function deleteStockItem(btn) {
+      const id = $('s-id').value;
+      if (!id) return;
+      const label = $('s-name').value || 'this stock item';
+      if (!confirm('Delete "' + label + '"? This cannot be undone.')) return;
+      await withBusy(btn, async () => {
+        let res;
+        try {
+          res = await api('/api/stock/items/' + id, { method: 'DELETE' });
+        } catch (err) {
+          if (err && err.data && err.data.needs_confirm) {
+            if (!confirm(err.message + ' Delete it anyway?')) return;
+            res = await api('/api/stock/items/' + id + '?force=1', { method: 'DELETE' });
+          } else {
+            throw err;
+          }
+        }
+        closeSheet('stock-sheet');
+        toast('Deleted ' + res.deleted);
+        await load();
+      }, 'Deleting…');
+    }
+
     async function saveItem(btn) {
       const id = $('s-id').value;
       const body = {

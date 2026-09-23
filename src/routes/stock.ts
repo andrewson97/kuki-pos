@@ -72,6 +72,69 @@ stock.put("/items/:id", adminOnly, async (c) => {
   return c.json({ success: true });
 });
 
+// Delete a stock item. Two foreign keys point at stock_items and neither
+// cascades, so a bare DELETE would just fail: recipes.stock_item_id (a real
+// integrity problem - removing it would break the recipe) and
+// stock_transactions.stock_item_id (that item's history).
+stock.delete("/items/:id", adminOnly, (c) => {
+  const id = Number(c.req.param("id"));
+  if (!Number.isInteger(id) || id <= 0) return c.json({ error: "Invalid stock item id" }, 400);
+  const force = c.req.query("force") === "1";
+  const db = getDb();
+
+  const item = db.query("SELECT id, name, quantity FROM stock_items WHERE id = ?").get(id) as any;
+  if (!item) return c.json({ error: "Stock item not found" }, 404);
+
+  // Used by a recipe: refuse outright and name the products, because deleting
+  // would leave those recipes pointing at nothing. The user fixes the recipe first.
+  const usedBy = db.query(
+    `SELECT DISTINCT p.name FROM recipes r JOIN products p ON p.id = r.product_id
+     WHERE r.stock_item_id = ? ORDER BY p.name`
+  ).all(id) as any[];
+  if (usedBy.length) {
+    const names = usedBy.map((r) => r.name).join(", ");
+    return c.json(
+      { error: `${item.name} is used in the recipe for ${names}. Remove it from those recipes first.` },
+      400
+    );
+  }
+
+  // Has history: deleting the item takes its movements with it, so make the
+  // caller confirm rather than quietly dropping rows out of the history screen.
+  const history = db.query(
+    "SELECT COUNT(*) AS count FROM stock_transactions WHERE stock_item_id = ?"
+  ).get(id) as any;
+  if (history.count > 0 && !force) {
+    return c.json(
+      {
+        error: `${item.name} has ${history.count} stock movement${history.count === 1 ? "" : "s"} recorded. Deleting it removes those too.`,
+        needs_confirm: true,
+        history_count: history.count,
+        name: item.name,
+      },
+      409
+    );
+  }
+
+  const user = getUser(c)!;
+  db.transaction(() => {
+    db.query("DELETE FROM stock_transactions WHERE stock_item_id = ?").run(id);
+    db.query("DELETE FROM stock_items WHERE id = ?").run(id);
+    // The item and its movements are gone, so record that the deletion happened.
+    db.query("INSERT INTO activity_log (user_id, action, details) VALUES (?, 'deleted_stock_item', ?)").run(
+      user.id,
+      JSON.stringify({
+        stock_item_id: id,
+        name: item.name,
+        quantity_at_deletion: item.quantity,
+        movements_removed: history.count,
+      })
+    );
+  }).immediate();
+
+  return c.json({ success: true, deleted: item.name, movements_removed: history.count });
+});
+
 // Stock Transactions (add/remove stock)
 stock.post("/items/:id/transaction", adminOnly, async (c) => {
   const stockItemId = c.req.param("id");
