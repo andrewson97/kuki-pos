@@ -18,10 +18,11 @@
     <input type="text" id="s-search" placeholder="Search stock items…">
     <select id="s-cat"><option value="">All categories</option></select>
   </div>
+  <div style="background:white;padding:12px 14px 4px;font-weight:700;color:var(--ink-soft);text-transform:uppercase;letter-spacing:0.1em;font-size:0.72rem;">Stock Items</div>
   <div id="stock-list"><div class="empty">Loading…</div></div>
 
   <div id="tracked-section" style="display:none;">
-    <div style="background:white;padding:12px 14px 4px;font-weight:700;color:var(--ink-soft);text-transform:uppercase;letter-spacing:0.1em;font-size:0.72rem;border-top:8px solid var(--bg);">Tracked Products</div>
+    <div style="background:white;padding:12px 14px 4px;font-weight:700;color:var(--ink-soft);text-transform:uppercase;letter-spacing:0.1em;font-size:0.72rem;border-top:8px solid var(--bg);">Tracked Products <span style="text-transform:none;letter-spacing:0;font-weight:400;">(from product list)</span></div>
     <div style="padding:8px 14px;background:white;border-bottom:1px solid var(--line);">
       <select id="prod-cat-filter" onchange="renderTracked()" style="width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:white;"><option value="">All product categories</option></select>
     </div>

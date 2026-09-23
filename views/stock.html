@@ -54,7 +54,7 @@
       </div>
 
       <div class="table-container">
-        <h6 class="px-3 pt-3 fw-bold mb-0" style="color:#6b5a4a;">Ingredients</h6>
+        <h6 class="px-3 pt-3 fw-bold mb-0" style="color:#6b5a4a;">Stock Items <small class="text-muted fw-normal">&mdash; ingredients, packing and anything else counted separately from your products</small></h6>
         <table class="table table-hover mb-0">
           <thead><tr><th>Name</th><th>Category</th><th>Quantity</th><th>Unit</th><th>Cost/Unit</th><th>Reorder Level</th><th>Expiry</th><th>Actions</th></tr></thead>
           <tbody id="stock-table"></tbody>
@@ -64,7 +64,7 @@
       <!-- Tracked products: quick restock -->
       <div class="table-container mt-4" id="tracked-products-panel">
         <div class="d-flex align-items-center justify-content-between px-3 pt-3 mb-2 flex-wrap gap-2">
-          <h6 class="fw-bold mb-0" style="color:#6b5a4a;">Tracked Finished Products <small class="text-muted fw-normal">— add stock or dispose expired</small></h6>
+          <h6 class="fw-bold mb-0" style="color:#6b5a4a;">Tracked Finished Products <small class="text-muted fw-normal">&mdash; from your product list; add stock or dispose expired</small></h6>
           <select class="form-select form-select-sm" id="product-cat-filter" style="width:200px;" onchange="renderTrackedProducts()">
             <option value="">All product categories</option>
           </select>

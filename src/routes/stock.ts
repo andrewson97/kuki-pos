@@ -108,24 +108,51 @@ stock.post("/usage", async (c) => {
     return c.json({ error: "No items provided" }, 400);
   }
 
+  // Aggregate first: the same item can appear on more than one usage line, and
+  // checking each line on its own would let two half-valid lines overdraw it.
+  const needs = new Map<number, number>();
+  for (const item of items) {
+    const id = Number(item.stock_item_id);
+    if (!id) continue;
+    needs.set(id, (needs.get(id) || 0) + Math.abs(item.quantity));
+  }
+
   const transaction = db.transaction(() => {
-    for (const item of items) {
-      const qty = Math.abs(item.quantity); // ensure positive
+    // Validate every aggregated need before deducting anything, so a usage that
+    // would drive an item below zero is refused outright rather than half-applied.
+    // Products get this at checkout (see createBill); stock items had no such
+    // guard, which is how quantities went negative.
+    for (const [stockItemId, needed] of needs) {
+      const row = db.query(
+        "SELECT name, quantity FROM stock_items WHERE id = ?"
+      ).get(stockItemId) as any;
+      if (!row) throw new Error("Stock item not found");
+      if (row.quantity < needed) {
+        throw new Error(`${row.name} is out of stock (need ${needed}, have ${row.quantity})`);
+      }
+    }
+
+    for (const [stockItemId, qty] of needs) {
       db.query(
         "INSERT INTO stock_transactions (stock_item_id, type, quantity, reference, user_id) VALUES (?, 'usage', ?, ?, ?)"
-      ).run(item.stock_item_id, -qty, purpose || null, user.id);
+      ).run(stockItemId, -qty, purpose || null, user.id);
 
       db.query(
         "UPDATE stock_items SET quantity = quantity - ?, updated_at = datetime('now') WHERE id = ?"
-      ).run(qty, item.stock_item_id);
+      ).run(qty, stockItemId);
     }
 
     db.query("INSERT INTO activity_log (user_id, action, details) VALUES (?, 'stock_usage', ?)").run(
-      user.id, JSON.stringify({ items_count: items.length, purpose })
+      user.id, JSON.stringify({ items_count: needs.size, purpose })
     );
   });
 
-  transaction();
+  try {
+    // Take the write lock up front: this checks then writes across stock_items.
+    transaction.immediate();
+  } catch (err: any) {
+    return c.json({ error: err.message || "Could not record usage" }, 400);
+  }
   return c.json({ success: true });
 });
 
