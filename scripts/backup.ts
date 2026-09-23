@@ -5,7 +5,7 @@
 // Recommended: a folder inside your "Google Drive" path that auto-syncs to the cloud.
 
 import { Database } from "bun:sqlite";
-import { mkdirSync, readdirSync, statSync, rmSync, existsSync } from "fs";
+import { mkdirSync, readdirSync, statSync, rmSync } from "fs";
 import path from "path";
 import { spawnSync } from "child_process";
 
@@ -18,8 +18,6 @@ const KEEP_DAYS = 30;
 // =============
 
 const DB_PATH = process.env.DB_PATH || path.join(import.meta.dir, "../data/shop.db");
-const DATA_DIR = path.dirname(DB_PATH);
-const UPLOADS_DIR = path.join(DATA_DIR, "uploads");
 
 function pad(n: number) { return String(n).padStart(2, "0"); }
 const now = new Date();
@@ -37,19 +35,7 @@ const db = new Database(DB_PATH, { readonly: true });
 db.exec(`VACUUM INTO '${dbBackupPath.replace(/'/g, "''")}'`);
 db.close();
 
-// 2. Copy uploads folder so product images come along.
-if (existsSync(UPLOADS_DIR)) {
-  const dest = path.join(tmpDir, "uploads");
-  mkdirSync(dest, { recursive: true });
-  for (const f of readdirSync(UPLOADS_DIR)) {
-    const src = path.join(UPLOADS_DIR, f);
-    if (statSync(src).isFile()) {
-      Bun.write(path.join(dest, f), Bun.file(src));
-    }
-  }
-}
-
-// 3. Zip it (uses PowerShell on Windows; tar on macOS/Linux).
+// 2. Zip it (uses PowerShell on Windows; tar on macOS/Linux).
 const zipPath = path.join(BACKUP_DIR, `kuki-backup-${stamp}.zip`);
 console.log(`Creating ${zipPath}...`);
 const isWindows = process.platform === "win32";
@@ -62,7 +48,7 @@ if (zipCmd.status !== 0) {
 }
 rmSync(tmpDir, { recursive: true, force: true });
 
-// 4. Clean up old backups (keep last KEEP_DAYS days).
+// 3. Clean up old backups (keep last KEEP_DAYS days).
 const cutoff = Date.now() - KEEP_DAYS * 24 * 60 * 60 * 1000;
 let purged = 0;
 for (const f of readdirSync(BACKUP_DIR)) {

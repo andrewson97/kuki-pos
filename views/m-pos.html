@@ -15,12 +15,11 @@
     .cat-strip::-webkit-scrollbar { display: none; }
     .pill { flex-shrink: 0; padding: 6px 12px; border-radius: 999px; background: #f3f4f6; color: var(--ink); font-size: 0.85rem; font-weight: 600; border: none; cursor: pointer; }
     .pill.active { background: var(--pink); color: white; }
-    .product-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; padding: 8px; }
-    .prod-card { background: white; border-radius: 8px; padding: 6px; box-shadow: 0 1px 3px rgba(0,0,0,0.04); text-align: center; cursor: pointer; }
+    .product-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 8px; padding: 10px 8px; }
+    .prod-card { background: white; border: 1px solid var(--line); border-radius: 10px; padding: 16px 8px 12px; min-height: 84px; box-shadow: 0 1px 3px rgba(0,0,0,0.04); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; text-align: center; cursor: pointer; }
     .prod-card:active { transform: scale(0.96); }
-    .prod-card .img { width: 100%; aspect-ratio: 4 / 3; background: #f3f4f6; border-radius: 5px; background-size: cover; background-position: center; display: flex; align-items: center; justify-content: center; font-size: 1.4rem; color: #cbd5e1; }
-    .prod-card .name { font-weight: 600; font-size: 0.78rem; line-height: 1.15; margin: 5px 0 2px; color: var(--ink); }
-    .prod-card .price { font-weight: 700; color: var(--pink); font-size: 0.82rem; }
+    .prod-card .name { font-weight: 700; font-size: 0.9rem; line-height: 1.25; color: var(--ink); display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+    .prod-card .price { font-weight: 600; color: var(--pink); font-size: 0.8rem; }
     .prod-card .price s { color: var(--ink-soft); font-size: 0.68rem; font-weight: 500; margin-right: 3px; display: block; }
 
     /* Sticky cart bar */
@@ -225,15 +224,12 @@
         const priceHtml = p.discount_price
           ? `<div class="price"><s>${fmt(p.selling_price)}</s>${fmt(eff)}</div>`
           : `<div class="price">${fmt(eff)}</div>`;
-        const img = p.image_path
-          ? `<div class="img" style="background-image:url('/uploads/${p.image_path}');"></div>`
-          : `<div class="img">🎂</div>`;
         // Always show the count when tracked. Larger + red when low.
         const low = p.track_stock && p.stock_reorder_level > 0 && p.stock_quantity <= p.stock_reorder_level;
         const badge = !p.track_stock ? '' : (low
           ? `<div style="position:absolute;top:2px;right:2px;background:#dc2626;color:white;font-size:0.78rem;padding:3px 9px;border-radius:999px;font-weight:800;box-shadow:0 2px 5px rgba(220,38,38,0.4);">${p.stock_quantity}</div>`
           : `<div style="position:absolute;top:2px;right:2px;background:rgba(31,41,55,0.78);color:white;font-size:0.58rem;padding:1px 5px;border-radius:999px;font-weight:700;">${p.stock_quantity}</div>`);
-        return `<div class="prod-card" onclick="addToCart(${p.id})" style="position:relative;">${badge}${img}<div class="name">${escapeHtml(p.name)}</div>${priceHtml}</div>`;
+        return `<div class="prod-card" onclick="addToCart(${p.id})" style="position:relative;">${badge}<div class="name">${escapeHtml(p.name)}</div>${priceHtml}</div>`;
       }).join('');
     }
 

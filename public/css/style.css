@@ -208,14 +208,17 @@ body {
   font-size: 0.95rem;
 }
 .cat-section .product-grid {
-  grid-template-columns: repeat(auto-fill, minmax(95px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(88px, 1fr));
   gap: 6px;
 }
-.cat-section .product-card { padding: 6px; }
+.cat-section .product-card {
+  padding: 14px 6px 8px;
+  min-height: 58px;
+}
 
 .product-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(92px, 1fr));
   gap: 8px;
   align-content: start;
 }
@@ -224,7 +227,13 @@ body {
   background: white;
   border: 1.5px solid #e9ecef;
   border-radius: 8px;
-  padding: 8px;
+  /* Text-only tile: extra top padding keeps the stock badge clear of the name. */
+  padding: 16px 8px 10px;
+  min-height: 66px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
   text-align: center;
   cursor: pointer;
   transition: all 0.2s;
@@ -236,29 +245,14 @@ body {
   box-shadow: 0 4px 12px rgba(232, 62, 140, 0.15);
 }
 
-.product-card .product-image {
-  width: 100%;
-  aspect-ratio: 4 / 3;
-  background-size: cover;
-  background-position: center;
-  background-color: #f8f9fa;
-  border-radius: 5px;
-  margin-bottom: 5px;
-}
-.product-card .product-image-placeholder {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 1.4rem;
-  color: #ced4da;
-}
 .product-card .product-name {
-  font-weight: 600;
-  font-size: 0.82rem;
+  font-weight: 700;
+  font-size: 0.9rem;
   line-height: 1.2;
-  margin-bottom: 2px;
+  margin: 0;
+  color: #2c3e50;
 }
-.product-card .product-price { font-size: 0.85rem; }
+.product-card .product-price { font-size: 0.78rem; }
 
 .product-card .product-price {
   color: var(--primary);

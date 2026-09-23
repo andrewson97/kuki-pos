@@ -304,9 +304,6 @@
         const priceHtml = p.discount_price
           ? `<div class="product-price"><s class="text-muted" style="font-size:0.8rem">${formatCurrency(p.selling_price)}</s> <span class="text-danger">${formatCurrency(effective)}</span></div>`
           : `<div class="product-price">${formatCurrency(p.selling_price)}</div>`;
-        const imgHtml = p.image_path
-          ? `<div class="product-image" style="background-image:url('/uploads/${p.image_path}')"></div>`
-          : `<div class="product-image product-image-placeholder">&#127874;</div>`;
         // For tracked products, always show the count. Larger + red when at or
         // below the per-product reorder threshold; small dark pill otherwise.
         const low = p.track_stock && p.stock_reorder_level > 0 && p.stock_quantity <= p.stock_reorder_level;
@@ -316,7 +313,6 @@
         return `
         <div class="product-card" onclick="addToCart(${p.id})" style="position:relative;">
           ${badge}
-          ${imgHtml}
           <div class="product-name">${p.name}</div>
           ${priceHtml}
         </div>`;

@@ -70,7 +70,7 @@
           </select>
         </div>
         <table class="table table-hover mb-0">
-          <thead><tr><th></th><th>Product</th><th>Category</th><th>On Hand</th><th>Reorder Level</th><th>Add to Stock</th><th>Actions</th></tr></thead>
+          <thead><tr><th>Product</th><th>Category</th><th>On Hand</th><th>Reorder Level</th><th>Add to Stock</th><th>Actions</th></tr></thead>
           <tbody id="tracked-products-table"></tbody>
         </table>
       </div>
@@ -186,7 +186,7 @@
       }
       panel.style.display = 'block';
       if (!list.length) {
-        tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted py-3">No matches</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-3">No matches</td></tr>';
         return;
       }
       tbody.innerHTML = list.map(p => {
@@ -195,11 +195,7 @@
         const status = out ? '<span class="badge bg-danger">OUT</span>'
           : low ? '<span class="badge bg-warning text-dark">LOW</span>'
           : '';
-        const thumb = p.image_path
-          ? `<img src="/uploads/${p.image_path}" style="width:36px;height:36px;border-radius:6px;object-fit:cover;">`
-          : `<div style="width:36px;height:36px;border-radius:6px;background:#f3f4f6;display:flex;align-items:center;justify-content:center;font-size:1rem;color:#adb5bd;">🎂</div>`;
         return `<tr class="${out ? 'table-danger' : (low ? 'table-warning' : '')}">
-          <td>${thumb}</td>
           <td class="fw-bold">${escapeHtml(p.name)} ${status}</td>
           <td>${escapeHtml(p.category || '-')}</td>
           <td class="${out ? 'text-danger' : (low ? 'text-warning' : '')} fw-bold">${p.stock_quantity}</td>

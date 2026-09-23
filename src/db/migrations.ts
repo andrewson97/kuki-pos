@@ -56,7 +56,6 @@ export function runMigrations(): void {
       cost_price REAL NOT NULL DEFAULT 0,
       selling_price REAL NOT NULL DEFAULT 0,
       is_active INTEGER NOT NULL DEFAULT 1,
-      image_path TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
