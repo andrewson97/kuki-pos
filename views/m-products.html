@@ -14,10 +14,32 @@
     <h1>Products</h1>
     <a href="/products?desktop=1" class="right">Desktop</a>
   </div>
+  <!-- Search takes its own row so the two selects sit side by side at 360px. -->
   <div class="filters">
-    <input type="text" id="prod-search" placeholder="Search products…">
+    <input type="text" id="prod-search" placeholder="Search products…" style="flex:1 1 100%;">
+    <select id="prod-cat" onchange="render()"><option value="">All categories</option></select>
+    <select id="prod-status" onchange="render()">
+      <option value="">Active + inactive</option>
+      <option value="active">Active only</option>
+      <option value="inactive">Inactive only</option>
+    </select>
   </div>
+  <div id="prod-count" style="background:white;padding:6px 14px 10px;font-size:0.76rem;color:var(--ink-soft);border-bottom:1px solid var(--line);"></div>
   <div id="prod-list"><div class="empty">Loading…</div></div>
+
+  <!-- Discontinued: permanently off the menu, kept only because old bills point
+       at them. Admin-only, hidden while there are none, and collapsed when there
+       are — it must never push the real product list off a phone screen. -->
+  <div id="disc-section" style="display:none;">
+    <div onclick="toggleDisc()" style="background:white;padding:12px 14px;border-top:8px solid var(--bg);display:flex;align-items:center;justify-content:space-between;gap:8px;">
+      <span style="font-weight:700;color:var(--ink-soft);text-transform:uppercase;letter-spacing:0.1em;font-size:0.72rem;">Discontinued <span id="disc-count" style="text-transform:none;letter-spacing:0;font-weight:400;"></span></span>
+      <span id="disc-caret" style="color:var(--ink-soft);font-size:0.9rem;">▸</span>
+    </div>
+    <div id="disc-body" style="display:none;">
+      <div style="background:white;padding:0 14px 10px;font-size:0.76rem;color:var(--ink-soft);border-bottom:1px solid var(--line);">These could not be deleted because past bills reference them. Restore brings one back as <b>inactive</b> — not straight onto the menu; switch it to Active yourself when you want to sell it again.</div>
+      <div id="disc-list"></div>
+    </div>
+  </div>
 
   <button class="fab" id="fab" onclick="openAdd()" style="display:none;">+</button>
 
@@ -61,16 +83,31 @@
 
   <script src="/public/js/mobile.js"></script>
   <script>
-    let allProds = [];
+    let allProds = [];      // active + inactive (the API leaves discontinued out)
+    let discProds = [];     // discontinued only, fetched separately
+    let discOpen = false;   // the discontinued section starts collapsed
 
     async function load() {
       await bootMobile();
       if (currentUser.role !== 'admin') { $('fab').style.display = 'none'; toast('Read-only — admin needed to edit'); }
       else { $('fab').style.display = 'block'; }
-      allProds = await api('/api/products');
-      render();
-      renderCatOptions();
+      await reloadAll();
       $('prod-search').addEventListener('input', render);
+    }
+
+    // Both lists always move together: a delete can push a product out of the
+    // main list into the discontinued one, and a restore pulls it back.
+    async function reloadAll() {
+      const isAdmin = currentUser.role === 'admin';
+      const [prods, disc] = await Promise.all([
+        api('/api/products'),
+        isAdmin ? api('/api/products?discontinued=1') : Promise.resolve([]),
+      ]);
+      allProds = prods;
+      discProds = disc || [];
+      renderCatOptions();
+      render();
+      renderDiscontinued();
     }
 
     function buildCatSelect(currentValue) {
@@ -96,12 +133,44 @@
       if (sel.value === '__new__') return $('p-cat-new').value.trim();
       return sel.value.trim();
     }
-    function renderCatOptions() { /* kept for compatibility — select is built per-open */ }
 
+    // Fills the category filter above the list. Keeps the current choice if that
+    // category still exists, so a reload after a save does not reset the filter.
+    function renderCatOptions() {
+      const sel = $('prod-cat');
+      const prev = sel.value;
+      const cats = sortCategoriesPOS([...new Set(allProds.map(p => p.category).filter(Boolean))]);
+      sel.innerHTML = '<option value="">All categories</option>' +
+        cats.map(c => `<option value="${c.replace(/"/g, '&quot;')}">${escapeHtml(c)}</option>`).join('');
+      sel.value = cats.indexOf(prev) !== -1 ? prev : '';
+    }
+
+    // Three states now, not two. Discontinued never reaches the main list (the
+    // API excludes it and render() filters it out again), but the badge lives
+    // here so the two lists agree on wording.
+    function statusBadge(p) {
+      if (p.is_discontinued) return '<span class="badge danger">discontinued</span>';
+      return p.is_active ? '<span class="badge success">active</span>' : '<span class="badge muted">inactive</span>';
+    }
+
+    // Search + category + status all narrow the same list (AND, not OR).
     function render() {
       const q = $('prod-search').value.toLowerCase().trim();
-      const filtered = q ? allProds.filter(p => p.name.toLowerCase().includes(q) || (p.category || '').toLowerCase().includes(q)) : allProds;
-      if (!filtered.length) { $('prod-list').innerHTML = '<div class="empty">No products</div>'; return; }
+      const cat = $('prod-cat').value.toLowerCase();
+      const status = $('prod-status').value;
+      const filtered = allProds.filter(p => {
+        if (p.is_discontinued) return false;
+        if (q && !(p.name.toLowerCase().includes(q) || (p.category || '').toLowerCase().includes(q))) return false;
+        if (cat && (p.category || '').toLowerCase() !== cat) return false;
+        if (status === 'active' && !p.is_active) return false;
+        if (status === 'inactive' && p.is_active) return false;
+        return true;
+      });
+      const total = allProds.filter(p => !p.is_discontinued).length;
+      $('prod-count').textContent = filtered.length === total
+        ? `${total} product${total === 1 ? '' : 's'}`
+        : `Showing ${filtered.length} of ${total} — filters are hiding ${total - filtered.length}`;
+      if (!filtered.length) { $('prod-list').innerHTML = `<div class="empty">${total ? 'No products match these filters' : 'No products'}</div>`; return; }
       const isAdmin = currentUser.role === 'admin';
       $('prod-list').innerHTML = filtered.map(p => {
         const eff = p.discount_price || p.selling_price;
@@ -110,12 +179,54 @@
           : `<strong>${fmt(eff)}</strong>`;
         return `<div class="list-item" ${isAdmin ? `onclick="editProd(${p.id})"` : ''} style="display:flex;gap:12px;align-items:center;min-height:52px;">
           <div style="flex:1;min-width:0;">
-            <div class="list-title">${escapeHtml(p.name)} ${!p.is_active ? '<span class="badge muted">inactive</span>' : ''}</div>
+            <div class="list-title">${escapeHtml(p.name)} ${statusBadge(p)}</div>
             <div class="list-meta">${escapeHtml(p.category || '-')} · cost ${fmt(p.cost_price)}</div>
           </div>
           <div style="text-align:right;">${priceHtml}</div>
         </div>`;
       }).join('');
+    }
+
+    // ===== Discontinued =====
+    function toggleDisc() {
+      discOpen = !discOpen;
+      $('disc-body').style.display = discOpen ? 'block' : 'none';
+      $('disc-caret').textContent = discOpen ? '▾' : '▸';
+    }
+
+    function renderDiscontinued() {
+      const sec = $('disc-section');
+      const isAdmin = currentUser.role === 'admin';
+      // Nothing to show: hide the whole section, unless it is open — leaving it
+      // up with an empty state is what confirms the last restore worked.
+      if (!isAdmin || (!discProds.length && !discOpen)) { sec.style.display = 'none'; return; }
+      sec.style.display = 'block';
+      $('disc-count').textContent = discProds.length ? `(${discProds.length})` : '';
+      $('disc-body').style.display = discOpen ? 'block' : 'none';
+      $('disc-caret').textContent = discOpen ? '▾' : '▸';
+      if (!discProds.length) { $('disc-list').innerHTML = '<div class="empty">Nothing is discontinued — every product is in the list above.</div>'; return; }
+      $('disc-list').innerHTML = discProds.map(p => `<div class="list-item">
+        <div class="list-head">
+          <span class="list-title">${escapeHtml(p.name)} ${statusBadge(p)}</span>
+          <span class="list-amount">${fmt(p.discount_price || p.selling_price)}</span>
+        </div>
+        <div class="list-meta">${escapeHtml(p.category || '-')} · cost ${fmt(p.cost_price)}</div>
+        <button class="btn btn-outline btn-sm" style="margin-top:8px;width:auto;" onclick="restoreProd(${p.id}, this)">Restore as inactive</button>
+      </div>`).join('');
+    }
+
+    // confirm() sits OUTSIDE withBusy: the guard is only there to stop a second
+    // tap while the POST is in flight, and a modal inside it would hold the
+    // button disabled for as long as the dialog stayed open.
+    async function restoreProd(id, btn) {
+      const p = discProds.find(x => x.id === id);
+      if (!p) return;
+      if (!confirm(`Restore "${p.name}"?\n\nIt comes back as INACTIVE — still hidden from the POS. Open it and tick Active when you want to sell it again.`)) return;
+      await withBusy(btn, async () => {
+        await api(`/api/products/${id}/restore`, { method: 'POST' });
+        toast(`Restored "${p.name}" — now inactive, not yet on the menu`);
+        await reloadAll();
+      }, 'Restoring…');
     }
 
     function openAdd() {
@@ -217,8 +328,7 @@
         else await api('/api/products', { method: 'POST', body });
         closeSheet('prod-sheet');
         toast('Saved');
-        allProds = await api('/api/products');
-        render(); renderCatOptions();
+        await reloadAll();
       }, 'Saving…');
     }
 
@@ -234,22 +344,35 @@
       await withBusy(btn, async () => {
         const r = await api(`/api/products/${id}/dispose`, { method: 'POST', body: { quantity: qty, reason } });
         toast(`Disposed ${qty} — loss ${fmt(r.cost_loss)}`);
-        allProds = await api('/api/products');
+        await reloadAll();
         const updated = allProds.find(x => x.id === parseInt(id));
         if (updated) $('p-qty').value = updated.stock_quantity || 0;
-        render(); renderCatOptions();
       }, 'Disposing…');
     }
 
+    // Three outcomes, and the user is told which one happened:
+    //   { success }                       → the row is gone for good
+    //   { success, discontinued, reason } → sold in the past, so it was moved to
+    //                                       Discontinued instead of deleted
+    //   400                               → refused (a recipe uses it, or it is
+    //                                       in a live cart). withBusy already
+    //                                       toasts the server's message, which
+    //                                       names the blocker, so we let it throw.
     async function delProd(btn) {
       const id = $('p-id').value;
-      if (!id || !confirm('Delete this product?')) return;
+      if (!id) return;
+      const name = $('p-name').value.trim() || 'this product';
+      if (!confirm(`Delete "${name}"?\n\nIf it has ever been sold it cannot be deleted — it will be moved to Discontinued instead, so old bills still add up.`)) return;
       await withBusy(btn, async () => {
         const r = await api(`/api/products/${id}`, { method: 'DELETE' });
         closeSheet('prod-sheet');
-        toast(r.soft_deleted ? 'Has sales history — marked inactive' : 'Deleted');
-        allProds = await api('/api/products');
-        render(); renderCatOptions();
+        if (r.discontinued) {
+          discOpen = true;   // open the section so it is obvious where it went
+          toast(`"${name}" appears in past sales — not deleted, moved to Discontinued.`);
+        } else {
+          toast('Product deleted');
+        }
+        await reloadAll();
       }, 'Deleting…');
     }
 

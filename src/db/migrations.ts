@@ -235,6 +235,11 @@ export function runMigrations(): void {
   addColumn("products", "track_stock", "INTEGER NOT NULL DEFAULT 0");
   addColumn("products", "stock_quantity", "REAL NOT NULL DEFAULT 0");
   addColumn("products", "stock_reorder_level", "REAL NOT NULL DEFAULT 0");
+  // Discontinued: permanently off the menu, kept only because history (past
+  // bills / disposals) points at the row. Distinct from is_active = 0, which
+  // means "temporarily off the menu". Added as a column, never by rebuilding
+  // the table — production carries real sales data on a fly.io volume.
+  addColumn("products", "is_discontinued", "INTEGER NOT NULL DEFAULT 0");
 
   // One-shot: merge product categories that differ only by casing.
   // For each lowercase key, pick the most common casing as canonical.

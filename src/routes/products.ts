@@ -20,9 +20,22 @@ function attachComponents(rows: any[]): any[] {
   return rows;
 }
 
+// The admin product list. Discontinued products are permanently off the menu
+// and only exist because history points at them, so they are hidden by default
+// and asked for explicitly:
+//   (no params)              → active + inactive, no discontinued
+//   ?discontinued=1          → ONLY discontinued
+//   ?include_discontinued=1  → everything
 products.get("/", (c) => {
   const db = getDb();
-  const all = db.query("SELECT * FROM products ORDER BY name").all() as any[];
+  const onlyDiscontinued = c.req.query("discontinued") === "1";
+  const includeDiscontinued = c.req.query("include_discontinued") === "1";
+  const where = onlyDiscontinued
+    ? "WHERE is_discontinued = 1"
+    : includeDiscontinued
+      ? ""
+      : "WHERE is_discontinued = 0";
+  const all = db.query(`SELECT * FROM products ${where} ORDER BY name`).all() as any[];
   return c.json(attachComponents(all));
 });
 
@@ -34,6 +47,10 @@ products.get("/", (c) => {
 // `?cart=<cart_id>` identifies the caller's own cart so its own holds don't
 // make its own items vanish. With no cart param every hold counts as somebody
 // else's, which is the safe direction to be wrong in.
+//
+// Discontinuing a product also sets is_active = 0, so the `is_active = 1`
+// filter below already keeps discontinued products out of the till — no extra
+// clause needed here.
 products.get("/active", (c) => {
   const db = getDb();
   const cartId = c.req.query("cart") || c.req.query("cart_id") || "";
@@ -153,6 +170,33 @@ products.post("/:id/restock", adminOnly, async (c) => {
   return c.json({ success: true, stock_quantity: updated.stock_quantity });
 });
 
+// Bring a discontinued product back. It returns to INACTIVE, not active: the
+// owner reviews the price and stock and puts it back on the menu deliberately,
+// rather than a restore dropping it straight into the till.
+products.post("/:id/restore", adminOnly, (c) => {
+  const id = Number(c.req.param("id"));
+  if (!Number.isInteger(id) || id <= 0) return c.json({ error: "Invalid product id" }, 400);
+  const user = getUser(c)!;
+
+  const db = getDb();
+  const product = db.query(
+    "SELECT id, name, is_discontinued FROM products WHERE id = ?"
+  ).get(id) as any;
+  if (!product) return c.json({ error: "Product not found" }, 404);
+  if (!product.is_discontinued) return c.json({ error: "That product is not discontinued" }, 404);
+
+  db.transaction(() => {
+    // is_active stays 0 on purpose — restored, but still off the menu.
+    db.query("UPDATE products SET is_discontinued = 0, is_active = 0 WHERE id = ?").run(id);
+    db.query("INSERT INTO activity_log (user_id, action, details) VALUES (?, 'restored_product', ?)").run(
+      user.id,
+      JSON.stringify({ product_id: id, name: product.name, restored_to: "inactive" })
+    );
+  }).immediate();
+
+  return c.json({ success: true, name: product.name, is_discontinued: 0, is_active: 0 });
+});
+
 // Record a disposal: deducts product stock and stores cost_loss = qty × cost_price.
 products.post("/:id/dispose", adminOnly, async (c) => {
   const id = c.req.param("id");
@@ -206,23 +250,149 @@ products.put("/:id", adminOnly, async (c) => {
   const cat = canonicalCategory(category);
   const cleanName = (name || "").trim();
   const ts = track_stock ? 1 : 0;
+
+  // A discontinued product must never be re-activated through a plain edit.
+  // is_discontinued is not in this payload, so saving one as active would leave
+  // is_active = 1 with is_discontinued = 1: hidden from the product list but
+  // visible in the POS grid. Restore is the only way back, and it returns the
+  // product to inactive so it gets reviewed first.
+  const existing = db.query("SELECT is_discontinued FROM products WHERE id = ?").get(Number(id)) as any;
+  const active = existing?.is_discontinued ? 0 : is_active;
+
   db.query(
     "UPDATE products SET name = ?, category = ?, cost_price = ?, selling_price = ?, discount_price = ?, is_active = ?, track_stock = ?, stock_quantity = ?, stock_reorder_level = ? WHERE id = ?"
-  ).run(cleanName, cat, cost_price || 0, selling_price, dp, is_active, ts, ts ? (stock_quantity || 0) : 0, ts ? (stock_reorder_level || 0) : 0, id);
+  ).run(cleanName, cat, cost_price || 0, selling_price, dp, active, ts, ts ? (stock_quantity || 0) : 0, ts ? (stock_reorder_level || 0) : 0, id);
   saveComponents(parseInt(id), components);
   return c.json({ success: true });
 });
 
+/**
+ * Delete a product — or discontinue it when history won't let it go.
+ *
+ * Four tables reference products(id) without a cascade, and they do NOT mean
+ * the same thing, so they are not handled the same way:
+ *
+ *   stock_reservations  — it is in somebody's cart RIGHT NOW. Transient, and
+ *   product_components  — it is an ingredient in another product's recipe.
+ *                         Both are fixable, so both are refused with a reason
+ *                         and nothing is changed.
+ *
+ *   bill_items          — it was sold. Real, permanent history.
+ *   product_disposals   — it was written off. Same.
+ *                         The row cannot go, so it is DISCONTINUED instead.
+ *
+ * (recipes.product_id and product_components.product_id are ON DELETE CASCADE —
+ * the product's OWN recipe and bill of materials — and are fine to let go.)
+ *
+ * Discontinued sets is_discontinued = 1 AND is_active = 0 together. The second
+ * half is what keeps it out of the till: every consumer filters on is_active
+ * (the POS grid via /active, the dashboard and mobile low-stock queries, the
+ * tracked-products table on the stock pages), so one UPDATE removes it
+ * everywhere without touching those queries.
+ */
 products.delete("/:id", adminOnly, (c) => {
   const db = getDb();
-  const id = c.req.param("id");
+  const id = Number(c.req.param("id"));
+  if (!Number.isInteger(id) || id <= 0) return c.json({ error: "Invalid product id" }, 400);
+  const user = getUser(c)!;
+
+  const product = db.query(
+    "SELECT id, name, is_discontinued FROM products WHERE id = ?"
+  ).get(id) as any;
+  if (!product) return c.json({ error: "Product not found" }, 404);
+
+  // 1. Held in a live cart. Transient — the sale finishes or the cart is
+  // cleared and the blocker is gone, so refuse rather than discontinue.
+  const held = db.query(
+    "SELECT COUNT(*) AS holds, COALESCE(SUM(quantity), 0) AS quantity FROM stock_reservations WHERE product_id = ?"
+  ).get(id) as any;
+  if (held.holds > 0) {
+    return c.json(
+      {
+        error: `${product.name} is in a cart right now (${held.quantity} held). Complete or clear that sale, then delete it.`,
+        held_quantity: held.quantity,
+      },
+      400
+    );
+  }
+
+  // 2. An ingredient in another product's bill of materials. Deleting would
+  // leave those products pointing at nothing, so name them and let the user
+  // fix the recipe first — same shape as the stock-item delete.
+  const usedBy = db.query(
+    `SELECT DISTINCT p.name FROM product_components pc JOIN products p ON p.id = pc.product_id
+     WHERE pc.component_product_id = ? ORDER BY p.name`
+  ).all(id) as any[];
+  if (usedBy.length) {
+    const names = usedBy.map((r) => r.name).join(", ");
+    return c.json(
+      { error: `${product.name} is a component of ${names}. Remove it from those products first.` },
+      400
+    );
+  }
+
+  // 3. Genuine history. The row has to stay, so retire it for good.
+  const billed = db.query(
+    "SELECT COUNT(*) AS count FROM bill_items WHERE product_id = ?"
+  ).get(id) as any;
+  const disposed = db.query(
+    "SELECT COUNT(*) AS count FROM product_disposals WHERE product_id = ?"
+  ).get(id) as any;
+
+  if (billed.count > 0 || disposed.count > 0) {
+    const parts: string[] = [];
+    if (billed.count > 0) {
+      parts.push(`appears on ${billed.count} past bill line${billed.count === 1 ? "" : "s"}`);
+    }
+    if (disposed.count > 0) {
+      parts.push(`has ${disposed.count} disposal record${disposed.count === 1 ? "" : "s"}`);
+    }
+    const reason = `${product.name} ${parts.join(" and ")}, so it cannot be deleted without losing that history.`;
+
+    db.transaction(() => {
+      // One statement: discontinued AND off the menu, never one without the other.
+      db.query("UPDATE products SET is_discontinued = 1, is_active = 0 WHERE id = ?").run(id);
+      db.query("INSERT INTO activity_log (user_id, action, details) VALUES (?, 'discontinued_product', ?)").run(
+        user.id,
+        JSON.stringify({
+          product_id: id,
+          name: product.name,
+          reason,
+          bill_items: billed.count,
+          disposals: disposed.count,
+        })
+      );
+    }).immediate();
+
+    return c.json({ success: true, discontinued: true, name: product.name, reason });
+  }
+
+  // 4. Nothing points at it: really delete it.
   try {
-    db.query("DELETE FROM products WHERE id = ?").run(id);
-    return c.json({ success: true });
+    db.transaction(() => {
+      db.query("DELETE FROM products WHERE id = ?").run(id);
+      db.query("INSERT INTO activity_log (user_id, action, details) VALUES (?, 'deleted_product', ?)").run(
+        user.id,
+        JSON.stringify({ product_id: id, name: product.name })
+      );
+    }).immediate();
+    return c.json({ success: true, deleted: product.name });
   } catch (err: any) {
+    // Backstop only. The four known references are all handled above, so this
+    // should now be unreachable; it exists for a foreign key added later that
+    // nobody taught this handler about. It no longer guesses "inactive" — an
+    // undeletable product is discontinued, same as case 3, with an honest
+    // reason instead of a made-up one.
     if (String(err?.message || "").includes("FOREIGN KEY")) {
-      db.query("UPDATE products SET is_active = 0 WHERE id = ?").run(id);
-      return c.json({ success: true, soft_deleted: true });
+      const reason = `${product.name} is still referenced by other records, so it cannot be deleted.`;
+      db.transaction(() => {
+        db.query("UPDATE products SET is_discontinued = 1, is_active = 0 WHERE id = ?").run(id);
+        db.query("INSERT INTO activity_log (user_id, action, details) VALUES (?, 'discontinued_product', ?)").run(
+          user.id,
+          JSON.stringify({ product_id: id, name: product.name, reason, unexpected_reference: true })
+        );
+      }).immediate();
+      return c.json({ success: true, discontinued: true, name: product.name, reason });
     }
     return c.json({ error: err?.message || "Delete failed" }, 500);
   }

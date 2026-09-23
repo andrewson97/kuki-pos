@@ -16,11 +16,24 @@
     </div>
     <div class="content-area">
       <div class="d-flex justify-content-between mb-3">
-        <div class="d-flex gap-2">
-          <input type="text" class="form-control" id="product-search" placeholder="Search products..." style="width:300px;">
+        <div class="d-flex gap-2 flex-wrap align-items-center">
+          <input type="text" class="form-control" id="product-search" placeholder="Search products..." style="width:260px;">
+          <select class="form-select" id="filter-category" style="width:190px;">
+            <option value="">All categories</option>
+          </select>
+          <select class="form-select" id="filter-status" style="width:150px;">
+            <option value="all">All statuses</option>
+            <option value="active">Active only</option>
+            <option value="inactive">Inactive only</option>
+          </select>
           <button class="btn btn-outline-secondary" onclick="toggleArrangePanel()">⇅ Arrange Categories</button>
         </div>
         <button class="btn btn-primary" onclick="showAddProduct()">+ Add Product</button>
+      </div>
+
+      <div class="d-flex align-items-center gap-2 mb-2">
+        <span id="product-count" class="text-muted small"></span>
+        <button class="btn btn-sm btn-outline-secondary" id="clear-filters-btn" onclick="clearFilters()" style="display:none;">Clear filters</button>
       </div>
 
       <div class="table-container p-3 mb-3" id="arrange-panel" style="display:none;">
@@ -39,6 +52,24 @@
           <thead><tr><th>Name</th><th>Category</th><th>Cost</th><th>Selling</th><th>Margin</th><th>Status</th><th>Actions</th></tr></thead>
           <tbody id="products-table"></tbody>
         </table>
+      </div>
+
+      <!-- Discontinued: permanently off the menu, kept only because old bills point at them. -->
+      <div class="table-container mt-4" id="discontinued-panel">
+        <div class="d-flex align-items-center justify-content-between px-3 pt-3 pb-2 flex-wrap gap-2">
+          <h6 class="fw-bold mb-0" style="color:#6b5a4a;">Discontinued <small class="text-muted fw-normal">&mdash; permanently off the menu; kept only because past bills point at them</small></h6>
+          <div class="d-flex align-items-center gap-2">
+            <span class="badge bg-dark" id="discontinued-count" style="display:none;">0</span>
+            <button class="btn btn-sm btn-outline-secondary" id="discontinued-toggle" onclick="toggleDiscontinued()">Show</button>
+          </div>
+        </div>
+        <div id="discontinued-body" style="display:none;">
+          <div class="px-3 pb-2 small text-muted">These are not on sale and never appear in the list above or on the POS. Restoring one brings it back as <strong>Inactive</strong>, so you can review it here before ticking &ldquo;Active&rdquo; to put it back on the menu.</div>
+          <table class="table table-hover mb-0">
+            <thead><tr><th>Name</th><th>Category</th><th>Cost</th><th>Selling</th><th>Status</th><th>Actions</th></tr></thead>
+            <tbody id="discontinued-table"></tbody>
+          </table>
+        </div>
       </div>
     </div>
   </div>
@@ -123,16 +154,37 @@
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
   <script src="/public/js/app.js"></script>
   <script>
-    let allProducts = [];
+    let allProducts = [];           // active + inactive; the server keeps discontinued out
+    let discontinuedProducts = [];  // fetched separately, shown only in its own panel
     initApp('/products', loadProducts);
 
     // Wired once, here: loadProducts() runs again after every save/delete and
     // would stack a duplicate listener each time.
     document.getElementById('product-search').addEventListener('input', renderProducts);
+    document.getElementById('filter-category').addEventListener('change', renderProducts);
+    document.getElementById('filter-status').addEventListener('change', renderProducts);
+
+    function escapeHtml(v) {
+      return String(v == null ? '' : v).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+    }
 
     async function loadProducts() {
       allProducts = await api('/api/products');
+      buildCategoryFilter();  // before the render: it decides which categories can be picked
       renderProducts();
+      await loadDiscontinued();
+    }
+
+    // Its own request, and its own failure: a broken discontinued list must not
+    // stop the main table from loading after a save.
+    async function loadDiscontinued() {
+      try {
+        discontinuedProducts = await api('/api/products?discontinued=1');
+      } catch (err) {
+        discontinuedProducts = [];
+        showToast(`Could not load discontinued products: ${escapeHtml((err && err.message) || 'unknown error')}`, 'warning');
+      }
+      renderDiscontinued();
     }
 
     // ===== Components (composite products) =====
@@ -146,7 +198,7 @@
         .sort((a, b) => a.name.localeCompare(b.name));
       document.getElementById('component-picker').innerHTML =
         '<option value="">-- Pick a product to link --</option>' +
-        options.map(p => `<option value="${p.id}">${p.name}${p.track_stock ? ' · tracked' : ''}</option>`).join('');
+        options.map(p => `<option value="${p.id}">${escapeHtml(p.name)}${p.track_stock ? ' · tracked' : ''}</option>`).join('');
     }
 
     function renderComponents() {
@@ -158,7 +210,7 @@
           const p = allProducts.find(x => x.id === c.component_product_id);
           const name = p ? p.name : `#${c.component_product_id}`;
           return `<div class="d-flex align-items-center gap-2 py-1 border-bottom">
-            <span class="flex-fill"><strong>${name}</strong> ${p?.track_stock ? '<span class="badge bg-success">tracked</span>' : '<span class="badge bg-light text-dark">not tracked</span>'}</span>
+            <span class="flex-fill"><strong>${escapeHtml(name)}</strong> ${p?.track_stock ? '<span class="badge bg-success">tracked</span>' : '<span class="badge bg-light text-dark">not tracked</span>'}</span>
             <input type="number" class="form-control form-control-sm" style="width:80px;" value="${c.quantity}" step="0.01" min="0.01" onchange="currentComponents[${i}].quantity = parseFloat(this.value) || 0">
             <button type="button" class="btn btn-sm btn-outline-danger" onclick="currentComponents.splice(${i},1); renderComponents(); refreshComponentPicker();">×</button>
           </div>`;
@@ -209,7 +261,7 @@
     function toggleArrangePanel() {
       const p = document.getElementById('arrange-panel');
       if (p.style.display === 'none') {
-        arrangeList = sortCategories([...new Set(allProducts.map(p => p.category).filter(Boolean))]);
+        arrangeList = sortCategories(productCategories());
         renderArrange();
         p.style.display = 'block';
       } else {
@@ -219,7 +271,7 @@
     function renderArrange() {
       document.getElementById('arrange-list').innerHTML = arrangeList.map((c, i) => `
         <li class="list-group-item d-flex justify-content-between align-items-center">
-          <span><span class="text-muted me-2">${i + 1}.</span> ${c}</span>
+          <span><span class="text-muted me-2">${i + 1}.</span> ${escapeHtml(c)}</span>
           <div class="btn-group">
             <button class="btn btn-sm btn-outline-secondary" onclick="moveArrange(${i}, -1)" ${i === 0 ? 'disabled' : ''}>↑</button>
             <button class="btn btn-sm btn-outline-secondary" onclick="moveArrange(${i}, 1)" ${i === arrangeList.length - 1 ? 'disabled' : ''}>↓</button>
@@ -245,17 +297,22 @@
       }, 'Saving...');
     }
 
+    // The one place that knows which categories exist. `extra` keeps a value that is
+    // no longer on any product (an orphan category, or one a filter still points at)
+    // selectable instead of silently vanishing.
+    function productCategories(extra) {
+      const cats = [...new Set(allProducts.map(p => p.category).filter(Boolean))];
+      if (extra && !cats.some(c => c.toLowerCase() === extra.toLowerCase())) cats.push(extra);
+      return cats.sort((a, b) => a.localeCompare(b));
+    }
+
     function buildCategorySelect(currentValue) {
       const sel = document.getElementById('product-category-select');
       const newInput = document.getElementById('product-category-new');
-      const cats = [...new Set(allProducts.map(p => p.category).filter(Boolean))].sort((a, b) => a.localeCompare(b));
-      // Make sure the product's own (possibly orphan) value shows up too.
-      if (currentValue && !cats.some(c => c.toLowerCase() === currentValue.toLowerCase())) {
-        cats.push(currentValue);
-      }
+      const cats = productCategories(currentValue);
       sel.innerHTML =
         '<option value="">-- Pick a category --</option>' +
-        cats.map(c => `<option value="${c.replace(/"/g, '&quot;')}" ${currentValue && c.toLowerCase() === currentValue.toLowerCase() ? 'selected' : ''}>${c}</option>`).join('') +
+        cats.map(c => `<option value="${escapeHtml(c)}" ${currentValue && c.toLowerCase() === currentValue.toLowerCase() ? 'selected' : ''}>${escapeHtml(c)}</option>`).join('') +
         '<option value="__new__">+ Add new category…</option>';
       newInput.value = '';
       newInput.style.display = 'none';
@@ -279,9 +336,66 @@
       return sel.value.trim();
     }
 
+    // Rebuilt on every load so a new category shows up, but the current choice is
+    // carried across so saving a product does not reset the filter.
+    function buildCategoryFilter() {
+      const sel = document.getElementById('filter-category');
+      const current = sel.value;
+      const cats = productCategories(current);
+      sel.innerHTML = '<option value="">All categories</option>' +
+        cats.map(c => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join('');
+      sel.value = current;
+      if (sel.value !== current) sel.value = '';  // category really is gone: back to "All"
+    }
+
+    function filtersActive() {
+      return !!document.getElementById('product-search').value.trim()
+        || !!document.getElementById('filter-category').value
+        || document.getElementById('filter-status').value !== 'all';
+    }
+
+    function clearFilters() {
+      document.getElementById('product-search').value = '';
+      document.getElementById('filter-category').value = '';
+      document.getElementById('filter-status').value = 'all';
+      renderProducts();
+    }
+
+    function updateFilterSummary(shown, total) {
+      const on = filtersActive();
+      const hidden = total - shown;
+      const el = document.getElementById('product-count');
+      el.className = on ? 'small fw-bold text-danger' : 'text-muted small';
+      el.textContent = on
+        ? `${shown} of ${total} products` + (hidden > 0 ? ` — ${hidden} hidden by filters` : ' — filters on')
+        : `${total} product${total === 1 ? '' : 's'}`;
+      document.getElementById('clear-filters-btn').style.display = on ? 'inline-block' : 'none';
+    }
+
+    // Three states, not two: a discontinued row should never reach this table, but if
+    // one ever did it must not read as a plain "Inactive" product.
+    function statusBadge(p) {
+      if (p.is_discontinued) return '<span class="badge bg-dark">Discontinued</span>';
+      return `<span class="badge bg-${p.is_active ? 'success' : 'secondary'}">${p.is_active ? 'Active' : 'Inactive'}</span>`;
+    }
+
     function renderProducts() {
-      const search = document.getElementById('product-search').value.toLowerCase();
-      const filtered = allProducts.filter(p => !search || p.name.toLowerCase().includes(search) || p.category.toLowerCase().includes(search));
+      const search = document.getElementById('product-search').value.trim().toLowerCase();
+      const cat = document.getElementById('filter-category').value;
+      const status = document.getElementById('filter-status').value;
+      // The server already excludes discontinued products; this is the second lock, so
+      // a stale cache can never leak one into the live product list.
+      const live = allProducts.filter(p => !p.is_discontinued);
+      // All three filters narrow the same set — they combine, they do not override.
+      const filtered = live.filter(p => {
+        if (search && !String(p.name || '').toLowerCase().includes(search)
+                   && !String(p.category || '').toLowerCase().includes(search)) return false;
+        if (cat && String(p.category || '') !== cat) return false;
+        if (status === 'active' && !p.is_active) return false;
+        if (status === 'inactive' && p.is_active) return false;
+        return true;
+      });
+      updateFilterSummary(filtered.length, live.length);
       document.getElementById('products-table').innerHTML = filtered.map(p => {
         const effective = p.discount_price || p.selling_price;
         const margin = effective - (p.cost_price || 0);
@@ -293,18 +407,57 @@
           stockLabel = out ? '<span class="badge bg-danger ms-1">Out</span>' : (low ? '<span class="badge bg-warning text-dark ms-1">Low</span>' : `<span class="badge bg-light text-dark ms-1">${p.stock_quantity}</span>`);
         }
         return `<tr>
-          <td class="fw-bold">${p.name} ${stockLabel}</td>
-          <td>${p.category}</td>
+          <td class="fw-bold">${escapeHtml(p.name)} ${stockLabel}</td>
+          <td>${escapeHtml(p.category)}</td>
           <td>${formatCurrency(p.cost_price || 0)}</td>
           <td>${p.discount_price ? `<s class="text-muted">${formatCurrency(p.selling_price)}</s> <span class="text-danger fw-bold">${formatCurrency(p.discount_price)}</span>` : formatCurrency(p.selling_price)}</td>
           <td><span class="text-${margin > 0 ? 'success' : 'danger'}">${formatCurrency(margin)} (${marginPct}%)</span></td>
-          <td><span class="badge bg-${p.is_active ? 'success' : 'secondary'}">${p.is_active ? 'Active' : 'Inactive'}</span></td>
+          <td>${statusBadge(p)}</td>
           <td>
             <button class="btn btn-sm btn-outline-primary" onclick="editProduct(${p.id})">Edit</button>
             <button class="btn btn-sm btn-outline-danger" onclick="deleteProduct(${p.id}, this)">Delete</button>
           </td>
         </tr>`;
-      }).join('') || '<tr><td colspan="7" class="text-center text-muted py-4">No products found</td></tr>';
+      }).join('') || `<tr><td colspan="7" class="text-center text-muted py-4">${filtersActive() ? 'No products match these filters.' : 'No products found'}</td></tr>`;
+    }
+
+    // ===== Discontinued =====
+    function toggleDiscontinued() {
+      const body = document.getElementById('discontinued-body');
+      const btn = document.getElementById('discontinued-toggle');
+      const show = body.style.display === 'none';
+      body.style.display = show ? 'block' : 'none';
+      btn.textContent = show ? 'Hide' : 'Show';
+    }
+
+    function renderDiscontinued() {
+      const isAdmin = currentUser?.role === 'admin';
+      document.getElementById('discontinued-table').innerHTML = discontinuedProducts.map(p => `<tr class="text-muted">
+        <td class="fw-bold">${escapeHtml(p.name)}</td>
+        <td>${escapeHtml(p.category)}</td>
+        <td>${formatCurrency(p.cost_price || 0)}</td>
+        <td><s>${formatCurrency(p.selling_price)}</s>${p.discount_price ? ` <s>${formatCurrency(p.discount_price)}</s>` : ''}</td>
+        <td><span class="badge bg-dark">Discontinued</span> <small>not on sale</small></td>
+        <td>${isAdmin
+          ? `<button class="btn btn-sm btn-outline-secondary" onclick="restoreProduct(${p.id}, this)">Restore</button>`
+          : '<small>Admin only</small>'}</td>
+      </tr>`).join('') || '<tr><td colspan="6" class="text-center text-muted py-4">No discontinued products</td></tr>';
+
+      const n = discontinuedProducts.length;
+      const badge = document.getElementById('discontinued-count');
+      badge.textContent = n;
+      badge.style.display = n ? 'inline-block' : 'none';
+    }
+
+    async function restoreProduct(id, btn) {
+      const p = discontinuedProducts.find(x => x.id === id);
+      const name = p ? p.name : 'this product';
+      if (!confirm(`Restore "${name}"?\n\nIt comes back as Inactive, so it stays off the POS until you edit it and tick Active.`)) return;
+      await withBusy(btn, async () => {
+        await api(`/api/products/${id}/restore`, { method: 'POST' });
+        showToast(`"${escapeHtml(name)}" is back in the product list as Inactive — edit it and tick Active to put it on the menu.`);
+        await loadProducts();  // refreshes both lists
+      }, 'Restoring...');
     }
 
     function updateMarginPreview() {
@@ -396,12 +549,22 @@
     }
 
     async function deleteProduct(id, btn) {
-      if (!confirm('Delete this product?')) return;
+      const p = allProducts.find(x => x.id === id);
+      const name = p ? p.name : 'this product';
+      // Say up front what can actually happen: a product that has been sold cannot be
+      // deleted, because old bills point at it.
+      if (!confirm(`Delete "${name}"?\n\nIf it has already been sold it cannot be deleted — it will be moved to Discontinued instead: permanently off the menu, but kept so past bills still read correctly.`)) return;
       await withBusy(btn, async () => {
         const res = await api(`/api/products/${id}`, { method: 'DELETE' });
-        showToast(res.soft_deleted ? 'Product has sales history — marked inactive' : 'Product deleted');
-        await loadProducts();
-      }, '...');
+        if (res.discontinued) {
+          showToast(`"${escapeHtml(name)}" appears in past sales, so it could not be deleted — it has been moved to Discontinued.${res.reason ? ` (${escapeHtml(res.reason)})` : ''}`, 'warning');
+        } else {
+          showToast('Product deleted');
+        }
+        await loadProducts();  // refreshes both lists
+      }, 'Deleting...');
+      // A 400 (component of another product, or sitting in a cart) throws out of api();
+      // withBusy already toasts it, so there is nothing to catch here.
     }
   </script>
 </body>
