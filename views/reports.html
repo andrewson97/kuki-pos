@@ -186,12 +186,17 @@
 
     // ---------- Shared "products sold" table (filter + totals + scroll) ----------
 
-    function renderProductsTable(prefix, products) {
+    // recon (optional) = { discount, tax, totalSales } taken from the report's bill-level
+    // totals. When supplied, a reconciliation block is drawn under the table showing how
+    // the gross product value (SUM of bill_items.total, i.e. before discount and tax)
+    // turns into the headline "Total Sales" figure (SUM of bills.total).
+    // Top Products has no bill totals in its payload, so it passes no recon.
+    function renderProductsTable(prefix, products, recon) {
       const el = document.getElementById(prefix + '-products');
       if (!el) return;
       const list = Array.isArray(products) ? products : [];
       const showCost = list.some(p => p.total_cost !== undefined && p.total_cost !== null);
-      productTables[prefix] = { products: list, showCost };
+      productTables[prefix] = { products: list, showCost, recon: recon || null };
       if (!list.length) {
         el.innerHTML = '<p class="text-muted mb-0">No products sold</p>';
         return;
@@ -215,6 +220,7 @@
             <tfoot id="${prefix}-prod-foot" class="fw-bold"></tfoot>
           </table>
         </div>
+        <div id="${prefix}-prod-recon" class="mt-2"></div>
       `;
       filterProducts(prefix);
     }
@@ -247,7 +253,7 @@
       const totCost = rows.reduce((s, p) => s + parseFloat(p.total_cost || 0), 0);
       const totProfit = totRev - totCost;
       document.getElementById(prefix + '-prod-foot').innerHTML = `<tr class="border-top">
-        <td>Total</td>
+        <td>Gross product value<br><small class="fw-normal text-muted">(before discount &amp; tax)</small></td>
         <td class="text-end">${Math.round(totQty * 1000) / 1000}</td>
         <td class="text-end">${formatCurrency(totRev)}</td>
         ${showCost ? `<td class="text-end">${formatCurrency(totCost)}</td><td class="text-end" style="color:${totProfit >= 0 ? '#28a745' : '#dc3545'}">${formatCurrency(totProfit)}</td>` : ''}
@@ -256,6 +262,41 @@
       document.getElementById(prefix + '-prod-count').textContent = q
         ? `${rows.length} of ${state.products.length} products`
         : `${state.products.length} product${state.products.length === 1 ? '' : 's'}`;
+
+      renderRecon(prefix, q !== '');
+    }
+
+    // Reconciliation between the products table and the headline "Total Sales" card.
+    // Always computed over the FULL product list - never the filtered subset, because
+    // reconciling part of the products against whole-period bill totals is meaningless.
+    // While a filter is active the block stays put and says so explicitly.
+    function renderRecon(prefix, filtered) {
+      const host = document.getElementById(prefix + '-prod-recon');
+      if (!host) return;
+      const state = productTables[prefix];
+      const recon = state && state.recon;
+      if (!recon) { host.innerHTML = ''; return; }
+
+      const gross = state.products.reduce((s, p) => s + parseFloat(p.total_revenue || 0), 0);
+      const discount = parseFloat(recon.discount || 0);
+      const tax = parseFloat(recon.tax || 0);
+      const totalSales = parseFloat(recon.totalSales || 0);
+      const computed = gross - discount + tax;
+      const reconciles = Math.abs(computed - totalSales) <= 0.01;
+
+      const line = (label, value, cls, attrs) =>
+        `<div class="d-flex justify-content-between gap-3 ${cls}"${attrs || ''}><span>${label}</span><span>${value}</span></div>`;
+
+      const mismatchTitle = ` title="Could not reconcile: ${formatCurrency(gross)} gross value less ${formatCurrency(discount)} discount plus ${formatCurrency(tax)} tax comes to ${formatCurrency(computed)}, but Total Sales reports ${formatCurrency(totalSales)}."`;
+
+      host.innerHTML = `
+        <div class="small ms-auto" style="max-width:360px;">
+          ${filtered ? `<div class="text-muted fst-italic mb-1">Filter applies to the rows above only - this reconciliation always covers all ${state.products.length} products.</div>` : ''}
+          ${line('Gross product value', formatCurrency(gross), 'text-muted')}
+          ${discount !== 0 ? line('less discounts', '&minus; ' + formatCurrency(discount), 'text-muted') : ''}
+          ${tax !== 0 ? line('plus tax', '+ ' + formatCurrency(tax), 'text-muted') : ''}
+          ${line('= Total Sales', formatCurrency(totalSales), 'fw-bold border-top mt-1 pt-1' + (reconciles ? '' : ' text-danger'), reconciles ? '' : mismatchTitle)}
+        </div>`;
     }
 
     // ---------- Date helpers (business day aware, via todayISO) ----------
@@ -302,7 +343,11 @@
       ).join('') || '<p class="text-muted">No expenses</p>';
 
       // Every product sold this month
-      renderProductsTable('m', data.top_products);
+      renderProductsTable('m', data.top_products, {
+        discount: data.sales.total_discount,
+        tax: data.sales.total_tax,
+        totalSales: data.sales.total_sales,
+      });
 
       // Daily sales chart
       if (dailyChart) dailyChart.destroy();
@@ -331,7 +376,11 @@
         `<div class="d-flex justify-content-between py-1 border-bottom"><span>${escapeHtml(String(p.payment_method || '').toUpperCase())} (${p.count} bills)</span><strong>${formatCurrency(p.total)}</strong></div>`
       ).join('') || '<p class="text-muted">No sales</p>';
 
-      renderProductsTable('d', data.top_products);
+      renderProductsTable('d', data.top_products, {
+        discount: data.sales.total_discount,
+        tax: data.sales.total_tax,
+        totalSales: data.sales.total_sales,
+      });
     }
 
     // ---------- Custom range ----------
@@ -437,7 +486,11 @@
         </table>`;
 
       // Every product sold in the range
-      renderProductsTable('r', data.top_products);
+      renderProductsTable('r', data.top_products, {
+        discount: data.sales.total_discount,
+        tax: data.sales.total_tax,
+        totalSales: data.sales.total_sales,
+      });
 
       // Daily sales chart over the range
       if (rangeChart) rangeChart.destroy();

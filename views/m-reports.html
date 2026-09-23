@@ -81,8 +81,9 @@
     <div class="card">
       <h2>Products sold<span id="products-count"></span></h2>
       <div id="r-top"><div class="empty">Loading…</div></div>
-      <div id="r-top-summary" style="display:none;justify-content:space-between;gap:8px;padding-top:10px;"></div>
-      <button class="btn btn-outline btn-sm" id="r-top-toggle" style="display:none;margin-top:10px;" onclick="toggleTop()"></button>
+      <div id="r-top-summary" style="display:none;justify-content:space-between;align-items:baseline;gap:8px;padding-top:10px;"></div>
+      <div id="r-top-recon" style="display:none;margin-top:12px;padding-top:10px;border-top:1px solid var(--line);"></div>
+      <button class="btn btn-outline btn-sm" id="r-top-toggle" style="display:none;margin-top:12px;" onclick="toggleTop()"></button>
     </div>
   </div>
 
@@ -91,6 +92,7 @@
     const TOP_VISIBLE = 15;
     let reportMode = 'day';
     let topProducts = [];
+    let topRecon = null;
     let topExpanded = false;
 
     async function load() {
@@ -165,8 +167,10 @@
         </div>`).join('');
     }
 
-    function renderProducts(rows) {
+    /* recon = { discount, tax, totalSales } — bill-level figures the product list cannot show */
+    function renderProducts(rows, recon) {
       topProducts = rows || [];
+      topRecon = recon || null;
       topExpanded = false;
       drawProducts();
     }
@@ -182,6 +186,7 @@
       if (!list.length) {
         $('r-top').innerHTML = '<div class="empty">No products sold</div>';
         $('r-top-summary').style.display = 'none';
+        $('r-top-recon').style.display = 'none';
         $('r-top-toggle').style.display = 'none';
         return;
       }
@@ -192,12 +197,17 @@
           <strong style="white-space:nowrap;">${fmt(p.total_revenue)}</strong>
         </div>`).join('');
 
+      /* Totals always cover the FULL list, never just the rows the toggle happens to show. */
       let totalQty = 0, totalRev = 0;
       list.forEach(p => { totalQty += Number(p.total_qty || 0); totalRev += Number(p.total_revenue || 0); });
       $('r-top-summary').style.display = 'flex';
       $('r-top-summary').innerHTML = `
-        <span style="color:var(--ink-soft);font-size:0.85rem;">Total · ${qtyFmt(totalQty)} items</span>
+        <span style="min-width:0;font-size:0.85rem;">Gross product value
+          <span style="display:block;color:var(--ink-soft);font-size:0.72rem;">(before discount &amp; tax) · ${qtyFmt(totalQty)} items</span>
+        </span>
         <strong style="white-space:nowrap;">${fmt(totalRev)}</strong>`;
+
+      drawRecon(totalRev);
 
       if (list.length > TOP_VISIBLE) {
         $('r-top-toggle').style.display = 'block';
@@ -205,6 +215,43 @@
       } else {
         $('r-top-toggle').style.display = 'none';
       }
+    }
+
+    /* Reconciles the product list (subtotal only) with the Sales tile (subtotal - discount + tax).
+       Always reflects the full product list — the Show all / Show less toggle never touches it. */
+    function drawRecon(gross) {
+      const box = $('r-top-recon');
+      if (!topRecon) {
+        box.style.display = 'none';
+        box.innerHTML = '';
+        return;
+      }
+      const discount = Number(topRecon.discount || 0);
+      const tax = Number(topRecon.tax || 0);
+      const totalSales = Number(topRecon.totalSales || 0);
+      const mismatch = Math.abs((gross - discount + tax) - totalSales) > 0.01;
+
+      const rowCss = 'display:flex;justify-content:space-between;align-items:baseline;gap:10px;padding:3px 0;font-size:0.82rem;color:var(--ink-soft);';
+      let html = `
+        <div style="${rowCss}"><span>Gross product value</span><span style="white-space:nowrap;">${fmt(gross)}</span></div>`;
+      if (Math.abs(discount) > 0.005) {
+        html += `
+        <div style="${rowCss}"><span>less discounts</span><span style="white-space:nowrap;">− ${fmt(discount)}</span></div>`;
+      }
+      if (Math.abs(tax) > 0.005) {
+        html += `
+        <div style="${rowCss}"><span>plus tax</span><span style="white-space:nowrap;">+ ${fmt(tax)}</span></div>`;
+      }
+      html += `
+        <div style="display:flex;justify-content:space-between;align-items:baseline;gap:10px;margin-top:6px;padding-top:7px;border-top:1px solid var(--line);font-size:0.92rem;font-weight:700;${mismatch ? 'color:var(--red);' : ''}">
+          <span>= Total sales</span><span style="white-space:nowrap;">${fmt(totalSales)}</span>
+        </div>`;
+      if (mismatch) {
+        html += `
+        <div style="padding-top:4px;font-size:0.74rem;color:var(--red);">Doesn't add up — check bill discounts &amp; tax.</div>`;
+      }
+      box.innerHTML = html;
+      box.style.display = 'block';
     }
 
     /* ---------- day mode ---------- */
@@ -238,7 +285,11 @@
         }
 
         renderPayment(r.by_payment);
-        renderProducts(r.top_products);
+        renderProducts(r.top_products, {
+          discount: r.sales.total_discount,
+          tax: r.sales.total_tax,
+          totalSales: r.sales.total_sales
+        });
       } catch (err) { toast(err.message, 'error'); }
     }
 
@@ -279,7 +330,11 @@
         $('range-empty').style.display = (sales.bill_count || 0) ? 'none' : 'block';
 
         renderPayment(r.by_payment);
-        renderProducts(r.top_products);
+        renderProducts(r.top_products, {
+          discount: sales.total_discount,
+          tax: sales.total_tax,
+          totalSales: sales.total_sales
+        });
       } catch (err) { toast(err.message, 'error'); }
     }
 
