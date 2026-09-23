@@ -4,6 +4,13 @@ import { getUser } from "../middleware/auth";
 import { createBill, getNextTokenNumber } from "../services/billing";
 import { getSettings, buildReceiptText, buildKitchenTicket, buildProformaText, queuePrint } from "../services/printer";
 import { restoreStockForBill } from "../services/stock";
+import {
+  syncCartReservations,
+  releaseCartReservations,
+  listActiveHolds,
+  releaseHold,
+  getCartHolds,
+} from "../services/reservations";
 import { adminOnly } from "../middleware/auth";
 import { todayDate, formatDateTime } from "../utils/helpers";
 
@@ -58,6 +65,9 @@ pos.post("/bill", async (c) => {
       payment_method: body.payment_method || "cash",
       user_id: user.id,
       amount_given: body.amount_given ?? null,
+      // Threaded through so createBill() can release this cart's holds in the
+      // same transaction as the stock deduction.
+      cart_id: body.cart_id || null,
     });
   } catch (err: any) {
     return c.json({ error: err?.message || "Failed to create bill" }, 400);
@@ -330,6 +340,84 @@ pos.get("/bills/:id/receipt", async (c) => {
   });
 
   return c.json({ text: receiptText, kitchen_text: kitchenText, print_queued: true });
+});
+
+// --- Cart stock reservations ("holds") ---------------------------------------
+//
+// Mounted on the POS router rather than a router of their own: holds are a till
+// concern, they live and die with a cart, and /api/pos/* already carries every
+// other cart-shaped operation (bill, proforma, token). A separate router would
+// only add a mount in src/index.ts for four handlers that share this one's
+// auth and lifetime.
+//
+// Auth follows the house rule visible in products.ts / expenses.ts: reads are
+// open to any logged-in user, writes that affect other people's data are
+// adminOnly. Syncing and releasing YOUR OWN cart is ordinary cashier work, so
+// no guard. Listing is read-only, so no guard — a cashier staring at a missing
+// cake benefits from seeing who holds it. Releasing SOMEONE ELSE'S hold by id
+// hands their stock to another till, so that one is adminOnly.
+
+// "This cart now holds exactly these items." Full sync, not a delta.
+// Body: { cart_id: string, items: [{ product_id, quantity }] }
+pos.post("/reservations/sync", async (c) => {
+  const user = getUser(c)!;
+  const body = await c.req.json();
+  const cartId = String(body.cart_id || "").trim();
+  if (!cartId) return c.json({ error: "cart_id is required" }, 400);
+  if (!Array.isArray(body.items)) return c.json({ error: "items must be an array" }, 400);
+
+  try {
+    const holds = syncCartReservations({
+      cart_id: cartId,
+      items: body.items,
+      user_id: user.id,
+    });
+    return c.json({ success: true, cart_id: cartId, holds });
+  } catch (err: any) {
+    return c.json({ error: err?.message || "Could not hold stock for this cart" }, 400);
+  }
+});
+
+// What this cart currently holds — handy after a reload/reconnect.
+pos.get("/reservations/cart/:cartId", (c) => {
+  const cartId = c.req.param("cartId");
+  return c.json({ cart_id: cartId, holds: getCartHolds(cartId) });
+});
+
+// Cart cleared / sale abandoned / cart parked-and-dropped.
+pos.delete("/reservations/cart/:cartId", (c) => {
+  const cartId = c.req.param("cartId");
+  const released = releaseCartReservations(cartId);
+  return c.json({ success: true, cart_id: cartId, released });
+});
+
+// Every live hold in the shop — the admin "Held stock" screen. There is no
+// expiry by design, so this screen is the only way a hold stranded by a
+// crashed tablet ever comes back.
+pos.get("/reservations", (c) => {
+  return c.json(listActiveHolds());
+});
+
+// Admin recovery: release one stranded hold.
+pos.delete("/reservations/:id", adminOnly, (c) => {
+  const id = parseInt(c.req.param("id") || "");
+  if (!id) return c.json({ error: "Invalid hold id" }, 400);
+  const user = getUser(c)!;
+  const db = getDb();
+  const hold = db.query(
+    "SELECT r.id, r.quantity, r.cart_id, p.name AS product_name FROM stock_reservations r LEFT JOIN products p ON p.id = r.product_id WHERE r.id = ?"
+  ).get(id) as any;
+  if (!hold) return c.json({ error: "Hold not found" }, 404);
+
+  db.transaction(() => {
+    releaseHold(id);
+    db.query("INSERT INTO activity_log (user_id, action, details) VALUES (?, 'released_stock_hold', ?)").run(
+      user.id,
+      JSON.stringify({ hold_id: id, product: hold.product_name, quantity: hold.quantity, cart_id: hold.cart_id })
+    );
+  })();
+
+  return c.json({ success: true });
 });
 
 export default pos;

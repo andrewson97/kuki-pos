@@ -177,6 +177,18 @@ export function runMigrations(): void {
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
+    CREATE TABLE IF NOT EXISTS stock_reservations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      product_id INTEGER NOT NULL REFERENCES products(id),
+      quantity REAL NOT NULL,
+      cart_id TEXT NOT NULL,
+      user_id INTEGER REFERENCES users(id),
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_stock_reservations_cart ON stock_reservations(cart_id);
+    CREATE INDEX IF NOT EXISTS idx_stock_reservations_product ON stock_reservations(product_id);
+
     CREATE TABLE IF NOT EXISTS cash_counts (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       count_type TEXT NOT NULL CHECK(count_type IN ('open', 'close')),

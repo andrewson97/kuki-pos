@@ -1,5 +1,6 @@
 import { getDb } from "../db/database";
 import { todayDate } from "../utils/helpers";
+import { computeStockNeeds, heldByOtherCarts, releaseCartReservations } from "./reservations";
 export function getNextTokenNumber(): number {
   const db = getDb();
   const today = todayDate();
@@ -25,11 +26,16 @@ interface CreateBillParams {
   payment_method: "cash" | "card" | "upi";
   user_id: number;
   amount_given?: number | null;
+  // The till's cart id, when it has one. Optional so existing callers that
+  // never held stock keep working — but without it this sale is treated as
+  // "not the holder", so any hold on the goods will block it.
+  cart_id?: string | null;
 }
 
 export function createBill(params: CreateBillParams): any {
   const db = getDb();
-  const { items, customer_id, discount, tax_rate, payment_method, user_id, amount_given } = params;
+  const { items, customer_id, discount, tax_rate, payment_method, user_id, amount_given, cart_id } = params;
+  const cartId = String(cart_id || "").trim();
 
   const subtotal = items.reduce((sum, item) => sum + item.quantity * item.unit_price, 0);
   const taxableAmount = subtotal - discount;
@@ -54,35 +60,18 @@ export function createBill(params: CreateBillParams): any {
     // Aggregate stock needs across all items — a product's own count + any
     // components (composite/BoM). Same underlying product referenced multiple
     // times in the cart or across item+component sums correctly.
-    const needs = new Map<number, { name: string; needed: number }>();
-    const bump = (pid: number, name: string, qty: number) => {
-      const cur = needs.get(pid) || { name, needed: 0 };
-      cur.needed += qty;
-      needs.set(pid, cur);
-    };
+    // Shared with cart reservations (src/services/reservations.ts) so a hold
+    // and a deduction can never disagree about what a cake consumes.
+    const needs = computeStockNeeds(items);
 
-    for (const item of items) {
-      const p = db.query(
-        "SELECT id, name, track_stock FROM products WHERE id = ?"
-      ).get(item.product_id) as any;
-      if (p?.track_stock) bump(p.id, p.name, item.quantity);
-
-      const components = db.query(
-        "SELECT component_product_id, quantity FROM product_components WHERE product_id = ?"
-      ).all(item.product_id) as any[];
-      for (const c of components) {
-        const comp = db.query(
-          "SELECT id, name, track_stock FROM products WHERE id = ?"
-        ).get(c.component_product_id) as any;
-        if (comp?.track_stock) bump(comp.id, comp.name, c.quantity * item.quantity);
-      }
-    }
-
-    // Validate every aggregated need against current stock.
+    // Validate every aggregated need against stock that is actually ours to
+    // take: on-hand minus whatever OTHER carts are holding. With no holds in
+    // play this is exactly the old check, message included.
     for (const [pid, need] of needs) {
       const row = db.query("SELECT stock_quantity FROM products WHERE id = ?").get(pid) as any;
-      if ((row?.stock_quantity ?? 0) < need.needed) {
-        throw new Error(`${need.name} is out of stock (need ${need.needed}, have ${row?.stock_quantity ?? 0})`);
+      const available = (row?.stock_quantity ?? 0) - heldByOtherCarts(pid, cartId);
+      if (available < need.needed) {
+        throw new Error(`${need.name} is out of stock (need ${need.needed}, have ${Math.max(0, available)})`);
       }
     }
 
@@ -105,6 +94,12 @@ export function createBill(params: CreateBillParams): any {
       db.query("UPDATE products SET stock_quantity = stock_quantity - ? WHERE id = ?").run(need.needed, pid);
     }
 
+    // The sale landed, so this cart's holds have served their purpose. Inside
+    // the same transaction as the bill insert and the stock deduction, so it is
+    // impossible to deduct stock and strand the hold, or to release the hold
+    // without the sale committing.
+    if (cartId) releaseCartReservations(cartId);
+
     // Log activity
     db.query("INSERT INTO activity_log (user_id, action, details) VALUES (?, 'created_bill', ?)").run(
       user_id, JSON.stringify({ bill_id: billId, token: token_number, total })
@@ -113,5 +108,8 @@ export function createBill(params: CreateBillParams): any {
     return { id: billId, token_number, total, bill_date };
   });
 
-  return transaction();
+  // BEGIN IMMEDIATE: this transaction check-then-writes against both products
+  // and stock_reservations, so it takes its write lock up front rather than
+  // trying to upgrade one half-way through.
+  return transaction.immediate();
 }

@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { getDb } from "../db/database";
 import { adminOnly, getUser } from "../middleware/auth";
 import { todayDate } from "../utils/helpers";
+import { heldByOtherCartsMap } from "../services/reservations";
 
 const products = new Hono();
 
@@ -25,10 +26,31 @@ products.get("/", (c) => {
   return c.json(attachComponents(all));
 });
 
+// The POS grid. `stock_quantity` keeps its old meaning (units on hand) because
+// other screens read this endpoint; what's new is `available_quantity` —
+// on-hand minus the units OTHER carts are holding — which is what the grid
+// should hide on.
+//
+// `?cart=<cart_id>` identifies the caller's own cart so its own holds don't
+// make its own items vanish. With no cart param every hold counts as somebody
+// else's, which is the safe direction to be wrong in.
 products.get("/active", (c) => {
   const db = getDb();
+  const cartId = c.req.query("cart") || c.req.query("cart_id") || "";
   const all = db.query("SELECT * FROM products WHERE is_active = 1 ORDER BY category, name").all() as any[];
-  return c.json(attachComponents(all));
+  const rows = attachComponents(all);
+
+  const held = heldByOtherCartsMap(cartId);
+  for (const r of rows) {
+    r.available_quantity = (r.stock_quantity ?? 0) - (held.get(r.id) ?? 0);
+    for (const comp of r.components as any[]) {
+      // Same figure for a composite's ingredients, so the grid can hide a cake
+      // whose last tracked component is already spoken for.
+      comp.component_available_quantity =
+        (comp.component_stock_quantity ?? 0) - (held.get(comp.component_product_id) ?? 0);
+    }
+  }
+  return c.json(rows);
 });
 
 products.get("/:id", (c) => {
