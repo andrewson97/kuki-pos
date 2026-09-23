@@ -39,10 +39,23 @@
     .task-fill { height: 100%; transition: width 0.3s; }
     .task-fill.opening { background: var(--amber); }
     .task-fill.closing { background: var(--indigo); }
-    .stock-item { display: flex; justify-content: space-between; align-items: center; padding: 9px 0; border-bottom: 1px solid var(--line); font-size: 0.9rem; }
+    .stock-item { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 9px 0; border-bottom: 1px solid var(--line); font-size: 0.9rem; }
     .stock-item:last-child { border-bottom: none; }
+    /* An out-of-stock row must not read like a merely-low one at a glance. */
+    .stock-item.out { box-shadow: inset 3px 0 0 var(--red); padding-left: 10px; }
+    .stock-main { display: flex; flex-direction: column; flex: 1; min-width: 0; }
     .stock-name { color: var(--ink); }
-    .stock-qty { color: var(--red); font-weight: 600; font-size: 0.85rem; }
+    .stock-sub { font-size: 0.72rem; color: var(--ink-soft); margin-top: 3px; }
+    .stock-qty { color: var(--red); font-weight: 600; font-size: 0.85rem; white-space: nowrap; text-align: right; }
+    .stock-qty.low { color: #92400e; }
+    .stock-qty.past { color: var(--ink-soft); }
+    .stock-min { color: var(--ink-soft); font-weight: 500; }
+    .stock-more { font-size: 0.75rem; color: var(--ink-soft); padding-top: 8px; }
+    /* The "ran out earlier" card is a standing gap, not today's fire: same
+       visual language as the card above it, deliberately quieter. */
+    .card-secondary { background: #fbfbfc; box-shadow: none; border: 1px solid var(--line); }
+    .card-secondary .stock-item.out { box-shadow: none; padding-left: 0; }
+    .card-secondary .stock-name { color: var(--ink-soft); }
     .quick-links { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin-top: 14px; }
     .quick-link { background: var(--card); border-radius: 12px; padding: 14px; text-align: center; color: var(--ink); font-weight: 600; font-size: 0.85rem; box-shadow: 0 1px 3px rgba(0,0,0,0.04); }
     .quick-link .qi { font-size: 1.5rem; display: block; margin-bottom: 4px; }
@@ -77,8 +90,13 @@
       <div id="task-section"><div class="empty">Loading…</div></div>
     </div>
     <div class="card">
-      <h2>Low stock alerts</h2>
+      <h2>Needs attention now <span id="stock-count" style="color:var(--red);"></span></h2>
       <div id="stock-section"><div class="empty">Loading…</div></div>
+    </div>
+    <div class="card card-secondary" id="card-oos-earlier" style="display:none;">
+      <h2>Out of stock earlier <span id="oos-earlier-count"></span></h2>
+      <div id="oos-earlier-list"></div>
+      <button class="btn btn-outline btn-sm" id="oos-earlier-toggle" style="display:none;margin-top:10px;min-height:44px;" onclick="toggleOosEarlier()">Show all</button>
     </div>
     <div class="quick-links">
       <a class="quick-link" href="/m/pos"><span class="qi">🛒</span>POS</a>
@@ -103,7 +121,7 @@
         renderHero(data.today);
         renderPending(data.pending_expenses, currentUser.role === 'admin');
         renderTasks(data.tasks);
-        renderStock(data.low_stock);
+        renderStock(data);
       } catch (err) { toast(err.message, 'error'); }
     }
 
@@ -153,13 +171,107 @@
         <div class="task-bar"><div class="task-fill ${cls}" style="width:${pct}%;"></div></div>
       </div>`;
     }
-    function renderStock(items) {
-      if (!items.length) { $('stock-section').innerHTML = '<div class="empty">All stock levels OK 👍</div>'; return; }
-      $('stock-section').innerHTML = items.map(s => `
-        <div class="stock-item">
-          <span class="stock-name">${escapeHtml(s.name)} <small style="color:var(--ink-soft);font-size:0.7rem;">${s.kind === 'product' ? '· product' : ''}</small></span>
-          <span class="stock-qty">${s.quantity} ${escapeHtml(s.unit || '')} / min ${s.reorder_level}</span>
-        </div>`).join('');
+    // ===== Stock: what needs buying now vs. what has been out for a while =====
+    // "Needs attention now" (server field: low_stock) is low stock PLUS anything
+    // that ran out today; out_of_stock_earlier is the standing gaps. Mixing the
+    // two buried the urgent ones, so they render as two cards.
+    const OOS_EARLIER_PREVIEW = 3;
+    let oosEarlier = [], oosEarlierTotal = 0, oosEarlierOpen = false;
+
+    const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+    // `since` is a plain business date (YYYY-MM-DD), NOT a UTC timestamp, so it is
+    // parsed by hand: parseDbDate() appends 'Z', which would drag every date back
+    // 5h30m into the previous day in Colombo.
+    function parseBizDate(s) {
+      const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(s == null ? '' : s).trim());
+      if (!m) return null;
+      const y = +m[1], mo = +m[2], d = +m[3];
+      if (mo < 1 || mo > 12 || d < 1 || d > 31) return null;
+      return { y, mo, d, ms: Date.UTC(y, mo - 1, d) };
+    }
+    // "out today" / "out 3 days" / "out since 21 Sep". Never "Invalid Date".
+    function sinceLabel(since) {
+      const on = parseBizDate(since);
+      if (!on) return 'out — since when is not recorded';
+      const onText = `out since ${on.d} ${MONTHS[on.mo - 1]}`;
+      const today = parseBizDate(todayISO());
+      if (!today) return onText;
+      const days = Math.round((today.ms - on.ms) / 86400000);
+      if (days <= 0) return 'out today';
+      if (days === 1) return 'out since yesterday';
+      if (days < 7) return `out ${days} days`;
+      return onText + (on.y !== today.y ? ' ' + on.y : '');
+    }
+
+    // state is the server's word; fall back to the quantity if an older build of
+    // the endpoint is still answering, so a zero never renders as merely "low".
+    function isOutOfStock(s) {
+      if (s.state) return s.state === 'out';
+      return parseFloat(s.quantity) <= 0;
+    }
+    function countOf(n, fallback) { return typeof n === 'number' && isFinite(n) ? n : fallback; }
+    function moreNote(total, shown) {
+      return total > shown ? `<div class="stock-more">+ ${total - shown} more — see Stock</div>` : '';
+    }
+
+    function stockRow(s, past) {
+      const out = isOutOfStock(s);
+      const badge = past
+        ? '<span class="badge muted">Out</span>'
+        : (out ? '<span class="badge danger">Out</span>' : '<span class="badge warning">Low</span>');
+      // An ingredient can be named just like a cake — always say which it is.
+      const sub = [s.kind === 'product' ? 'Product' : 'Ingredient'];
+      if (out) sub.push(sinceLabel(s.since));
+      return `<div class="stock-item${out ? ' out' : ''}">
+          <span class="stock-main">
+            <span class="stock-name">${escapeHtml(s.name)} ${badge}</span>
+            <span class="stock-sub">${sub.map(escapeHtml).join(' · ')}</span>
+          </span>
+          <span class="stock-qty${past ? ' past' : (out ? '' : ' low')}">${escapeHtml(s.quantity)} ${escapeHtml(s.unit || '')}<span class="stock-min"> / min ${escapeHtml(s.reorder_level)}</span></span>
+        </div>`;
+    }
+
+    function renderStock(data) {
+      const now = data.low_stock || [];
+      const nowTotal = countOf(data.low_stock_count, now.length);
+      $('stock-count').textContent = nowTotal ? '· ' + nowTotal : '';
+      $('stock-section').innerHTML = now.length
+        ? now.map(s => stockRow(s, false)).join('') + moreNote(nowTotal, now.length)
+        : '<div class="empty">All stock levels OK 👍</div>';
+
+      oosEarlier = data.out_of_stock_earlier || [];
+      oosEarlierTotal = countOf(data.out_of_stock_earlier_count, oosEarlier.length);
+      // Hidden outright when empty — nothing ran out earlier, nothing to say.
+      if (!oosEarlier.length) {
+        $('card-oos-earlier').style.display = 'none';
+        $('oos-earlier-list').innerHTML = '';   // don't leave last refresh's rows inside the hidden card
+        $('oos-earlier-count').textContent = '';
+        oosEarlierOpen = false;
+        return;
+      }
+      $('card-oos-earlier').style.display = 'block';
+      $('oos-earlier-count').textContent = '· ' + oosEarlierTotal;
+      renderOosEarlier();
+    }
+
+    // Collapsed to a few rows by default so a long list of standing gaps cannot
+    // eat the phone screen; the open/closed choice survives the 60s refresh.
+    function renderOosEarlier() {
+      const shown = oosEarlierOpen ? oosEarlier : oosEarlier.slice(0, OOS_EARLIER_PREVIEW);
+      $('oos-earlier-list').innerHTML = shown.map(s => stockRow(s, true)).join('')
+        + (oosEarlierOpen ? moreNote(oosEarlierTotal, oosEarlier.length) : '');
+      const btn = $('oos-earlier-toggle');
+      if (oosEarlier.length > OOS_EARLIER_PREVIEW) {
+        btn.style.display = 'block';
+        btn.textContent = oosEarlierOpen ? 'Show fewer' : `Show all ${oosEarlier.length}`;
+      } else {
+        btn.style.display = 'none';
+      }
+    }
+    function toggleOosEarlier() {
+      oosEarlierOpen = !oosEarlierOpen;
+      renderOosEarlier();
     }
 
     async function approve(btn, id) {

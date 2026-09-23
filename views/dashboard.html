@@ -75,8 +75,9 @@
         </div>
         <div class="col-md-3">
           <div class="stat-card">
-            <div class="stat-label">Low Stock Items</div>
+            <div class="stat-label">Needs Attention Now</div>
             <div class="stat-value text-danger" id="stat-lowstock">-</div>
+            <div class="small text-muted d-none" id="stat-out-earlier"></div>
           </div>
         </div>
         <div class="col-md-3 d-flex align-items-stretch">
@@ -101,12 +102,22 @@
         </div>
         <div class="col-md-5">
           <div class="table-container p-3">
-            <h6 class="fw-bold mb-3">&#128680; Low Stock Alerts</h6>
+            <h6 class="fw-bold mb-1">&#128680; Needs Attention Now</h6>
+            <div class="text-muted small mb-3">Low stock, plus anything that ran out today.</div>
             <table class="table table-sm mb-0">
               <thead><tr><th>Item</th><th>Current</th><th>Min</th></tr></thead>
               <tbody id="low-stock-list"></tbody>
             </table>
             <div id="no-alerts" class="text-center text-muted py-4 d-none">All stock levels are fine!</div>
+          </div>
+          <!-- Backlog, not an alarm: this whole card stays hidden when there is nothing in it. -->
+          <div class="table-container p-3 mt-3 d-none" id="out-earlier-section">
+            <h6 class="fw-bold text-muted mb-1">Out of Stock Earlier <span class="badge bg-secondary" id="out-earlier-count">0</span></h6>
+            <div class="text-muted small mb-3">Ran out before today &mdash; a standing gap you may already know about.</div>
+            <table class="table table-sm mb-0">
+              <thead><tr><th>Item</th><th>Out since</th><th>Min</th></tr></thead>
+              <tbody id="out-earlier-list"></tbody>
+            </table>
           </div>
         </div>
       </div>
@@ -115,6 +126,52 @@
   <script src="/public/js/app.js"></script>
   <script>
     initApp('/', loadDashboard);
+
+    function escapeHtml(v) {
+      return String(v == null ? '' : v).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+    }
+
+    const MONTH_NAMES = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+    // `since` is a plain business date ("YYYY-MM-DD"), NOT a datetime('now') UTC column.
+    // parseDbDate() would append 'Z' and shift it a day for Asia/Colombo, so read the parts directly.
+    function businessDateParts(s) {
+      const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(s == null ? '' : s).trim());
+      if (!m) return null;
+      const y = Number(m[1]), mo = Number(m[2]), d = Number(m[3]);
+      if (mo < 1 || mo > 12 || d < 1 || d > 31) return null;
+      return { y: y, mo: mo, d: d };
+    }
+
+    function formatBusinessDate(s) {
+      const p = businessDateParts(s);
+      if (!p) return '';
+      const today = businessDateParts(todayISO());
+      // Only spell out the year when it isn't the current one.
+      return `${p.d} ${MONTH_NAMES[p.mo - 1]}${today && today.y === p.y ? '' : ' ' + p.y}`;
+    }
+
+    function daysSinceBusinessDate(s) {
+      const p = businessDateParts(s);
+      const t = businessDateParts(todayISO());
+      if (!p || !t) return null;
+      return Math.round((Date.UTC(t.y, t.mo - 1, t.d) - Date.UTC(p.y, p.mo - 1, p.d)) / 86400000);
+    }
+
+    function outSinceLabel(since) {
+      const days = daysSinceBusinessDate(since);
+      if (days === null) return 'out &mdash; date unknown';
+      if (days <= 0) return 'out today';
+      if (days === 1) return 'out since yesterday';
+      if (days < 7) return `out for ${days} days`;
+      return `out since ${escapeHtml(formatBusinessDate(since))}`;
+    }
+
+    // "chicken bun" as an ingredient has confused the owner before - always say which.
+    function kindBadge(kind) {
+      const label = kind === 'ingredient' ? 'Ingredient' : kind === 'product' ? 'Product' : '';
+      return label ? `<span class="badge bg-light text-dark border">${label}</span>` : '';
+    }
 
     async function loadDashboard() {
       try {
@@ -138,29 +195,72 @@
           billsTbody.innerHTML = stats.recent_bills.map(b => `
             <tr>
               <td><strong>#${String(b.token_number).padStart(3,'0')}</strong></td>
-              <td>${b.customer_name || '-'}</td>
+              <td>${escapeHtml(b.customer_name || '-')}</td>
               <td>${formatCurrency(b.total)}</td>
-              <td><span class="badge bg-info">${b.payment_method}</span></td>
+              <td><span class="badge bg-info">${escapeHtml(b.payment_method)}</span></td>
               <td>${formatTime(b.created_at)}</td>
             </tr>
           `).join('');
         }
 
-        const stockTbody = document.getElementById('low-stock-list');
-        if (stats.low_stock_items.length === 0) {
-          document.getElementById('no-alerts').classList.remove('d-none');
-        } else {
-          stockTbody.innerHTML = stats.low_stock_items.map(s => `
-            <tr>
-              <td>${s.name} <small class="text-muted">(${s.category_name})</small></td>
-              <td class="text-danger fw-bold">${s.quantity} ${s.unit}</td>
-              <td>${s.reorder_level} ${s.unit}</td>
-            </tr>
-          `).join('');
-        }
+        renderNeedsAttention(stats.low_stock_items || []);
+        renderOutEarlier(stats.out_of_stock_earlier || [], stats.out_of_stock_earlier_count);
       } catch (err) {
         showToast('Failed to load dashboard: ' + err.message, 'error');
       }
+    }
+
+    // Low and out are both urgent, but out is worse: red row + OUT badge vs an amber LOW badge.
+    function renderNeedsAttention(items) {
+      document.getElementById('no-alerts').classList.toggle('d-none', items.length > 0);
+      document.getElementById('low-stock-list').innerHTML = items.map(s => {
+        const out = s.state === 'out';
+        const stateBadge = out
+          ? '<span class="badge bg-danger">OUT</span>'
+          : '<span class="badge bg-warning text-dark">LOW</span>';
+        const sinceLine = out
+          ? `<div><small class="text-danger">${outSinceLabel(s.since)}</small></div>`
+          : '';
+        return `
+          <tr class="${out ? 'table-danger' : ''}">
+            <td>
+              <div class="fw-bold">${escapeHtml(s.name)} ${stateBadge}</div>
+              <div><small class="text-muted">${kindBadge(s.kind)} ${escapeHtml(s.category_name || '-')}</small></div>
+              ${sinceLine}
+            </td>
+            <td class="${out ? 'text-danger' : 'text-warning'} fw-bold">${escapeHtml(s.quantity)} ${escapeHtml(s.unit)}</td>
+            <td>${escapeHtml(s.reorder_level)} ${escapeHtml(s.unit)}</td>
+          </tr>
+        `;
+      }).join('');
+    }
+
+    function renderOutEarlier(items, count) {
+      const total = (count === null || count === undefined) ? items.length : count;
+      document.getElementById('out-earlier-count').textContent = total;
+      document.getElementById('out-earlier-section').classList.toggle('d-none', items.length === 0);
+
+      const note = document.getElementById('stat-out-earlier');
+      note.textContent = total > 0 ? `+${total} out of stock earlier` : '';
+      note.classList.toggle('d-none', total === 0);
+
+      document.getElementById('out-earlier-list').innerHTML = items.map(s => {
+        const when = formatBusinessDate(s.since);
+        const days = daysSinceBusinessDate(s.since);
+        const sinceCell = when
+          ? `${escapeHtml(when)}${days && days > 0 ? `<br><small>${days} day${days === 1 ? '' : 's'} ago</small>` : ''}`
+          : '<span class="fst-italic">date unknown</span>';
+        return `
+          <tr class="text-muted">
+            <td>
+              <div>${escapeHtml(s.name)}</div>
+              <div><small>${kindBadge(s.kind)} ${escapeHtml(s.category_name || '-')}</small></div>
+            </td>
+            <td>${sinceCell}</td>
+            <td>${escapeHtml(s.reorder_level)} ${escapeHtml(s.unit)}</td>
+          </tr>
+        `;
+      }).join('');
     }
   </script>
 </body>

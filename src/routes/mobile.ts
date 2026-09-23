@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { getDb } from "../db/database";
 import { todayDate } from "../utils/helpers";
+import { getStockAlerts } from "../services/stock";
 
 const mobile = new Hono();
 
@@ -52,19 +53,11 @@ mobile.get("/dashboard", (c) => {
     closing: { done: closing.filter(t => t.completion_id != null).length, total: closing.length },
   };
 
-  const lowIngredients = db.query(`
-    SELECT 'ingredient' AS kind, id, name, quantity, unit, reorder_level
-    FROM stock_items
-    WHERE quantity <= reorder_level AND reorder_level > 0
-  `).all() as any[];
-  const lowProducts = db.query(`
-    SELECT 'product' AS kind, id, name, stock_quantity AS quantity, 'unit' AS unit, stock_reorder_level AS reorder_level
-    FROM products
-    WHERE track_stock = 1 AND is_active = 1 AND stock_reorder_level > 0 AND stock_quantity <= stock_reorder_level
-  `).all() as any[];
-  const lowStock = [...lowIngredients, ...lowProducts]
-    .sort((a, b) => (a.quantity / Math.max(1, a.reorder_level)) - (b.quantity / Math.max(1, b.reorder_level)))
-    .slice(0, 5);
+  // Same two lists as the desktop dashboard, from the same query, so the phone
+  // and the laptop can never disagree about what is out of stock. Kept whole
+  // rather than trimmed to the top few: low_stock_count has to match the list
+  // it counts, and the view decides how many rows to show.
+  const { low_stock_items, out_of_stock_earlier } = getStockAlerts(today);
 
   return c.json({
     date: today,
@@ -78,7 +71,12 @@ mobile.get("/dashboard", (c) => {
     },
     pending_expenses: pendingExpenses,
     tasks: taskSummary,
-    low_stock: lowStock,
+    // `low_stock` keeps its name — views/mobile.html reads it — and the second
+    // list rides alongside under the shared contract name.
+    low_stock: low_stock_items,
+    low_stock_count: low_stock_items.length,
+    out_of_stock_earlier,
+    out_of_stock_earlier_count: out_of_stock_earlier.length,
   });
 });
 

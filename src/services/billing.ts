@@ -89,9 +89,13 @@ export function createBill(params: CreateBillParams): any {
       insertItem.run(billId, item.product_id, item.product_name, item.quantity, item.unit_price, original, costPrice, item.quantity * item.unit_price);
     }
 
-    // Deduct all aggregated needs in one pass.
+    // Deduct all aggregated needs in one pass. `needs` covers the products sold
+    // AND the components of composite products, so stamping stock_updated_at
+    // here dates every row whose stock actually moved — which is why the "ran
+    // out today" date cannot be derived from bill_items alone: a component that
+    // hit zero was never a line on the bill.
     for (const [pid, need] of needs) {
-      db.query("UPDATE products SET stock_quantity = stock_quantity - ? WHERE id = ?").run(need.needed, pid);
+      db.query("UPDATE products SET stock_quantity = stock_quantity - ?, stock_updated_at = datetime('now') WHERE id = ?").run(need.needed, pid);
     }
 
     // The sale landed, so this cart's holds have served their purpose. Inside

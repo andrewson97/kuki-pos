@@ -240,6 +240,15 @@ export function runMigrations(): void {
   // means "temporarily off the menu". Added as a column, never by rebuilding
   // the table — production carries real sales data on a fly.io volume.
   addColumn("products", "is_discontinued", "INTEGER NOT NULL DEFAULT 0");
+  // When this product's stock_quantity last changed (UTC, datetime('now')).
+  // stock_items already carry updated_at; products had no equivalent, so there
+  // was no way to tell "ran out today" from "ran out weeks ago". Nullable on
+  // purpose: every row that exists before this migration gets NULL, and NULL
+  // means "we do not know when it ran out" — which is treated as NOT today,
+  // because if we cannot show a date we must not claim it happened today.
+  // Added as a column, never by rebuilding the table (production data lives on
+  // a fly.io volume).
+  addColumn("products", "stock_updated_at", "TEXT");
 
   // One-shot: merge product categories that differ only by casing.
   // For each lowercase key, pick the most common casing as canonical.

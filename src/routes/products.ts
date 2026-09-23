@@ -111,8 +111,11 @@ products.post("/", adminOnly, async (c) => {
   const cat = canonicalCategory(category);
   const cleanName = (name || "").trim();
   const ts = track_stock ? 1 : 0;
+  // stock_updated_at is stamped here too: the row's stock was just set, so a
+  // product created today at zero really did "run out" today, not at an
+  // unknown time in the past.
   const result = db.query(
-    "INSERT INTO products (name, category, cost_price, selling_price, discount_price, is_active, track_stock, stock_quantity, stock_reorder_level) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    "INSERT INTO products (name, category, cost_price, selling_price, discount_price, is_active, track_stock, stock_quantity, stock_reorder_level, stock_updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))"
   ).run(cleanName, cat, cost_price || 0, selling_price, dp, is_active ?? 1, ts, ts ? (stock_quantity || 0) : 0, ts ? (stock_reorder_level || 0) : 0);
   const id = Number(result.lastInsertRowid);
   saveComponents(id, components);
@@ -160,7 +163,7 @@ products.post("/:id/restock", adminOnly, async (c) => {
   if (!product.track_stock) return c.json({ error: "Inventory tracking is off for this product" }, 400);
 
   db.transaction(() => {
-    db.query("UPDATE products SET stock_quantity = stock_quantity + ? WHERE id = ?").run(qty, id);
+    db.query("UPDATE products SET stock_quantity = stock_quantity + ?, stock_updated_at = datetime('now') WHERE id = ?").run(qty, id);
     db.query("INSERT INTO activity_log (user_id, action, details) VALUES (?, 'restocked_product', ?)").run(
       user.id, JSON.stringify({ product_id: id, name: product.name, quantity: qty, note })
     );
@@ -218,7 +221,7 @@ products.post("/:id/dispose", adminOnly, async (c) => {
   db.transaction(() => {
     if (product.track_stock) {
       // Subtract from stock (allow going negative — admin's call)
-      db.query("UPDATE products SET stock_quantity = stock_quantity - ? WHERE id = ?").run(qty, id);
+      db.query("UPDATE products SET stock_quantity = stock_quantity - ?, stock_updated_at = datetime('now') WHERE id = ?").run(qty, id);
     }
     db.query(
       "INSERT INTO product_disposals (product_id, quantity, cost_loss, reason, business_date, user_id) VALUES (?, ?, ?, ?, ?, ?)"
@@ -259,8 +262,9 @@ products.put("/:id", adminOnly, async (c) => {
   const existing = db.query("SELECT is_discontinued FROM products WHERE id = ?").get(Number(id)) as any;
   const active = existing?.is_discontinued ? 0 : is_active;
 
+  // This UPDATE always writes stock_quantity, so it always re-dates the stock.
   db.query(
-    "UPDATE products SET name = ?, category = ?, cost_price = ?, selling_price = ?, discount_price = ?, is_active = ?, track_stock = ?, stock_quantity = ?, stock_reorder_level = ? WHERE id = ?"
+    "UPDATE products SET name = ?, category = ?, cost_price = ?, selling_price = ?, discount_price = ?, is_active = ?, track_stock = ?, stock_quantity = ?, stock_reorder_level = ?, stock_updated_at = datetime('now') WHERE id = ?"
   ).run(cleanName, cat, cost_price || 0, selling_price, dp, active, ts, ts ? (stock_quantity || 0) : 0, ts ? (stock_reorder_level || 0) : 0, id);
   saveComponents(parseInt(id), components);
   return c.json({ success: true });

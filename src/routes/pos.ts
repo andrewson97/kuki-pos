@@ -270,7 +270,7 @@ pos.post("/bills/:id/refund", async (c) => {
 
       // Restore this product's own stock if it's tracked.
       if (product?.track_stock) {
-        db.query("UPDATE products SET stock_quantity = stock_quantity + ? WHERE id = ?").run(item.quantity, item.product_id);
+        db.query("UPDATE products SET stock_quantity = stock_quantity + ?, stock_updated_at = datetime('now') WHERE id = ?").run(item.quantity, item.product_id);
       } else {
         restoreStockForBill(item.product_id, item.quantity, Number(id), user.id);
       }
@@ -282,7 +282,7 @@ pos.post("/bills/:id/refund", async (c) => {
       for (const c of components) {
         const comp = db.query("SELECT track_stock FROM products WHERE id = ?").get(c.component_product_id) as any;
         if (comp?.track_stock) {
-          db.query("UPDATE products SET stock_quantity = stock_quantity + ? WHERE id = ?").run(c.quantity * item.quantity, c.component_product_id);
+          db.query("UPDATE products SET stock_quantity = stock_quantity + ?, stock_updated_at = datetime('now') WHERE id = ?").run(c.quantity * item.quantity, c.component_product_id);
         }
       }
     }

@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { getDb } from "../db/database";
 import { todayDate } from "../utils/helpers";
+import { getStockAlerts } from "../services/stock";
 
 const dashboard = new Hono();
 
@@ -18,14 +19,6 @@ dashboard.get("/stats", (c) => {
     FROM expenses WHERE expense_date = ? AND status = 'approved'
   `).get(today) as any;
 
-  const lowStockCount = db.query(`
-    SELECT
-      (SELECT COUNT(*) FROM stock_items WHERE quantity <= reorder_level AND reorder_level > 0)
-      +
-      (SELECT COUNT(*) FROM products WHERE track_stock = 1 AND is_active = 1 AND stock_reorder_level > 0 AND stock_quantity <= stock_reorder_level)
-      AS count
-  `).get() as any;
-
   const totalProducts = db.query("SELECT COUNT(*) as count FROM products WHERE is_active = 1").get() as any;
   const totalCustomers = db.query("SELECT COUNT(*) as count FROM customers").get() as any;
 
@@ -39,22 +32,11 @@ dashboard.get("/stats", (c) => {
     LIMIT 10
   `).all(today);
 
-  // Low stock — combine ingredients (stock_items) and tracked products.
-  const lowIngredients = db.query(`
-    SELECT 'ingredient' AS kind, si.name, si.quantity, si.unit, si.reorder_level, sc.name AS category_name
-    FROM stock_items si
-    LEFT JOIN stock_categories sc ON si.category_id = sc.id
-    WHERE si.quantity <= si.reorder_level AND si.reorder_level > 0
-  `).all() as any[];
-  const lowProducts = db.query(`
-    SELECT 'product' AS kind, name, stock_quantity AS quantity, 'unit' AS unit,
-           stock_reorder_level AS reorder_level, category AS category_name
-    FROM products
-    WHERE track_stock = 1 AND is_active = 1 AND stock_reorder_level > 0 AND stock_quantity <= stock_reorder_level
-  `).all() as any[];
-  const lowStockItems = [...lowIngredients, ...lowProducts]
-    .sort((a, b) => (a.quantity / Math.max(1, a.reorder_level)) - (b.quantity / Math.max(1, b.reorder_level)))
-    .slice(0, 10);
+  // Stock alerts — ingredients (stock_items) and tracked products in two lists:
+  // what needs attention now (low, plus anything that went out TODAY) and what
+  // has been out since before today. Neither list is truncated, so
+  // low_stock_count is exactly what the list shows.
+  const { low_stock_items, out_of_stock_earlier } = getStockAlerts(today);
 
   const todayCost = db.query(`
     SELECT COALESCE(SUM(bi.cost_price * bi.quantity), 0) as total_cost
@@ -72,11 +54,13 @@ dashboard.get("/stats", (c) => {
       expenses: todayExpenses.total,
       net_profit: todaySales.total_sales - todayCost.total_cost - todayExpenses.total,
     },
-    low_stock_count: lowStockCount.count,
+    low_stock_count: low_stock_items.length,
     total_products: totalProducts.count,
     total_customers: totalCustomers.count,
     recent_bills: recentBills,
-    low_stock_items: lowStockItems,
+    low_stock_items,
+    out_of_stock_earlier,
+    out_of_stock_earlier_count: out_of_stock_earlier.length,
   });
 });
 
