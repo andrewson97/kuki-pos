@@ -165,7 +165,7 @@
         const isDone = t.completion_id != null;
         return `
           <div class="task-card ${isDone ? 'done' : ''}" data-id="${t.id}">
-            <span class="task-check" onclick="toggleTask(${t.id}, ${isDone})">
+            <span class="task-check" onclick="toggleTask(${t.id}, ${isDone}, this)">
               ${isDone ? '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg>' : ''}
             </span>
             <div class="task-body">
@@ -196,24 +196,25 @@
           </div>
           <div>
             <button class="btn btn-sm btn-outline-secondary" onclick="editTask(${t.id})">Edit</button>
-            <button class="btn btn-sm btn-outline-danger" onclick="deleteTask(${t.id})">&times;</button>
+            <button class="btn btn-sm btn-outline-danger" onclick="deleteTask(${t.id}, this)">&times;</button>
           </div>
         </div>`;
       }).join('') || '<p class="text-muted small mb-0">No tasks yet</p>';
     }
 
-    async function toggleTask(id, isDone) {
-      try {
+    async function toggleTask(id, isDone, el) {
+      if (isDone && !confirm('Un-check this task?')) return;
+      // The checkbox is a <span>, so it can't be visually disabled — but withBusy's
+      // data-busy flag still swallows a second click while the first is in flight.
+      // No busy label either: the label is the tick SVG.
+      await withBusy(el, async () => {
         if (isDone) {
-          if (!confirm('Un-check this task?')) return;
           await api(`/api/tasks/${id}/complete`, { method: 'DELETE' });
         } else {
           await api(`/api/tasks/${id}/complete`, { method: 'POST', body: {} });
         }
-        loadTasks();
-      } catch (err) {
-        showToast(err.message, 'error');
-      }
+        await loadTasks();
+      });
     }
 
     function showAddTask() {
@@ -262,15 +263,13 @@
       }, 'Saving...');
     }
 
-    async function deleteTask(id) {
+    async function deleteTask(id, btn) {
       if (!confirm('Delete this task? Completion history will also be removed.')) return;
-      try {
+      await withBusy(btn, async () => {
         await api(`/api/tasks/${id}`, { method: 'DELETE' });
         showToast('Deleted');
-        loadTasks();
-      } catch (err) {
-        showToast(err.message, 'error');
-      }
+        await loadTasks();
+      }, '...');
     }
 
     function escapeHtml(s) {

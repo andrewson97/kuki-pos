@@ -137,21 +137,14 @@
 
     function setMode(m) {
       mode = m;
-      const submit = $('submit-btn');
       DENOMS.forEach(d => $('n_' + d).value = 0);
       $('notes-input').value = '';
       if (m === 'open') {
         $('form-title').textContent = todayData.close ? 'Open New Shift' : 'Opening Float';
-        submit.textContent = 'Save opening float';
-        submit.className = 'btn btn-primary';
         $('expected-block').style.display = 'none';
         $('pending-warn').style.display = 'none';
-        submit.onclick = submitOpen;
-        submit.disabled = false;
       } else {
         $('form-title').textContent = 'Closing Count';
-        submit.textContent = 'Save closing count';
-        submit.className = 'btn btn-success';
         $('expected-block').style.display = 'block';
         const open = todayData.open?.total_amount || 0;
         const sales = todayData.cash_sales || 0;
@@ -165,34 +158,58 @@
         if (todayData.pending_expenses > 0) {
           $('pending-warn').textContent = `${todayData.pending_expenses} expense(s) pending admin approval. Shift cannot close until they are approved or rejected.`;
           $('pending-warn').style.display = 'block';
-          submit.disabled = true;
         } else {
           $('pending-warn').style.display = 'none';
-          submit.disabled = false;
         }
-        submit.onclick = submitClose;
       }
+      syncSubmit();
       recalc();
     }
 
+    // Single owner of the submit button's label, colour, action and enabled state:
+    // a close is blocked while expenses wait for admin approval. withBusy()'s
+    // finally re-enables the button and restores its old label unconditionally, so
+    // every guarded submit calls this afterwards to give this logic the last word.
+    function syncSubmit() {
+      const submit = $('submit-btn');
+      if (mode === 'open') {
+        submit.textContent = 'Save opening float';
+        submit.className = 'btn btn-primary';
+        submit.onclick = submitOpen;
+        submit.disabled = false;
+      } else {
+        submit.textContent = 'Save closing count';
+        submit.className = 'btn btn-success';
+        submit.onclick = submitClose;
+        submit.disabled = todayData.pending_expenses > 0;
+      }
+    }
+
+    // #submit-btn's handler is assigned in syncSubmit(), so `this` is not passed
+    // from markup — the button is looked up by id instead. The reload stays inside
+    // the guard so the button cannot be tapped again while the page refreshes.
     async function submitOpen() {
-      try {
+      const btn = $('submit-btn');
+      await withBusy(btn, async () => {
         const body = { notes: $('notes-input').value.trim() };
         DENOMS.forEach(d => body['notes_' + d] = parseInt($('n_' + d).value) || 0);
         await api('/api/cash/open', { method: 'POST', body });
         toast('Opening float saved');
-        load();
-      } catch (err) { toast(err.message, 'error'); }
+        await load();
+      }, 'Saving…');
+      syncSubmit();
     }
 
     async function submitClose() {
-      try {
+      const btn = $('submit-btn');
+      await withBusy(btn, async () => {
         const body = { notes: $('notes-input').value.trim() };
         DENOMS.forEach(d => body['notes_' + d] = parseInt($('n_' + d).value) || 0);
         await api('/api/cash/close', { method: 'POST', body });
         toast('Closing count saved');
-        load();
-      } catch (err) { toast(err.message, 'error'); }
+        await load();
+      }, 'Saving…');
+      syncSubmit();
     }
 
     load();

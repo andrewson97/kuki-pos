@@ -130,13 +130,15 @@ export function buildKitchenTicket(data: PrintReceiptData): string {
   return lines.join("\n");
 }
 
-// Thermal printing via raw ESC/POS commands to a Windows shared printer
-export async function printReceipt(data: PrintReceiptData): Promise<{ success: boolean; text: string; error?: string }> {
-  const text = buildReceiptText(data);
+// Thermal printing via raw ESC/POS commands to a Windows shared printer.
+// This is the only part that touches the device, and it can block for seconds
+// when the printer is jammed, offline or the share is unreachable — so it is
+// kept separate from the (instant, pure) text building above.
+export async function sendToPrinter(text: string): Promise<{ success: boolean; error?: string }> {
   const settings = getSettings();
 
   if (settings.printer_type === "none") {
-    return { success: true, text, error: "No printer configured - receipt text generated only" };
+    return { success: true, error: "No printer configured - receipt text generated only" };
   }
 
   // For Windows: use the `net use` printer share or direct USB via printer name
@@ -144,7 +146,7 @@ export async function printReceipt(data: PrintReceiptData): Promise<{ success: b
   try {
     const printerAddress = settings.printer_address || "";
     if (!printerAddress) {
-      return { success: false, text, error: "No printer address configured" };
+      return { success: false, error: "No printer address configured" };
     }
 
     // ESC/POS: Initialize + text + cut + open cash drawer
@@ -156,8 +158,27 @@ export async function printReceipt(data: PrintReceiptData): Promise<{ success: b
 
     // Write to printer (Windows shared printer or USB)
     await Bun.write(printerAddress, rawData);
-    return { success: true, text };
+    return { success: true };
   } catch (err: any) {
-    return { success: false, text, error: err.message };
+    return { success: false, error: err.message };
   }
+}
+
+// Serial print queue. Callers fire-and-forget, so without this two bills rung up
+// back to back would write to the same printer share at once and interleave their
+// ESC/POS byte streams. Jobs run strictly one after another; a failed job resolves
+// (sendToPrinter never throws) so it can't break the chain for the jobs behind it.
+let printQueue: Promise<unknown> = Promise.resolve();
+
+export function queuePrint(text: string): Promise<{ success: boolean; error?: string }> {
+  const job = printQueue.then(() => sendToPrinter(text));
+  printQueue = job.catch(() => {}); // belt and braces: keep the chain alive
+  return job;
+}
+
+// Build + print in one step. Kept for callers that want to block on the device.
+export async function printReceipt(data: PrintReceiptData): Promise<{ success: boolean; text: string; error?: string }> {
+  const text = buildReceiptText(data);
+  const result = await queuePrint(text);
+  return { ...result, text };
 }

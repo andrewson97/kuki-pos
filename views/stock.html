@@ -206,7 +206,7 @@
               <button class="btn btn-sm btn-success" onclick="restock(${p.id}, this)">Add</button>
             </div>
           </td>
-          <td><button class="btn btn-sm btn-outline-danger" onclick="dispose(${p.id})" title="Dispose expired">Dispose</button></td>
+          <td><button class="btn btn-sm btn-outline-danger" onclick="dispose(${p.id}, this)" title="Dispose expired">Dispose</button></td>
         </tr>`;
       }).join('');
     }
@@ -227,7 +227,7 @@
       }, 'Adding...');
     }
 
-    async function dispose(id) {
+    async function dispose(id, btn) {
       const p = trackedProducts.find(x => x.id === id);
       if (!p) return;
       const qtyStr = prompt(`Dispose how many units of "${p.name}"?`, '1');
@@ -236,11 +236,11 @@
       if (!qty || qty <= 0) { showToast('Invalid quantity', 'error'); return; }
       const reason = prompt('Reason (e.g., expired, damaged)?', 'expired');
       if (reason === null) return;
-      try {
+      await withBusy(btn, async () => {
         const r = await api(`/api/products/${id}/dispose`, { method: 'POST', body: { quantity: qty, reason } });
         showToast(`Disposed ${qty} — loss ${formatCurrency(r.cost_loss)}`);
-        loadStock();
-      } catch (err) { showToast(err.message, 'error'); }
+        await loadStock();
+      }, 'Disposing...');
     }
 
     function renderCategoryOptions() {

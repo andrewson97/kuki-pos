@@ -41,7 +41,7 @@
                 <input type="number" class="form-control" id="add-qty" placeholder="Qty" step="0.01" style="width:100px;">
                 <button class="btn btn-outline-primary" onclick="addIngredient()">Add</button>
               </div>
-              <button class="btn btn-primary" onclick="saveRecipe()">Save Recipe</button>
+              <button class="btn btn-primary" onclick="saveRecipe(this)">Save Recipe</button>
             </div>
             <div id="recipe-placeholder" class="text-center text-muted py-5">
               Click a product on the left to manage its recipe
@@ -143,14 +143,16 @@
       renderRecipeItems(cost);
     }
 
-    async function saveRecipe() {
+    async function saveRecipe(btn) {
       if (!selectedProduct) return;
-      const result = await api(`/api/recipes/${selectedProduct.id}`, {
-        method: 'POST',
-        body: { ingredients: recipeIngredients.map(i => ({ stock_item_id: i.stock_item_id, quantity_needed: i.quantity_needed })) },
-      });
-      showToast('Recipe saved!');
-      renderRecipeItems(result.total_cost);
+      await withBusy(btn, async () => {
+        const result = await api(`/api/recipes/${selectedProduct.id}`, {
+          method: 'POST',
+          body: { ingredients: recipeIngredients.map(i => ({ stock_item_id: i.stock_item_id, quantity_needed: i.quantity_needed })) },
+        });
+        showToast('Recipe saved!');
+        renderRecipeItems(result.total_cost);
+      }, 'Saving...');
     }
   </script>
 </body>

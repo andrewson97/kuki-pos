@@ -117,10 +117,10 @@
           : '<span class="badge bg-success">APPROVED</span>';
         const actions = [];
         if (isAdmin && e.status === 'pending') {
-          actions.push(`<button class="btn btn-sm btn-success" onclick="approveExpense(${e.id})">Approve</button>`);
-          actions.push(`<button class="btn btn-sm btn-outline-danger" onclick="rejectExpense(${e.id})">Reject</button>`);
+          actions.push(`<button class="btn btn-sm btn-success" onclick="approveExpense(${e.id}, this)">Approve</button>`);
+          actions.push(`<button class="btn btn-sm btn-outline-danger" onclick="rejectExpense(${e.id}, this)">Reject</button>`);
         }
-        if (isAdmin) actions.push(`<button class="btn btn-sm btn-outline-secondary" onclick="deleteExpense(${e.id})">Delete</button>`);
+        if (isAdmin) actions.push(`<button class="btn btn-sm btn-outline-secondary" onclick="deleteExpense(${e.id}, this)">Delete</button>`);
         return `<tr class="${e.status === 'pending' ? 'table-warning' : ''}">
           <td>${formatDate(e.expense_date)}</td>
           <td><span class="badge bg-secondary">${e.category_name || '-'}</span></td>
@@ -134,21 +134,21 @@
       }).join('') || '<tr><td colspan="8" class="text-center text-muted py-4">No expenses found</td></tr>';
     }
 
-    async function approveExpense(id) {
-      try {
+    async function approveExpense(id, btn) {
+      await withBusy(btn, async () => {
         await api(`/api/expenses/${id}/approve`, { method: 'POST' });
         showToast('Expense approved');
-        loadExpenses();
-      } catch (err) { showToast('Failed: ' + err.message, 'error'); }
+        await loadExpenses();
+      }, '...');
     }
 
-    async function rejectExpense(id) {
+    async function rejectExpense(id, btn) {
       const reason = prompt('Reason for rejection (optional):') || '';
-      try {
+      await withBusy(btn, async () => {
         await api(`/api/expenses/${id}/reject`, { method: 'POST', body: { reason } });
         showToast('Expense rejected');
-        loadExpenses();
-      } catch (err) { showToast('Failed: ' + err.message, 'error'); }
+        await loadExpenses();
+      }, '...');
     }
 
     function showAddExpense() {
@@ -181,11 +181,13 @@
       }, 'Saving...');
     }
 
-    async function deleteExpense(id) {
+    async function deleteExpense(id, btn) {
       if (!confirm('Delete this expense?')) return;
-      await api(`/api/expenses/${id}`, { method: 'DELETE' });
-      showToast('Expense deleted');
-      loadExpenses();
+      await withBusy(btn, async () => {
+        await api(`/api/expenses/${id}`, { method: 'DELETE' });
+        showToast('Expense deleted');
+        await loadExpenses();
+      }, '...');
     }
 
     function showAddCategory() {

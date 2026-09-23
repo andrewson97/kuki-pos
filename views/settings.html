@@ -47,7 +47,7 @@
                 <div class="text-muted" style="font-size:0.85rem;">When on, cashiers can't take any payment until the day's opening float is recorded, and sales are blocked once the drawer is closed for the day.</div>
               </label>
             </div>
-            <button class="btn btn-primary" onclick="saveSettings()">Save Settings</button>
+            <button class="btn btn-primary" onclick="saveSettings(this)">Save Settings</button>
           </div>
 
           <div class="table-container p-4 mt-4">
@@ -108,21 +108,23 @@
       ).join('') || '<p class="text-muted">No activity yet</p>';
     }
 
-    async function saveSettings() {
-      await api('/api/settings', {
-        method: 'PUT',
-        body: {
-          shop_name: document.getElementById('s-shop-name').value,
-          shop_address: document.getElementById('s-shop-address').value,
-          shop_phone: document.getElementById('s-shop-phone').value,
-          tax_rate: document.getElementById('s-tax-rate').value,
-          currency_symbol: document.getElementById('s-currency').value,
-          printer_type: document.getElementById('s-printer-type').value,
-          printer_address: document.getElementById('s-printer-address').value,
-          enforce_cash_shift: document.getElementById('s-enforce-shift').checked ? '1' : '0',
-        },
-      });
-      showToast('Settings saved!');
+    async function saveSettings(btn) {
+      await withBusy(btn, async () => {
+        await api('/api/settings', {
+          method: 'PUT',
+          body: {
+            shop_name: document.getElementById('s-shop-name').value,
+            shop_address: document.getElementById('s-shop-address').value,
+            shop_phone: document.getElementById('s-shop-phone').value,
+            tax_rate: document.getElementById('s-tax-rate').value,
+            currency_symbol: document.getElementById('s-currency').value,
+            printer_type: document.getElementById('s-printer-type').value,
+            printer_address: document.getElementById('s-printer-address').value,
+            enforce_cash_shift: document.getElementById('s-enforce-shift').checked ? '1' : '0',
+          },
+        });
+        showToast('Settings saved!');
+      }, 'Saving...');
     }
   </script>
 </body>

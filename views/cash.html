@@ -37,7 +37,7 @@
               <label class="form-label">Notes <small class="text-muted">(optional)</small></label>
               <textarea class="form-control" id="count-notes" rows="2" placeholder="e.g., found Rs.100 on floor"></textarea>
             </div>
-            <button class="btn btn-primary w-100 mt-3" id="submit-btn" onclick="submitCount()">Save Opening Float</button>
+            <button class="btn btn-primary w-100 mt-3" id="submit-btn" onclick="submitCount(this)">Save Opening Float</button>
           </div>
         </div>
         <div class="col-md-6">
@@ -106,13 +106,10 @@
 
       if (mode === 'open') {
         formTitle.textContent = todayData.close ? 'Open New Shift' : 'Opening Float';
-        submitBtn.textContent = todayData.close ? 'Open New Shift' : 'Save Opening Float';
         submitBtn.className = 'btn btn-primary w-100 mt-3';
         expectedBlock.style.display = 'none';
-        document.getElementById('pending-warning').style.display = 'none';
       } else if (mode === 'close') {
         formTitle.textContent = 'Closing Count';
-        submitBtn.textContent = 'Save Closing Count';
         submitBtn.className = 'btn btn-success w-100 mt-3';
         expectedBlock.style.display = 'block';
         document.getElementById('opening-amt').textContent = formatCurrency(todayData.open?.total_amount || 0);
@@ -121,17 +118,29 @@
         document.getElementById('expenses-amt').textContent = formatCurrency(todayData.cash_expenses || 0);
         const expected = (todayData.open?.total_amount || 0) + (todayData.cash_sales || 0) - (todayData.cash_refunds || 0) - (todayData.cash_expenses || 0);
         document.getElementById('expected-amt').textContent = formatCurrency(expected);
-        const pendWarn = document.getElementById('pending-warning');
-        if (todayData.pending_expenses > 0) {
-          pendWarn.textContent = `${todayData.pending_expenses} expense(s) pending admin approval. Shift cannot be closed until they are approved or rejected.`;
-          pendWarn.style.display = 'block';
-          submitBtn.disabled = true;
-        } else {
-          pendWarn.style.display = 'none';
-          submitBtn.disabled = false;
-        }
       }
+      updateSubmitState();
       recalc();
+    }
+
+    // Single owner of #submit-btn's label and enabled state: a closing count is
+    // blocked while any expense is still waiting for admin approval. withBusy()
+    // re-enables and relabels the button unconditionally in its finally, so
+    // submitCount() calls this again afterwards to re-assert the real state.
+    function updateSubmitState() {
+      const submitBtn = document.getElementById('submit-btn');
+      const pendWarn = document.getElementById('pending-warning');
+      const blocked = mode === 'close' && (todayData?.pending_expenses || 0) > 0;
+      if (blocked) {
+        pendWarn.textContent = `${todayData.pending_expenses} expense(s) pending admin approval. Shift cannot be closed until they are approved or rejected.`;
+        pendWarn.style.display = 'block';
+      } else {
+        pendWarn.style.display = 'none';
+      }
+      submitBtn.textContent = mode === 'close'
+        ? 'Save Closing Count'
+        : (todayData?.close ? 'Open New Shift' : 'Save Opening Float');
+      submitBtn.disabled = blocked;
     }
 
     async function loadCash() {
@@ -172,16 +181,20 @@
       }
     }
 
-    async function submitCount() {
+    async function submitCount(btn) {
       const body = { notes: document.getElementById('count-notes').value };
       DENOMS.forEach(d => body[`notes_${d}`] = parseInt(document.getElementById(`notes_${d}`).value) || 0);
-      try {
+      await withBusy(btn, async () => {
         await api(`/api/cash/${mode}`, { method: 'POST', body });
         showToast(mode === 'open' ? 'Opening float saved' : 'Closing count saved');
-        loadCash();
-      } catch (err) {
-        showToast('Failed: ' + err.message, 'error');
-      }
+        await loadCash();
+      }, 'Saving...');
+
+      // withBusy always re-enables the button and restores the label it captured
+      // before the save. updateSubmitState() owns both: after a success the mode
+      // and label have changed, and after a failure a close may still be blocked
+      // by pending expenses — so re-assert it here, last.
+      updateSubmitState();
     }
   </script>
 </body>

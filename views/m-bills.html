@@ -94,7 +94,7 @@
           ${bill.refund_reason ? `<div style="background:#fef3c7;padding:10px;border-radius:8px;margin:10px 0;font-size:0.85rem;"><strong>Refunded:</strong> ${escapeHtml(bill.refund_reason)}<br><small>by ${escapeHtml(bill.refunded_by_name || '-')} on ${formatDateTime(bill.refunded_at)}</small></div>` : ''}
           <div class="btn-row" style="margin-top:14px;">
             <button class="btn btn-outline" onclick="reprint(${id})">Reprint</button>
-            ${canRefund ? `<button class="btn btn-danger" onclick="refundBill(${id}, ${bill.total})">Refund</button>` : ''}
+            ${canRefund ? `<button class="btn btn-danger" onclick="refundBill(this, ${id}, ${bill.total})">Refund</button>` : ''}
           </div>
           <button class="btn btn-outline" style="margin-top:8px;" onclick="closeSheet('bill-sheet')">Close</button>`;
         openSheet('bill-sheet');
@@ -111,18 +111,20 @@
       } catch (err) { toast(err.message, 'error'); }
     }
 
-    async function refundBill(id, total) {
+    // The prompt and confirm stay outside the guard: neither writes anything, and
+    // cancelling either must not leave the button disabled.
+    async function refundBill(btn, id, total) {
       const reason = prompt(`Refund Rs. ${total.toFixed(2)} — reason (required):`);
       if (reason === null) return;
       const trimmed = reason.trim();
       if (!trimmed) { toast('Reason is required', 'error'); return; }
       if (!confirm('Refund this bill? Stock will be restored.')) return;
-      try {
+      await withBusy(btn, async () => {
         await api(`/api/pos/bills/${id}/refund`, { method: 'POST', body: { reason: trimmed } });
         toast('Bill refunded');
         closeSheet('bill-sheet');
         loadBills();
-      } catch (err) { toast(err.message, 'error'); }
+      }, 'Refunding…');
     }
 
     load();

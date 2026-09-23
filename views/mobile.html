@@ -132,8 +132,8 @@
           <div class="exp-desc">${escapeHtml(e.description || '(no description)')}</div>
           <div class="exp-meta">${(e.payment_source || 'cash').toUpperCase()} · ${escapeHtml(e.submitted_by || '-')}</div>
           ${isAdmin ? `<div class="exp-actions">
-            <button class="btn btn-success btn-sm" onclick="approve(${e.id})">Approve</button>
-            <button class="btn btn-danger btn-sm" onclick="reject(${e.id})">Reject</button>
+            <button class="btn btn-success btn-sm" onclick="approve(this, ${e.id})">Approve</button>
+            <button class="btn btn-danger btn-sm" onclick="reject(this, ${e.id})">Reject</button>
           </div>` : ''}
         </div>`).join('');
     }
@@ -162,15 +162,21 @@
         </div>`).join('');
     }
 
-    async function approve(id) {
-      try { await api(`/api/expenses/${id}/approve`, { method: 'POST', body: {} }); toast('Approved'); load(); }
-      catch (err) { toast(err.message, 'error'); }
+    async function approve(btn, id) {
+      await withBusy(btn, async () => {
+        await api(`/api/expenses/${id}/approve`, { method: 'POST', body: {} });
+        toast('Approved');
+        await load();
+      }, 'Approving…');
     }
-    async function reject(id) {
+    async function reject(btn, id) {
       const reason = prompt('Reason for rejection:');
       if (reason === null) return;
-      try { await api(`/api/expenses/${id}/reject`, { method: 'POST', body: { reason: reason.trim() } }); toast('Rejected'); load(); }
-      catch (err) { toast(err.message, 'error'); }
+      await withBusy(btn, async () => {
+        await api(`/api/expenses/${id}/reject`, { method: 'POST', body: { reason: reason.trim() } });
+        toast('Rejected');
+        await load();
+      }, 'Rejecting…');
     }
     load();
     setInterval(load, 60000);

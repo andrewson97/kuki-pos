@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { getDb } from "../db/database";
 import { getUser } from "../middleware/auth";
 import { createBill, getNextTokenNumber } from "../services/billing";
-import { getSettings, buildReceiptText, buildKitchenTicket, printReceipt } from "../services/printer";
+import { getSettings, buildReceiptText, buildKitchenTicket, queuePrint } from "../services/printer";
 import { restoreStockForBill } from "../services/stock";
 import { adminOnly } from "../middleware/auth";
 import { todayDate, formatDateTime } from "../utils/helpers";
@@ -92,10 +92,21 @@ pos.post("/bill", async (c) => {
     changeGiven: fullBill.change_given,
   };
 
-  const printResult = await printReceipt(receiptData);
+  // Build the slips synchronously (pure string work), then hand the device write to
+  // the print queue WITHOUT awaiting it. The bill is already committed at this point,
+  // so a slow/jammed/offline printer must not keep the cashier staring at a frozen
+  // screen — that wait is what made them tap Pay twice.
+  const receiptText = buildReceiptText(receiptData);
   const kitchenText = buildKitchenTicket(receiptData);
+  queuePrint(receiptText).then((r) => {
+    if (!r.success) console.error(`[print] bill #${bill.id} token #${bill.token_number}: ${r.error}`);
+  }).catch((err: any) => {
+    console.error(`[print] bill #${bill.id} token #${bill.token_number}: ${err?.message || err}`);
+  });
 
-  return c.json({ ...bill, receipt_text: printResult.text, kitchen_text: kitchenText, print_success: printResult.success, print_error: printResult.error });
+  // print_queued, not print_success: the write hasn't happened yet, so we can't
+  // honestly report its outcome. Nothing in the UI reads it either way.
+  return c.json({ ...bill, receipt_text: receiptText, kitchen_text: kitchenText, print_queued: true });
 });
 
 pos.get("/bills", (c) => {
@@ -227,9 +238,18 @@ pos.get("/bills/:id/receipt", async (c) => {
     changeGiven: bill.change_given,
   };
 
-  const result = await printReceipt(receiptData);
+  // Same treatment as checkout: the caller only renders the text in a browser print
+  // popup, and a reprint hits the same shared printer — so it goes through the same
+  // queue (never concurrently with a checkout slip) and is not awaited.
+  const receiptText = buildReceiptText(receiptData);
   const kitchenText = buildKitchenTicket(receiptData);
-  return c.json({ ...result, kitchen_text: kitchenText });
+  queuePrint(receiptText).then((r) => {
+    if (!r.success) console.error(`[print] reprint bill #${bill.id} token #${bill.token_number}: ${r.error}`);
+  }).catch((err: any) => {
+    console.error(`[print] reprint bill #${bill.id} token #${bill.token_number}: ${err?.message || err}`);
+  });
+
+  return c.json({ text: receiptText, kitchen_text: kitchenText, print_queued: true });
 });
 
 export default pos;

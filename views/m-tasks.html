@@ -49,7 +49,7 @@
       const pct = Math.round((done / tasks.length) * 100);
       const items = tasks.map(t => {
         const isDone = t.completion_id != null;
-        return `<div class="task ${isDone ? 'done' : ''}" onclick="toggle(${t.id}, ${isDone})">
+        return `<div class="task ${isDone ? 'done' : ''}" onclick="toggle(this, ${t.id}, ${isDone})">
           <div class="check">${isDone ? '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg>' : ''}</div>
           <div class="body">
             <div class="title">${escapeHtml(t.title)}</div>
@@ -61,12 +61,16 @@
       return `<div class="section-header ${cls}"><span>${label}</span><span>${done}/${tasks.length} · ${pct}%</span></div>${items}`;
     }
 
-    async function toggle(id, isDone) {
-      try {
-        if (isDone) { if (!confirm('Un-check this task?')) return; await api(`/api/tasks/${id}/complete`, { method: 'DELETE' }); }
+    // The whole row is the button here, so `row` is the element withBusy guards.
+    // No busy label: the row holds markup, not text. The confirm stays outside the
+    // guard — cancelling it must not leave the row stuck.
+    async function toggle(row, id, isDone) {
+      if (isDone && !confirm('Un-check this task?')) return;
+      await withBusy(row, async () => {
+        if (isDone) await api(`/api/tasks/${id}/complete`, { method: 'DELETE' });
         else await api(`/api/tasks/${id}/complete`, { method: 'POST', body: {} });
-        load();
-      } catch (err) { toast(err.message, 'error'); }
+        await load();
+      });
     }
     load();
   </script>

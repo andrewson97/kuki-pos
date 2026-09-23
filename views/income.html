@@ -76,7 +76,7 @@
           <td class="fw-bold text-success">${formatCurrency(i.amount)}</td>
           <td>${i.description || '-'}</td>
           <td>${i.user_name || '-'}</td>
-          <td><button class="btn btn-sm btn-outline-danger" onclick="deleteIncome(${i.id})">Delete</button></td>
+          <td><button class="btn btn-sm btn-outline-danger" onclick="deleteIncome(${i.id}, this)">Delete</button></td>
         </tr>
       `).join('') || '<tr><td colspan="6" class="text-center text-muted py-4">No income records</td></tr>';
     }
@@ -106,11 +106,13 @@
       }, 'Saving...');
     }
 
-    async function deleteIncome(id) {
+    async function deleteIncome(id, btn) {
       if (!confirm('Delete this income record?')) return;
-      await api(`/api/income/${id}`, { method: 'DELETE' });
-      showToast('Income deleted');
-      loadIncome();
+      await withBusy(btn, async () => {
+        await api(`/api/income/${id}`, { method: 'DELETE' });
+        showToast('Income deleted');
+        await loadIncome();
+      }, '...');
     }
   </script>
 </body>

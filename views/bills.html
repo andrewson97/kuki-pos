@@ -118,6 +118,11 @@
       `;
 
       const refundBtn = document.getElementById('btn-refund-bill');
+      // The modal — and this button — is re-used for every bill, so clear any
+      // busy state left over from a previous bill before re-wiring it.
+      refundBtn.removeAttribute('data-busy');
+      refundBtn.disabled = false;
+      refundBtn.textContent = 'Refund Bill';
       if (bill.status === 'completed') {
         refundBtn.classList.remove('d-none');
         refundBtn.onclick = async () => {
@@ -126,14 +131,12 @@
           const trimmed = reason.trim();
           if (!trimmed) { showToast('Reason is required', 'error'); return; }
           if (!confirm(`Refund this bill for ${formatCurrency(bill.total)}?\nStock will be restored. This cannot be undone.`)) return;
-          try {
+          await withBusy(refundBtn, async () => {
             await api(`/api/pos/bills/${id}/refund`, { method: 'POST', body: { reason: trimmed } });
             showToast('Bill refunded — stock restored');
             bootstrap.Modal.getInstance(document.getElementById('billDetailModal')).hide();
-            loadBills();
-          } catch (err) {
-            showToast('Refund failed: ' + err.message, 'error');
-          }
+            await loadBills();
+          }, 'Refunding...');
         };
       } else {
         refundBtn.classList.add('d-none');

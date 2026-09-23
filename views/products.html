@@ -28,7 +28,7 @@
           <h6 class="fw-bold mb-0">Category order on POS</h6>
           <div class="d-flex gap-2">
             <button class="btn btn-sm btn-outline-secondary" onclick="resetArrangeAlpha()">Reset (A–Z)</button>
-            <button class="btn btn-sm btn-primary" onclick="saveArrange()">Save order</button>
+            <button class="btn btn-sm btn-primary" onclick="saveArrange(this)">Save order</button>
           </div>
         </div>
         <small class="text-muted">Click the ↑ / ↓ to move a category. The order here is exactly what cashiers see on the POS.</small>
@@ -95,7 +95,7 @@
               <input type="number" class="form-control" id="product-reorder" step="1" min="0" value="0">
             </div>
             <div class="col d-flex align-items-end">
-              <button type="button" class="btn btn-outline-danger w-100" id="btn-dispose" onclick="disposeProduct()" style="display:none;">Dispose (expired)…</button>
+              <button type="button" class="btn btn-outline-danger w-100" id="btn-dispose" onclick="disposeProduct(this)" style="display:none;">Dispose (expired)…</button>
             </div>
           </div>
           <div class="mb-3">
@@ -185,7 +185,7 @@
       document.getElementById('btn-dispose').style.display = (on && id) ? 'block' : 'none';
     }
 
-    async function disposeProduct() {
+    async function disposeProduct(btn) {
       const id = document.getElementById('product-id').value;
       if (!id) { showToast('Save the product first', 'warning'); return; }
       const qtyStr = prompt('How many units to dispose?', '1');
@@ -194,16 +194,14 @@
       if (!qty || qty <= 0) { showToast('Invalid quantity', 'error'); return; }
       const reason = prompt('Reason (e.g., expired, damaged)?', 'expired');
       if (reason === null) return;
-      try {
+      await withBusy(btn, async () => {
         const r = await api(`/api/products/${id}/dispose`, { method: 'POST', body: { quantity: qty, reason } });
         showToast(`Disposed ${qty} unit(s) — loss ${formatCurrency(r.cost_loss)}`);
         await loadProducts();
         // refresh form fields from cache
         const updated = allProducts.find(x => x.id === parseInt(id));
         if (updated) document.getElementById('product-qty').value = updated.stock_quantity || 0;
-      } catch (err) {
-        showToast('Dispose failed: ' + err.message, 'error');
-      }
+      }, 'Disposing...');
     }
 
     // ===== Arrange categories =====
@@ -238,15 +236,13 @@
       arrangeList = [...arrangeList].sort((a, b) => a.localeCompare(b));
       renderArrange();
     }
-    async function saveArrange() {
-      try {
+    async function saveArrange(btn) {
+      await withBusy(btn, async () => {
         await api('/api/products/category-order', { method: 'PUT', body: { order: arrangeList } });
         appSettings.category_order = JSON.stringify(arrangeList);
         showToast('Category order saved');
         document.getElementById('arrange-panel').style.display = 'none';
-      } catch (err) {
-        showToast('Save failed: ' + err.message, 'error');
-      }
+      }, 'Saving...');
     }
 
     function buildCategorySelect(currentValue) {
@@ -305,7 +301,7 @@
           <td><span class="badge bg-${p.is_active ? 'success' : 'secondary'}">${p.is_active ? 'Active' : 'Inactive'}</span></td>
           <td>
             <button class="btn btn-sm btn-outline-primary" onclick="editProduct(${p.id})">Edit</button>
-            <button class="btn btn-sm btn-outline-danger" onclick="deleteProduct(${p.id})">Delete</button>
+            <button class="btn btn-sm btn-outline-danger" onclick="deleteProduct(${p.id}, this)">Delete</button>
           </td>
         </tr>`;
       }).join('') || '<tr><td colspan="7" class="text-center text-muted py-4">No products found</td></tr>';
@@ -399,15 +395,13 @@
       }, 'Saving...');
     }
 
-    async function deleteProduct(id) {
+    async function deleteProduct(id, btn) {
       if (!confirm('Delete this product?')) return;
-      try {
+      await withBusy(btn, async () => {
         const res = await api(`/api/products/${id}`, { method: 'DELETE' });
         showToast(res.soft_deleted ? 'Product has sales history — marked inactive' : 'Product deleted');
-        loadProducts();
-      } catch (err) {
-        showToast('Delete failed: ' + err.message, 'error');
-      }
+        await loadProducts();
+      }, '...');
     }
   </script>
 </body>
