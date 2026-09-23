@@ -98,7 +98,12 @@
         <input type="hidden" id="cust-id">
       </div>
 
-      <div class="btn-row" style="margin-top:14px;">
+      <!-- Pre-payment slip. Dashed outline keeps it clearly apart from the solid
+           payment buttons below: it takes no money and completes no sale. -->
+      <button class="btn btn-outline" id="print-proforma" onclick="printProforma(this)" disabled
+              style="margin-top:14px;border-style:dashed;font-size:0.9rem;">Print bill (before payment)</button>
+
+      <div class="btn-row" style="margin-top:8px;">
         <button class="btn btn-success" id="pay-cash" onclick="openCashPay()">Cash</button>
         <button class="btn btn-primary" id="pay-card" onclick="checkout('card', null, this)">Card</button>
         <button class="btn btn-outline" id="pay-upi" onclick="checkout('upi', null, this)">UPI</button>
@@ -176,6 +181,7 @@
     let shiftBlocked = false;
     let lastReceiptText = '';
     let lastKitchenText = '';
+    let lastProformaText = '';
 
     async function load() {
       await bootMobile();
@@ -286,7 +292,19 @@
       $('s-tax-row').style.display = taxRate > 0 ? 'flex' : 'none';
       $('s-total').textContent = fmt(total);
 
+      syncProformaBtn();
       renderCartItems();
+    }
+
+    // The pre-payment slip means nothing on an empty cart, so it follows cart
+    // state from recalc() — which already runs on every add/remove/qty change,
+    // on clearCart() and on discount edits.
+    function syncProformaBtn() {
+      const b = $('print-proforma');
+      if (!b) return;
+      // withBusy() owns `disabled` while its request is in flight.
+      if (b.getAttribute('data-busy') === '1') return;
+      b.disabled = !cart.length;
     }
 
     function renderCartItems() {
@@ -541,12 +559,44 @@
       }
     }
 
+    // Print the bill BEFORE payment: hand the phone's slip over, collect the
+    // money, then tap Cash/Card/UPI as usual. Nothing is saved server-side and
+    // nothing is reset here — cart, discount and customer all stay put.
+    //
+    // It is not a payment action, so it never sets checkoutInProgress nor calls
+    // setPayButtons(): the payment buttons must stay tappable the moment the
+    // money is in hand. It only reads checkoutInProgress to refuse while a bill
+    // is being created. #print-proforma is not in PAY_IDS either, so checkout's
+    // lock/release never fights syncProformaBtn().
+    async function printProforma(btn) {
+      if (checkoutInProgress) { toast('Finishing the current sale…'); return; }
+      if (!cart.length) { toast('Cart is empty'); return; }
+
+      const result = await withBusy(btn, () => api('/api/pos/proforma', { method: 'POST', body: {
+        items: cart.map(i => ({ product_id: i.product_id, product_name: i.product_name, quantity: i.quantity, unit_price: i.unit_price, original_price: i.original_price || i.unit_price })),
+        customer_id: $('cust-id').value ? parseInt($('cust-id').value) : null,
+        discount: parseFloat($('s-discount').value) || 0,
+        tax_rate: taxRate,
+      }}), 'Printing…');
+      // withBusy() restores `disabled = false` unconditionally — re-apply the
+      // cart rule in case the cart emptied while the request was in flight.
+      syncProformaBtn();
+      if (!result) return; // failed — withBusy already showed the error toast
+
+      lastProformaText = result.proforma_text;
+      toast('Bill printed. Collect payment, then tap Cash/Card/UPI.');
+      await printSlip('proforma'); // browser popup, for tills with no thermal printer
+    }
+
     async function printSlip(which) {
-      const text = which === 'kitchen' ? lastKitchenText : lastReceiptText;
+      const text = which === 'kitchen' ? lastKitchenText : which === 'proforma' ? lastProformaText : lastReceiptText;
       if (!text) return;
       const w = window.open('', '_blank', 'width=350,height=700');
       const logoUrl = window.location.origin + '/public/img/kuki_logo.png';
-      const logoHtml = which === 'kitchen' ? '' : `<img src="${logoUrl}" alt="KUKI">`;
+      // No logo on the proforma: its text carries the shop name itself (the
+      // thermal copy has no image at all), and a logo-topped slip looks exactly
+      // like a paid receipt — which this deliberately is not.
+      const logoHtml = (which === 'kitchen' || which === 'proforma') ? '' : `<img src="${logoUrl}" alt="KUKI">`;
       w.document.write(`<html><head><style>@page{size:58mm auto;margin:0;}body{font-family:'Consolas',monospace;width:58mm;margin:0;}.slip{width:58mm;padding:0 0 2mm;text-align:center;}.slip img{max-width:45mm;max-height:22mm;display:block;margin:0 auto 2px;}pre{font-size:13px;font-weight:600;white-space:pre-wrap;text-align:left;padding:0 1mm;margin:0;}</style></head><body><div class="slip">${logoHtml}<pre>${text}</pre></div><script>window.addEventListener('load',()=>{const imgs=Array.from(document.images);Promise.all(imgs.map(i=>i.complete?null:new Promise(r=>{i.onload=i.onerror=r;}))).then(()=>{window.addEventListener('afterprint',()=>setTimeout(()=>window.close(),200));window.print();});});<\/script></body></html>`);
       w.document.close();
     }

@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { getDb } from "../db/database";
 import { getUser } from "../middleware/auth";
 import { createBill, getNextTokenNumber } from "../services/billing";
-import { getSettings, buildReceiptText, buildKitchenTicket, queuePrint } from "../services/printer";
+import { getSettings, buildReceiptText, buildKitchenTicket, buildProformaText, queuePrint } from "../services/printer";
 import { restoreStockForBill } from "../services/stock";
 import { adminOnly } from "../middleware/auth";
 import { todayDate, formatDateTime } from "../utils/helpers";
@@ -107,6 +107,86 @@ pos.post("/bill", async (c) => {
   // print_queued, not print_success: the write hasn't happened yet, so we can't
   // honestly report its outcome. Nothing in the UI reads it either way.
   return c.json({ ...bill, receipt_text: receiptText, kitchen_text: kitchenText, print_queued: true });
+});
+
+// Pre-payment slip. The cashier prints this, hands it over, takes the money and
+// THEN presses Pay, which runs POST /bill exactly as before.
+//
+// Print-only by design: no bill row, no token, no stock movement, no activity log
+// — nothing here touches the database except reading settings and (optionally) the
+// customer's name. The cart stays intact in the browser, so the sale that follows
+// is the ordinary one. That also means a proforma can be printed as many times as
+// the cashier likes without burning a token or double-counting anything.
+//
+// Auth: same as every other route on this router — mounted behind authMiddleware
+// in src/index.ts, so any logged-in user (cashier included) can print one. No
+// adminOnly here: it writes nothing, and a cashier who can ring up a sale must
+// obviously be able to quote its price first.
+pos.post("/proforma", async (c) => {
+  const user = getUser(c)!;
+  const body = await c.req.json();
+
+  if (!body.items || body.items.length === 0) {
+    return c.json({ error: "No items to print" }, 400);
+  }
+
+  const settings = getSettings();
+  const tax_rate = body.tax_rate ?? parseFloat(settings.tax_rate || "0");
+  const discount = body.discount || 0;
+  const items = body.items as {
+    product_name: string;
+    quantity: number;
+    unit_price: number;
+    original_price?: number;
+  }[];
+
+  // Totals: copied line for line from createBill() in src/services/billing.ts so
+  // the figure on this slip cannot drift from the figure the customer is charged
+  // a minute later. Same operands, same order, same lack of rounding — including
+  // NOT clamping taxableAmount at zero, because createBill() doesn't either.
+  // If billing.ts ever changes, this block must change with it.
+  const subtotal = items.reduce((sum, item) => sum + item.quantity * item.unit_price, 0);
+  const taxableAmount = subtotal - discount;
+  const tax_amount = taxableAmount * (tax_rate / 100);
+  const total = taxableAmount + tax_amount;
+
+  let customerName: string | undefined;
+  if (body.customer_id) {
+    const db = getDb();
+    const cust = db.query("SELECT name FROM customers WHERE id = ?").get(body.customer_id) as any;
+    customerName = cust?.name;
+  }
+
+  const proformaText = buildProformaText({
+    shopName: settings.shop_name || "My Cake Shop",
+    shopAddress: settings.shop_address || "",
+    shopPhone: settings.shop_phone || "",
+    billDate: formatDateTime(new Date().toISOString()),
+    items: items.map((i) => ({
+      name: i.product_name,
+      qty: i.quantity,
+      price: i.unit_price,
+      total: i.quantity * i.unit_price,
+      original_price: i.original_price,
+    })),
+    subtotal,
+    discount,
+    taxRate: tax_rate,
+    taxAmount: tax_amount,
+    total,
+    customerName,
+  });
+
+  // Same fire-and-forget as the bill route: the text is already built, and a
+  // jammed or offline printer must not freeze the till. Going through queuePrint()
+  // keeps this slip from interleaving its ESC/POS bytes with a receipt.
+  queuePrint(proformaText).then((r) => {
+    if (!r.success) console.error(`[print] proforma by ${user.username}: ${r.error}`);
+  }).catch((err: any) => {
+    console.error(`[print] proforma by ${user.username}: ${err?.message || err}`);
+  });
+
+  return c.json({ proforma_text: proformaText, print_queued: true });
 });
 
 pos.get("/bills", (c) => {

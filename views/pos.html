@@ -65,6 +65,11 @@
               <button class="btn btn-sm btn-outline-secondary" onclick="clearCustomer()" style="padding:0 6px;font-size:0.7rem;">x</button>
             </div>
           </div>
+          <!-- Pre-payment slip. Deliberately not styled like the solid payment
+               buttons below: it takes no money and completes no sale. -->
+          <button class="btn btn-sm w-100 mb-2" id="print-proforma" onclick="printProforma(this)" disabled
+                  title="Print the bill for the customer before taking payment"
+                  style="background:white;color:#495057;border:1px dashed #adb5bd;font-weight:600;">Print Bill (before payment)</button>
           <div class="d-flex gap-2 mb-2">
             <button class="btn btn-sm flex-fill" id="pay-cash" onclick="openCashModal()" style="background:#28a745;color:white;">Cash</button>
             <button class="btn btn-sm flex-fill" id="pay-card" onclick="checkout('card', null, this)" style="background:#007bff;color:white;">Card</button>
@@ -588,6 +593,20 @@
       document.getElementById('cart-subtotal').textContent = formatCurrency(subtotal);
       document.getElementById('cart-tax').textContent = formatCurrency(tax);
       document.getElementById('cart-total').textContent = formatCurrency(total);
+      syncProformaButton();
+    }
+
+    // The pre-payment slip is the one cart action with no meaning on an empty
+    // cart, so it follows cart state here — updateCartTotals() already runs on
+    // every add/remove/qty change, on clearCart() and on discount edits, so
+    // there is no separate place to keep in sync.
+    function syncProformaButton() {
+      const btn = document.getElementById('print-proforma');
+      if (!btn) return;
+      // withBusy() owns `disabled` while its request is in flight; re-enabling it
+      // from here mid-print would defeat the double-submit guard.
+      if (btn.getAttribute('data-busy') === '1') return;
+      btn.disabled = cart.length === 0;
     }
 
     function getCartTotal() {
@@ -729,6 +748,56 @@
         checkoutInProgress = false;
         updateShiftUI(); // restores the buttons, shift rule included
       }
+    }
+
+    // Print the bill BEFORE payment: hand the slip over, collect the money, then
+    // press Cash/Card/UPI as usual. Nothing is saved server-side and nothing is
+    // reset here — the cart, the discount and the chosen customer all stay put,
+    // which is the entire point of the feature.
+    //
+    // Relationship to the checkout guard: this is not a payment action, so it
+    // neither sets checkoutInProgress nor calls lockPaymentButtons() — the
+    // cashier must still be able to hit Cash the moment the money is in hand.
+    // It only *reads* checkoutInProgress, to refuse while a bill is being
+    // created: that cart is already on its way to becoming a real receipt, and a
+    // proforma printed in that window would jump the queue on the same printer
+    // and describe a sale that is seconds from being complete. #print-proforma
+    // is likewise absent from PAYMENT_BUTTON_IDS, so checkout()'s lock/release
+    // (via updateShiftUI) never touches it and never fights syncProformaButton().
+    async function printProforma(btn) {
+      if (checkoutInProgress) { showToast('Finishing the current sale — try again in a moment', 'warning'); return; }
+      if (cart.length === 0) { showToast('Cart is empty', 'warning'); return; }
+
+      const discount = parseFloat(document.getElementById('discount-input').value) || 0;
+      const customerId = document.getElementById('customer-id').value || null;
+
+      // Same body shape as checkout() — the server reuses the bill route's parsing.
+      const result = await withBusy(btn, () => api('/api/pos/proforma', {
+        method: 'POST',
+        body: {
+          items: cart.map(i => ({
+            product_id: i.product_id,
+            product_name: i.product_name,
+            quantity: i.quantity,
+            unit_price: i.unit_price,
+            original_price: i.original_price || i.unit_price,
+          })),
+          customer_id: customerId ? parseInt(customerId) : null,
+          discount,
+          tax_rate: taxRate,
+        },
+      }).catch(err => { throw new Error('Failed to print bill: ' + err.message); }), 'Printing...');
+      // withBusy() restores `disabled = false` unconditionally, so re-apply the
+      // cart rule in case the cart emptied while the request was in flight.
+      syncProformaButton();
+      if (!result) return; // failed — withBusy already showed the error toast
+
+      showToast('Bill printed. Collect payment, then press Cash/Card/UPI.');
+      // Browser fallback for shops with no thermal printer. No logo: the proforma
+      // text carries the shop name itself (the thermal copy has no image at all),
+      // and a logo-topped slip looks exactly like a paid receipt — which this
+      // deliberately is not.
+      await openAndPrint(result.proforma_text, false);
     }
 
     async function printSlip(which) {

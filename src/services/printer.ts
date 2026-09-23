@@ -95,6 +95,97 @@ export function buildReceiptText(data: PrintReceiptData): string {
   return lines.join("\n");
 }
 
+// A proforma is the slip handed over BEFORE the money changes hands: the customer
+// reads the amount, pays at the counter, and only then is a real bill rung up.
+// Nothing is stored when this is printed — there is no token, no payment method
+// and no change to show, so those fields are absent from the data on purpose.
+interface PrintProformaData {
+  shopName: string;
+  shopAddress: string;
+  shopPhone: string;
+  billDate: string;
+  items: { name: string; qty: number; price: number; total: number; original_price?: number }[];
+  subtotal: number;
+  discount: number;
+  taxRate: number;
+  taxAmount: number;
+  total: number;
+  customerName?: string;
+}
+
+// Deliberately the same width, column widths and totals alignment as
+// buildReceiptText() so both slips come off the same thermal printer looking
+// like one shop's stationery. What differs is only what must differ: a title,
+// a disclaimer, no token, and a "pay at the counter" close instead of a
+// thank-you — nothing here may read as proof that the sale happened.
+export function buildProformaText(data: PrintProformaData): string {
+  const lines: string[] = [];
+  const w = 28; // 57mm printer ~ 28 chars at 13px monospace
+
+  const center = (text: string) => {
+    const pad = Math.max(0, Math.floor((w - text.length) / 2));
+    return " ".repeat(pad) + text;
+  };
+
+  // Unlike the receipt, the shop name IS printed here: the proforma is printed
+  // without the logo image (see the POS views), so this is the only line that
+  // says whose bill the customer is holding.
+  if (data.shopName) lines.push(center(data.shopName));
+  if (data.shopAddress) lines.push(center(data.shopAddress));
+  if (data.shopPhone) lines.push(center(`Tel: ${data.shopPhone}`));
+  lines.push("=".repeat(w));
+  lines.push(center("PROFORMA INVOICE"));
+  lines.push(center("NOT A RECEIPT"));
+  lines.push(center("NOT PROOF OF PAYMENT"));
+  lines.push("=".repeat(w));
+  lines.push(`Date: ${data.billDate}`);
+  if (data.customerName) lines.push(`Customer: ${data.customerName}`);
+  lines.push("-".repeat(w));
+
+  // Header — columns sum to w=28: name(14)+sp+qty(3)+sp+amt(9)
+  lines.push(`${"Item".padEnd(14)} ${"Qty".padStart(3)} ${"Amount".padStart(9)}`);
+  lines.push("-".repeat(w));
+
+  let totalSavings = 0;
+  for (const item of data.items) {
+    const qty = String(item.qty).padStart(3);
+    const amt = item.total.toFixed(2).padStart(9);
+    if (item.name.length <= 14) {
+      // Fits on one line with qty/amt to the right.
+      lines.push(`${item.name.padEnd(14)} ${qty} ${amt}`);
+    } else {
+      // Print full name (wrapping at 28 chars), then qty/amt right-aligned on next line.
+      for (let i = 0; i < item.name.length; i += w) {
+        lines.push(item.name.substring(i, i + w));
+      }
+      lines.push(`${" ".repeat(14)} ${qty} ${amt}`);
+    }
+    if (item.original_price && item.original_price > item.price) {
+      const saved = (item.original_price - item.price) * item.qty;
+      totalSavings += saved;
+      lines.push(`  was@${item.original_price.toFixed(2)} save ${saved.toFixed(2)}`);
+    }
+  }
+
+  // Totals — left label padEnd(17) + space + value padStart(10) = 28
+  lines.push("-".repeat(w));
+  const totalLine = (label: string, value: number, neg = false) =>
+    `${label.padEnd(17)} ${(neg ? "-" : "") + value.toFixed(2)}`.padEnd(28);
+  if (totalSavings > 0) lines.push(totalLine("Item Savings", totalSavings, true));
+  lines.push(totalLine("Subtotal", data.subtotal));
+  if (data.discount > 0) lines.push(totalLine("Discount", data.discount, true));
+  if (data.taxAmount > 0) lines.push(totalLine(`Tax (${data.taxRate}%)`, data.taxAmount));
+  lines.push("=".repeat(w));
+  lines.push(totalLine("AMOUNT DUE", data.total));
+  lines.push("=".repeat(w));
+  lines.push("");
+  lines.push(center("Please pay at the counter"));
+  lines.push(center("to complete this order."));
+  lines.push(center("A receipt follows payment."));
+
+  return lines.join("\n");
+}
+
 export function buildKitchenTicket(data: PrintReceiptData): string {
   const lines: string[] = [];
   const w = 28;
