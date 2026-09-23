@@ -16,24 +16,53 @@
   </div>
 
   <div class="filters" style="gap:6px;">
-    <button class="btn btn-outline btn-sm" data-range="today" onclick="quickRange('today')">Today</button>
-    <button class="btn btn-outline btn-sm" data-range="yesterday" onclick="quickRange('yesterday')">Yesterday</button>
-    <button class="btn btn-outline btn-sm" data-range="month" onclick="quickRange('month')">This Month</button>
+    <button class="btn btn-primary btn-sm" id="mode-day-btn" onclick="setMode('day')">Day</button>
+    <button class="btn btn-outline btn-sm" id="mode-range-btn" onclick="setMode('range')">Range</button>
   </div>
-  <div class="filters">
-    <input type="date" id="filter-date">
-    <button class="btn btn-primary btn-sm" onclick="loadReport()">Load</button>
+
+  <div id="day-controls">
+    <div class="filters" style="gap:6px;">
+      <button class="btn btn-outline btn-sm" data-range="today" onclick="quickRange('today')">Today</button>
+      <button class="btn btn-outline btn-sm" data-range="yesterday" onclick="quickRange('yesterday')">Yesterday</button>
+    </div>
+    <div class="filters">
+      <input type="date" id="filter-date">
+      <button class="btn btn-primary btn-sm" onclick="loadReport()">Load</button>
+    </div>
+  </div>
+
+  <div id="range-controls" style="display:none;">
+    <div class="filters" style="gap:6px;">
+      <button class="btn btn-outline btn-sm" style="flex:1 1 calc(50% - 3px);" onclick="rangePreset('7d')">Last 7 days</button>
+      <button class="btn btn-outline btn-sm" style="flex:1 1 calc(50% - 3px);" onclick="rangePreset('30d')">Last 30 days</button>
+      <button class="btn btn-outline btn-sm" style="flex:1 1 calc(50% - 3px);" onclick="rangePreset('month')">This month</button>
+      <button class="btn btn-outline btn-sm" style="flex:1 1 calc(50% - 3px);" onclick="rangePreset('lastmonth')">Last month</button>
+    </div>
+    <div class="filters" style="gap:8px;">
+      <label style="flex:1;min-width:0;font-size:0.7rem;color:var(--ink-soft);text-transform:uppercase;letter-spacing:0.06em;">From
+        <input type="date" id="start-date" style="width:100%;margin-top:3px;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:white;">
+      </label>
+      <label style="flex:1;min-width:0;font-size:0.7rem;color:var(--ink-soft);text-transform:uppercase;letter-spacing:0.06em;">To
+        <input type="date" id="end-date" style="width:100%;margin-top:3px;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:white;">
+      </label>
+    </div>
+    <div class="filters">
+      <button class="btn btn-primary btn-sm" onclick="loadRange()">Load</button>
+    </div>
   </div>
 
   <div class="container">
     <div class="card">
       <h2 id="report-title">Daily Summary</h2>
+      <div id="range-meta" style="display:none;font-size:0.82rem;color:var(--ink-soft);"></div>
+      <div id="range-empty" class="empty" style="display:none;">No sales in this range</div>
       <div class="stat-grid">
         <div class="stat-tile"><div class="label">Sales</div><div class="val" id="r-sales">…</div></div>
         <div class="stat-tile"><div class="label">Bills</div><div class="val" id="r-bills">…</div></div>
         <div class="stat-tile"><div class="label">Cost of goods</div><div class="val" id="r-cost">…</div></div>
         <div class="stat-tile"><div class="label">Gross profit</div><div class="val green" id="r-gross">…</div></div>
         <div class="stat-tile"><div class="label">Expenses</div><div class="val red" id="r-exp">…</div></div>
+        <div class="stat-tile" id="tile-other" style="display:none;"><div class="label">Other income</div><div class="val green" id="r-other">…</div></div>
         <div class="stat-tile"><div class="label">Net profit</div><div class="val" id="r-net">…</div></div>
         <div class="stat-tile"><div class="label">Disposal loss</div><div class="val red" id="r-disposal">…</div></div>
       </div>
@@ -50,31 +79,142 @@
     </div>
 
     <div class="card">
-      <h2>Top 10 products</h2>
+      <h2>Products sold<span id="products-count"></span></h2>
       <div id="r-top"><div class="empty">Loading…</div></div>
+      <div id="r-top-summary" style="display:none;justify-content:space-between;gap:8px;padding-top:10px;"></div>
+      <button class="btn btn-outline btn-sm" id="r-top-toggle" style="display:none;margin-top:10px;" onclick="toggleTop()"></button>
     </div>
   </div>
 
   <script src="/public/js/mobile.js"></script>
   <script>
+    const TOP_VISIBLE = 15;
+    let reportMode = 'day';
+    let topProducts = [];
+    let topExpanded = false;
+
     async function load() {
       await bootMobile();
       $('filter-date').value = todayISO();
       loadReport();
     }
 
+    /* ---------- date helpers (business day aware, built on todayISO()) ---------- */
+    function addDays(iso, n) {
+      const [y, m, d] = iso.split('-').map(Number);
+      const dt = new Date(Date.UTC(y, m - 1, d));
+      dt.setUTCDate(dt.getUTCDate() + n);
+      return dt.toISOString().slice(0, 10);
+    }
+    function startOfMonth(iso) { return iso.slice(0, 7) + '-01'; }
+
+    /* ---------- mode switch ---------- */
+    function setMode(m) {
+      reportMode = m;
+      $('day-controls').style.display = m === 'day' ? 'block' : 'none';
+      $('range-controls').style.display = m === 'range' ? 'block' : 'none';
+      $('mode-day-btn').className = 'btn btn-sm ' + (m === 'day' ? 'btn-primary' : 'btn-outline');
+      $('mode-range-btn').className = 'btn btn-sm ' + (m === 'range' ? 'btn-primary' : 'btn-outline');
+      if (m === 'day') {
+        if (!$('filter-date').value) $('filter-date').value = todayISO();
+        loadReport();
+      } else if (!$('start-date').value || !$('end-date').value) {
+        rangePreset('7d');
+      } else {
+        loadRange();
+      }
+    }
+
     function quickRange(r) {
-      const d = new Date(Date.now() - 5 * 60 * 60 * 1000);
-      if (r === 'yesterday') d.setDate(d.getDate() - 1);
-      if (r === 'month') d.setDate(1);
-      $('filter-date').value = d.toLocaleDateString('en-CA', { timeZone: TZ });
+      const today = todayISO();
+      $('filter-date').value = r === 'yesterday' ? addDays(today, -1) : today;
       loadReport();
     }
 
+    function rangePreset(p) {
+      const today = todayISO();
+      let start = today, end = today;
+      if (p === '7d') start = addDays(today, -6);
+      else if (p === '30d') start = addDays(today, -29);
+      else if (p === 'month') start = startOfMonth(today);
+      else if (p === 'lastmonth') {
+        end = addDays(startOfMonth(today), -1);
+        start = startOfMonth(end);
+      }
+      $('start-date').value = start;
+      $('end-date').value = end;
+      loadRange();
+    }
+
+    /* ---------- shared renderers ---------- */
+    function qtyFmt(n) {
+      const v = Number(n || 0);
+      return Number.isInteger(v) ? String(v) : v.toFixed(2);
+    }
+
+    function renderPayment(rows) {
+      const list = rows || [];
+      if (!list.length) {
+        $('r-payment').innerHTML = '<div class="empty">No sales</div>';
+        return;
+      }
+      $('r-payment').innerHTML = list.map(p => `
+        <div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--line);">
+          <span>${(p.payment_method || '').toUpperCase()} <span style="color:var(--ink-soft);font-size:0.85rem;">· ${p.count} bills</span></span>
+          <strong>${fmt(p.total)}</strong>
+        </div>`).join('');
+    }
+
+    function renderProducts(rows) {
+      topProducts = rows || [];
+      topExpanded = false;
+      drawProducts();
+    }
+
+    function toggleTop() {
+      topExpanded = !topExpanded;
+      drawProducts();
+    }
+
+    function drawProducts() {
+      const list = topProducts;
+      $('products-count').textContent = list.length ? ` (${list.length})` : '';
+      if (!list.length) {
+        $('r-top').innerHTML = '<div class="empty">No products sold</div>';
+        $('r-top-summary').style.display = 'none';
+        $('r-top-toggle').style.display = 'none';
+        return;
+      }
+      const shown = topExpanded ? list : list.slice(0, TOP_VISIBLE);
+      $('r-top').innerHTML = shown.map((p, i) => `
+        <div style="display:flex;justify-content:space-between;gap:8px;padding:8px 0;border-bottom:1px solid var(--line);font-size:0.9rem;">
+          <span><strong>${i + 1}.</strong> ${escapeHtml(p.product_name)} <span style="color:var(--ink-soft);">× ${qtyFmt(p.total_qty)}</span></span>
+          <strong style="white-space:nowrap;">${fmt(p.total_revenue)}</strong>
+        </div>`).join('');
+
+      let totalQty = 0, totalRev = 0;
+      list.forEach(p => { totalQty += Number(p.total_qty || 0); totalRev += Number(p.total_revenue || 0); });
+      $('r-top-summary').style.display = 'flex';
+      $('r-top-summary').innerHTML = `
+        <span style="color:var(--ink-soft);font-size:0.85rem;">Total · ${qtyFmt(totalQty)} items</span>
+        <strong style="white-space:nowrap;">${fmt(totalRev)}</strong>`;
+
+      if (list.length > TOP_VISIBLE) {
+        $('r-top-toggle').style.display = 'block';
+        $('r-top-toggle').textContent = topExpanded ? 'Show less' : `Show all (${list.length})`;
+      } else {
+        $('r-top-toggle').style.display = 'none';
+      }
+    }
+
+    /* ---------- day mode ---------- */
     async function loadReport() {
       try {
         const date = $('filter-date').value || todayISO();
         $('report-title').textContent = 'Report — ' + formatDate(date);
+        $('range-meta').style.display = 'none';
+        $('range-empty').style.display = 'none';
+        $('tile-other').style.display = 'none';
         const r = await api(`/api/reports/daily?date=${date}`);
         $('r-sales').textContent = fmt(r.sales.total_sales);
         $('r-bills').textContent = r.sales.bill_count;
@@ -97,27 +237,52 @@
           $('disposals-card').style.display = 'none';
         }
 
-        if (!r.by_payment.length) {
-          $('r-payment').innerHTML = '<div class="empty">No sales</div>';
-        } else {
-          $('r-payment').innerHTML = r.by_payment.map(p => `
-            <div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--line);">
-              <span>${(p.payment_method || '').toUpperCase()} <span style="color:var(--ink-soft);font-size:0.85rem;">· ${p.count} bills</span></span>
-              <strong>${fmt(p.total)}</strong>
-            </div>`).join('');
-        }
-
-        if (!r.top_products.length) {
-          $('r-top').innerHTML = '<div class="empty">No products sold</div>';
-        } else {
-          $('r-top').innerHTML = r.top_products.map((p, i) => `
-            <div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--line);font-size:0.9rem;">
-              <span><strong>${i + 1}.</strong> ${escapeHtml(p.product_name)} <span style="color:var(--ink-soft);">× ${p.total_qty}</span></span>
-              <strong>${fmt(p.total_revenue)}</strong>
-            </div>`).join('');
-        }
+        renderPayment(r.by_payment);
+        renderProducts(r.top_products);
       } catch (err) { toast(err.message, 'error'); }
     }
+
+    /* ---------- range mode ---------- */
+    async function loadRange() {
+      try {
+        let start = $('start-date').value || todayISO();
+        let end = $('end-date').value || todayISO();
+        if (start > end) {
+          const swap = start; start = end; end = swap;
+          $('start-date').value = start;
+          $('end-date').value = end;
+        }
+        const r = await api(`/api/reports/range?start_date=${start}&end_date=${end}`);
+        const days = r.days || 1;
+        const from = formatDate(r.start_date || start);
+        const to = formatDate(r.end_date || end);
+        $('report-title').textContent = 'Range summary';
+        $('range-meta').style.display = 'block';
+        $('range-meta').textContent = `${from} — ${to} · ${days} day${days === 1 ? '' : 's'}`;
+        $('disposals-card').style.display = 'none';
+        $('tile-other').style.display = 'block';
+
+        const sales = r.sales || {};
+        const expenses = (r.expenses && r.expenses.total) || 0;
+        $('r-sales').textContent = fmt(sales.total_sales);
+        $('r-bills').textContent = sales.bill_count || 0;
+        $('r-cost').textContent = fmt(r.cost_of_goods);
+        $('r-gross').textContent = fmt(r.gross_profit);
+        $('r-gross').className = 'val ' + (r.gross_profit >= 0 ? 'green' : 'red');
+        $('r-exp').textContent = fmt(expenses);
+        $('r-other').textContent = fmt(r.other_income);
+        $('r-net').textContent = fmt(r.net_profit);
+        $('r-net').className = 'val ' + (r.net_profit >= 0 ? 'green' : 'red');
+        $('r-disposal').textContent = fmt(r.disposal_loss || 0) + (r.disposal_count ? ` · ${r.disposal_count}` : '');
+
+        $('range-empty').textContent = `No sales between ${from} and ${to}`;
+        $('range-empty').style.display = (sales.bill_count || 0) ? 'none' : 'block';
+
+        renderPayment(r.by_payment);
+        renderProducts(r.top_products);
+      } catch (err) { toast(err.message, 'error'); }
+    }
+
     load();
   </script>
 </body>

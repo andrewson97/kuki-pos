@@ -7,6 +7,11 @@
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
   <link href="/public/css/style.css" rel="stylesheet">
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+  <style>
+    .products-scroll { max-height: 480px; overflow-y: auto; }
+    .products-scroll thead th { position: sticky; top: 0; background: #fff; z-index: 2; }
+    .products-scroll tfoot td { position: sticky; bottom: 0; background: #fff; z-index: 2; }
+  </style>
 </head>
 <body>
   <div class="sidebar" id="sidebar"></div>
@@ -17,6 +22,7 @@
       <ul class="nav nav-tabs mb-3">
         <li class="nav-item"><a class="nav-link active" href="#" onclick="switchTab('monthly', this)">Monthly P&L</a></li>
         <li class="nav-item"><a class="nav-link" href="#" onclick="switchTab('daily', this)">Daily Report</a></li>
+        <li class="nav-item"><a class="nav-link" href="#" onclick="switchTab('range', this)">Custom Range</a></li>
         <li class="nav-item"><a class="nav-link" href="#" onclick="switchTab('products', this)">Top Products</a></li>
         <li class="nav-item"><a class="nav-link" href="#" onclick="switchTab('stock', this)">Stock Summary</a></li>
       </ul>
@@ -36,9 +42,12 @@
           <div class="col-md-2"><div class="stat-card"><div class="stat-label">Other Income</div><div class="stat-value" id="m-income">-</div></div></div>
           <div class="col-md-2"><div class="stat-card"><div class="stat-label">Net Profit</div><div class="stat-value" id="m-profit">-</div></div></div>
         </div>
-        <div class="row g-4">
+        <div class="row g-4 mb-4">
           <div class="col-md-8"><div class="table-container p-3"><canvas id="chart-daily-sales" height="200"></canvas></div></div>
           <div class="col-md-4"><div class="table-container p-3"><h6 class="fw-bold mb-3">Expenses by Category</h6><div id="m-exp-cats"></div></div></div>
+        </div>
+        <div class="row g-4">
+          <div class="col-12"><div class="table-container p-3"><h6 class="fw-bold mb-3">Products Sold</h6><div id="m-products"></div></div></div>
         </div>
       </div>
 
@@ -55,8 +64,46 @@
           <div class="col-md-3"><div class="stat-card"><div class="stat-label">Profit</div><div class="stat-value" id="d-profit">-</div></div></div>
         </div>
         <div class="row g-4">
-          <div class="col-md-6"><div class="table-container p-3"><h6 class="fw-bold mb-3">Payment Methods</h6><div id="d-payments"></div></div></div>
-          <div class="col-md-6"><div class="table-container p-3"><h6 class="fw-bold mb-3">Top Products</h6><div id="d-products"></div></div></div>
+          <div class="col-md-4"><div class="table-container p-3"><h6 class="fw-bold mb-3">Payment Methods</h6><div id="d-payments"></div></div></div>
+          <div class="col-md-8"><div class="table-container p-3"><h6 class="fw-bold mb-3">Products Sold</h6><div id="d-products"></div></div></div>
+        </div>
+      </div>
+
+      <!-- Custom Range -->
+      <div id="tab-range" style="display:none;">
+        <div class="d-flex gap-2 mb-2 flex-wrap align-items-center">
+          <input type="date" class="form-control" id="range-start" style="width:160px;">
+          <input type="date" class="form-control" id="range-end" style="width:160px;">
+          <button class="btn btn-primary" onclick="loadRange()">Generate</button>
+        </div>
+        <div class="d-flex gap-2 mb-3 flex-wrap align-items-center">
+          <small class="text-muted me-1">Quick:</small>
+          <button class="btn btn-sm btn-outline-secondary" onclick="rangePreset('7d')">Last 7 days</button>
+          <button class="btn btn-sm btn-outline-secondary" onclick="rangePreset('30d')">Last 30 days</button>
+          <button class="btn btn-sm btn-outline-secondary" onclick="rangePreset('month')">This month</button>
+          <button class="btn btn-sm btn-outline-secondary" onclick="rangePreset('lastmonth')">Last month</button>
+        </div>
+        <h6 class="fw-bold mb-3" id="r-header">-</h6>
+        <div class="row g-4 mb-4">
+          <div class="col-md-3"><div class="stat-card"><div class="stat-label">Bills</div><div class="stat-value" id="r-bills">-</div></div></div>
+          <div class="col-md-3"><div class="stat-card"><div class="stat-label">Total Sales</div><div class="stat-value" id="r-sales">-</div></div></div>
+          <div class="col-md-3"><div class="stat-card"><div class="stat-label">Cost of Goods</div><div class="stat-value" id="r-cost">-</div></div></div>
+          <div class="col-md-3"><div class="stat-card"><div class="stat-label">Gross Profit</div><div class="stat-value" id="r-gross">-</div></div></div>
+          <div class="col-md-3"><div class="stat-card"><div class="stat-label">Expenses</div><div class="stat-value" id="r-expenses">-</div></div></div>
+          <div class="col-md-3"><div class="stat-card"><div class="stat-label">Other Income</div><div class="stat-value" id="r-income">-</div></div></div>
+          <div class="col-md-3"><div class="stat-card"><div class="stat-label">Disposal Loss</div><div class="stat-value" id="r-disposal">-</div></div></div>
+          <div class="col-md-3"><div class="stat-card"><div class="stat-label">Net Profit</div><div class="stat-value" id="r-profit">-</div></div></div>
+        </div>
+        <div id="r-empty" class="table-container p-5 text-center text-muted" style="display:none;">No sales recorded in this date range.</div>
+        <div id="r-results" style="display:none;">
+          <div class="row g-4 mb-4">
+            <div class="col-md-8"><div class="table-container p-3"><canvas id="chart-range-sales" height="200"></canvas></div></div>
+            <div class="col-md-4"><div class="table-container p-3"><h6 class="fw-bold mb-3">Payment Methods</h6><div id="r-payments"></div></div></div>
+          </div>
+          <div class="row g-4">
+            <div class="col-md-4"><div class="table-container p-3"><h6 class="fw-bold mb-3">Expenses by Category</h6><div id="r-exp-cats"></div></div></div>
+            <div class="col-md-8"><div class="table-container p-3"><h6 class="fw-bold mb-3">Products Sold</h6><div id="r-products"></div></div></div>
+          </div>
         </div>
       </div>
 
@@ -71,8 +118,8 @@
           <button class="btn btn-primary" onclick="loadTopProducts()">Generate</button>
         </div>
         <div class="row g-4">
-          <div class="col-md-8"><div class="table-container p-3"><canvas id="chart-top-products" height="300"></canvas></div></div>
-          <div class="col-md-4"><div class="table-container p-3"><table class="table table-sm"><thead><tr><th>Product</th><th>Qty</th><th>Revenue</th></tr></thead><tbody id="tp-table"></tbody></table></div></div>
+          <div class="col-md-5"><div class="table-container p-3"><h6 class="fw-bold mb-3">Top 8 by Revenue</h6><canvas id="chart-top-products" height="300"></canvas></div></div>
+          <div class="col-md-7"><div class="table-container p-3"><h6 class="fw-bold mb-3">Products Sold</h6><div id="tp-products"></div></div></div>
         </div>
       </div>
 
@@ -91,7 +138,15 @@
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
   <script src="/public/js/app.js"></script>
   <script>
-    let dailyChart = null, productChart = null;
+    let dailyChart = null, productChart = null, rangeChart = null;
+    let rangeInitialized = false;
+    // Products-table state, keyed by table prefix (m / d / r / tp)
+    const productTables = {};
+    const MONTHS_SHORT = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+    function escapeHtml(s) {
+      return String(s == null ? '' : s).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+    }
 
     initApp('/reports', () => {
       // Populate month/year selectors
@@ -119,11 +174,113 @@
     function switchTab(tab, el) {
       document.querySelectorAll('.nav-link').forEach(a => a.classList.remove('active'));
       el.classList.add('active');
-      ['monthly','daily','products','stock'].forEach(t => {
+      ['monthly','daily','range','products','stock'].forEach(t => {
         document.getElementById('tab-' + t).style.display = t === tab ? 'block' : 'none';
       });
       if (tab === 'stock') loadStockReport();
+      if (tab === 'range' && !rangeInitialized) {
+        rangeInitialized = true;
+        rangePreset('7d');
+      }
     }
+
+    // ---------- Shared "products sold" table (filter + totals + scroll) ----------
+
+    function renderProductsTable(prefix, products) {
+      const el = document.getElementById(prefix + '-products');
+      if (!el) return;
+      const list = Array.isArray(products) ? products : [];
+      const showCost = list.some(p => p.total_cost !== undefined && p.total_cost !== null);
+      productTables[prefix] = { products: list, showCost };
+      if (!list.length) {
+        el.innerHTML = '<p class="text-muted mb-0">No products sold</p>';
+        return;
+      }
+      el.innerHTML = `
+        <div class="d-flex justify-content-between align-items-center gap-2 mb-2 flex-wrap">
+          <input type="text" class="form-control form-control-sm" id="${prefix}-prod-filter" style="width:220px;" placeholder="Filter by product name..." oninput="filterProducts('${prefix}')">
+          <small class="text-muted" id="${prefix}-prod-count"></small>
+        </div>
+        <div class="products-scroll">
+          <table class="table table-sm table-hover mb-0">
+            <thead>
+              <tr>
+                <th>Product</th>
+                <th class="text-end">Qty</th>
+                <th class="text-end">Revenue</th>
+                ${showCost ? '<th class="text-end">Cost</th><th class="text-end">Profit</th>' : ''}
+              </tr>
+            </thead>
+            <tbody id="${prefix}-prod-rows"></tbody>
+            <tfoot id="${prefix}-prod-foot" class="fw-bold"></tfoot>
+          </table>
+        </div>
+      `;
+      filterProducts(prefix);
+    }
+
+    function filterProducts(prefix) {
+      const state = productTables[prefix];
+      if (!state) return;
+      const input = document.getElementById(prefix + '-prod-filter');
+      const q = (input ? input.value : '').trim().toLowerCase();
+      const rows = q
+        ? state.products.filter(p => String(p.product_name || '').toLowerCase().includes(q))
+        : state.products;
+      const showCost = state.showCost;
+      const cols = showCost ? 5 : 3;
+
+      document.getElementById(prefix + '-prod-rows').innerHTML = rows.map(p => {
+        const cost = parseFloat(p.total_cost || 0);
+        const rev = parseFloat(p.total_revenue || 0);
+        const profit = rev - cost;
+        return `<tr>
+          <td>${escapeHtml(p.product_name)}</td>
+          <td class="text-end">${p.total_qty}</td>
+          <td class="text-end fw-bold">${formatCurrency(rev)}</td>
+          ${showCost ? `<td class="text-end text-muted">${formatCurrency(cost)}</td><td class="text-end" style="color:${profit >= 0 ? '#28a745' : '#dc3545'}">${formatCurrency(profit)}</td>` : ''}
+        </tr>`;
+      }).join('') || `<tr><td colspan="${cols}" class="text-muted text-center py-3">No matching products</td></tr>`;
+
+      const totQty = rows.reduce((s, p) => s + parseFloat(p.total_qty || 0), 0);
+      const totRev = rows.reduce((s, p) => s + parseFloat(p.total_revenue || 0), 0);
+      const totCost = rows.reduce((s, p) => s + parseFloat(p.total_cost || 0), 0);
+      const totProfit = totRev - totCost;
+      document.getElementById(prefix + '-prod-foot').innerHTML = `<tr class="border-top">
+        <td>Total</td>
+        <td class="text-end">${Math.round(totQty * 1000) / 1000}</td>
+        <td class="text-end">${formatCurrency(totRev)}</td>
+        ${showCost ? `<td class="text-end">${formatCurrency(totCost)}</td><td class="text-end" style="color:${totProfit >= 0 ? '#28a745' : '#dc3545'}">${formatCurrency(totProfit)}</td>` : ''}
+      </tr>`;
+
+      document.getElementById(prefix + '-prod-count').textContent = q
+        ? `${rows.length} of ${state.products.length} products`
+        : `${state.products.length} product${state.products.length === 1 ? '' : 's'}`;
+    }
+
+    // ---------- Date helpers (business day aware, via todayISO) ----------
+
+    function isoAddDays(iso, n) {
+      const parts = String(iso).split('-').map(Number);
+      const dt = new Date(Date.UTC(parts[0], parts[1] - 1, parts[2]));
+      dt.setUTCDate(dt.getUTCDate() + n);
+      return dt.toISOString().substring(0, 10);
+    }
+
+    function fmtISODate(iso) {
+      const parts = String(iso).split('-');
+      if (parts.length !== 3) return String(iso);
+      return `${parseInt(parts[2], 10)} ${MONTHS_SHORT[parseInt(parts[1], 10) - 1]} ${parts[0]}`;
+    }
+
+    function daysBetween(start, end) {
+      const a = start.split('-').map(Number);
+      const b = end.split('-').map(Number);
+      const diff = Date.UTC(b[0], b[1] - 1, b[2]) - Date.UTC(a[0], a[1] - 1, a[2]);
+      return Math.round(diff / 86400000) + 1;
+    }
+
+    // ---------- Monthly ----------
 
     async function loadMonthly() {
       const month = document.getElementById('report-month').value;
@@ -141,8 +298,11 @@
 
       // Expense categories
       document.getElementById('m-exp-cats').innerHTML = data.expenses.by_category.map(c =>
-        `<div class="d-flex justify-content-between py-1 border-bottom"><span>${c.category}</span><strong>${formatCurrency(c.total)}</strong></div>`
+        `<div class="d-flex justify-content-between py-1 border-bottom"><span>${escapeHtml(c.category)}</span><strong>${formatCurrency(c.total)}</strong></div>`
       ).join('') || '<p class="text-muted">No expenses</p>';
+
+      // Every product sold this month
+      renderProductsTable('m', data.top_products);
 
       // Daily sales chart
       if (dailyChart) dailyChart.destroy();
@@ -157,6 +317,8 @@
       });
     }
 
+    // ---------- Daily ----------
+
     async function loadDaily() {
       const date = document.getElementById('daily-date').value;
       const data = await api(`/api/reports/daily?date=${date}`);
@@ -166,41 +328,174 @@
       document.getElementById('d-profit').textContent = formatCurrency(data.sales.total_sales - data.expenses);
 
       document.getElementById('d-payments').innerHTML = data.by_payment.map(p =>
-        `<div class="d-flex justify-content-between py-1 border-bottom"><span>${p.payment_method.toUpperCase()} (${p.count} bills)</span><strong>${formatCurrency(p.total)}</strong></div>`
+        `<div class="d-flex justify-content-between py-1 border-bottom"><span>${escapeHtml(String(p.payment_method || '').toUpperCase())} (${p.count} bills)</span><strong>${formatCurrency(p.total)}</strong></div>`
       ).join('') || '<p class="text-muted">No sales</p>';
 
-      document.getElementById('d-products').innerHTML = data.top_products.map(p =>
-        `<div class="d-flex justify-content-between py-1 border-bottom"><span>${p.product_name} (x${p.total_qty})</span><strong>${formatCurrency(p.total_revenue)}</strong></div>`
-      ).join('') || '<p class="text-muted">No products sold</p>';
+      renderProductsTable('d', data.top_products);
     }
+
+    // ---------- Custom range ----------
+
+    function rangePreset(preset) {
+      const today = todayISO();
+      let start = today, end = today;
+      if (preset === '7d') {
+        start = isoAddDays(today, -6);
+      } else if (preset === '30d') {
+        start = isoAddDays(today, -29);
+      } else if (preset === 'month') {
+        start = today.substring(0, 8) + '01';
+      } else if (preset === 'lastmonth') {
+        const y = parseInt(today.substring(0, 4), 10);
+        const m = parseInt(today.substring(5, 7), 10);
+        const ly = m === 1 ? y - 1 : y;
+        const lm = m === 1 ? 12 : m - 1;
+        const pad = String(lm).padStart(2, '0');
+        const lastDay = new Date(Date.UTC(ly, lm, 0)).getUTCDate();
+        start = `${ly}-${pad}-01`;
+        end = `${ly}-${pad}-${String(lastDay).padStart(2, '0')}`;
+      }
+      document.getElementById('range-start').value = start;
+      document.getElementById('range-end').value = end;
+      loadRange();
+    }
+
+    async function loadRange() {
+      const startEl = document.getElementById('range-start');
+      const endEl = document.getElementById('range-end');
+      let start = startEl.value;
+      let end = endEl.value;
+      if (!start || !end) {
+        showToast('Please pick both a start and an end date', 'error');
+        return;
+      }
+      if (start > end) {
+        const tmp = start; start = end; end = tmp;
+        startEl.value = start;
+        endEl.value = end;
+        showToast('Start date was after end date - swapped them');
+      }
+
+      let data;
+      try {
+        data = await api(`/api/reports/range?start_date=${start}&end_date=${end}`);
+      } catch (err) {
+        showToast('Failed to load report: ' + err.message, 'error');
+        return;
+      }
+
+      const days = data.days || daysBetween(start, end);
+      document.getElementById('r-header').textContent =
+        `${fmtISODate(data.start_date || start)} - ${fmtISODate(data.end_date || end)} · ${days} day${days === 1 ? '' : 's'}`;
+
+      document.getElementById('r-bills').textContent = data.sales.bill_count;
+      document.getElementById('r-sales').textContent = formatCurrency(data.sales.total_sales);
+      document.getElementById('r-cost').textContent = formatCurrency(data.cost_of_goods);
+      const grossEl = document.getElementById('r-gross');
+      grossEl.textContent = formatCurrency(data.gross_profit);
+      grossEl.style.color = data.gross_profit >= 0 ? '#28a745' : '#dc3545';
+      document.getElementById('r-expenses').textContent = formatCurrency(data.expenses.total);
+      document.getElementById('r-income').textContent = formatCurrency(data.other_income);
+      document.getElementById('r-disposal').innerHTML =
+        `${formatCurrency(data.disposal_loss)} <small class="text-muted">(${data.disposal_count || 0})</small>`;
+      const netEl = document.getElementById('r-profit');
+      netEl.textContent = formatCurrency(data.net_profit);
+      netEl.style.color = data.net_profit >= 0 ? '#28a745' : '#dc3545';
+
+      const hasSales = (data.sales.bill_count || 0) > 0;
+      document.getElementById('r-empty').style.display = hasSales ? 'none' : 'block';
+      document.getElementById('r-results').style.display = hasSales ? 'block' : 'none';
+      if (!hasSales) {
+        if (rangeChart) { rangeChart.destroy(); rangeChart = null; }
+        return;
+      }
+
+      // Payment methods
+      document.getElementById('r-payments').innerHTML = `
+        <table class="table table-sm mb-0">
+          <thead><tr><th>Method</th><th class="text-end">Bills</th><th class="text-end">Total</th></tr></thead>
+          <tbody>
+            ${data.by_payment.map(p => `<tr>
+              <td>${escapeHtml(String(p.payment_method || '').toUpperCase())}</td>
+              <td class="text-end">${p.count}</td>
+              <td class="text-end fw-bold">${formatCurrency(p.total)}</td>
+            </tr>`).join('') || '<tr><td colspan="3" class="text-muted text-center py-3">No payments</td></tr>'}
+          </tbody>
+        </table>`;
+
+      // Expenses by category
+      document.getElementById('r-exp-cats').innerHTML = `
+        <table class="table table-sm mb-0">
+          <thead><tr><th>Category</th><th class="text-end">Total</th></tr></thead>
+          <tbody>
+            ${data.expenses.by_category.map(c => `<tr>
+              <td>${escapeHtml(c.category)}</td>
+              <td class="text-end fw-bold">${formatCurrency(c.total)}</td>
+            </tr>`).join('') || '<tr><td colspan="2" class="text-muted text-center py-3">No expenses</td></tr>'}
+          </tbody>
+          <tfoot class="fw-bold"><tr class="border-top"><td>Total</td><td class="text-end">${formatCurrency(data.expenses.total)}</td></tr></tfoot>
+        </table>`;
+
+      // Every product sold in the range
+      renderProductsTable('r', data.top_products);
+
+      // Daily sales chart over the range
+      if (rangeChart) rangeChart.destroy();
+      const ctx = document.getElementById('chart-range-sales').getContext('2d');
+      rangeChart = new Chart(ctx, {
+        type: 'line',
+        data: {
+          labels: data.daily_sales.map(d => d.bill_date.substring(5)),
+          datasets: [{
+            label: 'Daily Sales',
+            data: data.daily_sales.map(d => d.total_sales),
+            borderColor: '#e83e8c',
+            backgroundColor: 'rgba(232,62,140,0.15)',
+            fill: true,
+            tension: 0.25,
+          }],
+        },
+        options: { responsive: true, plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true } } },
+      });
+    }
+
+    // ---------- Top products ----------
 
     async function loadTopProducts() {
       const days = document.getElementById('top-period').value;
       const data = await api(`/api/reports/top-products?days=${days}`);
-      document.getElementById('tp-table').innerHTML = data.map(p =>
-        `<tr><td>${p.product_name}</td><td>${p.total_qty}</td><td class="fw-bold">${formatCurrency(p.total_revenue)}</td></tr>`
-      ).join('') || '<tr><td colspan="3" class="text-muted text-center">No data</td></tr>';
+      renderProductsTable('tp', data);
 
       if (productChart) productChart.destroy();
+      const top = data.slice(0, 8);
+      const rest = data.slice(8);
+      const labels = top.map(p => p.product_name);
+      const values = top.map(p => parseFloat(p.total_revenue || 0));
+      if (rest.length) {
+        labels.push(`Other (${rest.length})`);
+        values.push(rest.reduce((s, p) => s + parseFloat(p.total_revenue || 0), 0));
+      }
       const ctx = document.getElementById('chart-top-products').getContext('2d');
       productChart = new Chart(ctx, {
         type: 'doughnut',
         data: {
-          labels: data.slice(0, 8).map(p => p.product_name),
-          datasets: [{ data: data.slice(0, 8).map(p => p.total_revenue), backgroundColor: ['#e83e8c','#007bff','#28a745','#ffc107','#dc3545','#6f42c1','#17a2b8','#fd7e14'] }],
+          labels: labels,
+          datasets: [{ data: values, backgroundColor: ['#e83e8c','#007bff','#28a745','#ffc107','#dc3545','#6f42c1','#17a2b8','#fd7e14','#adb5bd'] }],
         },
         options: { responsive: true },
       });
     }
 
+    // ---------- Stock ----------
+
     async function loadStockReport() {
       const data = await api('/api/reports/stock-summary');
       document.getElementById('stock-report-table').innerHTML = data.map(s => `
         <tr class="${s.is_low ? 'table-danger' : ''}">
-          <td class="fw-bold">${s.name}</td>
-          <td>${s.category_name || '-'}</td>
+          <td class="fw-bold">${escapeHtml(s.name)}</td>
+          <td>${escapeHtml(s.category_name || '-')}</td>
           <td>${s.quantity}</td>
-          <td>${s.unit}</td>
+          <td>${escapeHtml(s.unit)}</td>
           <td>${s.is_low ? '<span class="badge bg-danger">LOW STOCK</span>' : '<span class="badge bg-success">OK</span>'}</td>
         </tr>
       `).join('') || '<tr><td colspan="5" class="text-muted text-center">No stock items</td></tr>';
