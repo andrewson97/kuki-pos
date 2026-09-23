@@ -225,6 +225,21 @@ export function buildKitchenTicket(data: PrintReceiptData): string {
 // This is the only part that touches the device, and it can block for seconds
 // when the printer is jammed, offline or the share is unreachable — so it is
 // kept separate from the (instant, pure) text building above.
+// A printer target is a Windows share, a device port, or an explicit absolute
+// path. This matters because Bun.write() CREATES missing parent directories: a
+// mistyped address (a single leading backslash instead of two, say) is treated
+// as a relative path, so every receipt is silently written into a new folder on
+// the server while the app reports printing as fine. Refuse anything that is
+// not recognisably a printer so the mistake surfaces immediately.
+export function isValidPrinterTarget(address: string): boolean {
+  const addr = (address || "").trim();
+  if (!addr) return false;
+  if (/^\\\\[^\\/]+\\[^\\/]/.test(addr)) return true;          // \\server\share
+  if (/^(LPT[1-9]|COM[1-9]|PRN):?$/i.test(addr)) return true;  // device port
+  if (/^[A-Za-z]:[\\/]/.test(addr)) return true;               // explicit absolute path
+  return false;
+}
+
 export async function sendToPrinter(text: string): Promise<{ success: boolean; error?: string }> {
   const settings = getSettings();
 
@@ -238,6 +253,12 @@ export async function sendToPrinter(text: string): Promise<{ success: boolean; e
     const printerAddress = settings.printer_address || "";
     if (!printerAddress) {
       return { success: false, error: "No printer address configured" };
+    }
+    if (!isValidPrinterTarget(printerAddress)) {
+      return {
+        success: false,
+        error: `Printer address "${printerAddress}" is not a printer share, device port or absolute path - nothing was printed. Check it on the Settings page.`,
+      };
     }
 
     // ESC/POS: Initialize + text + cut + open cash drawer

@@ -70,6 +70,32 @@ products.get("/active", (c) => {
   return c.json(rows);
 });
 
+// Registered before /:id deliberately: Hono matches in registration order, so
+// with :id first this literal path was swallowed by it and always 404'd.
+// --- Disposal / wastage tracking ---
+// History across a date range, optionally filtered by product.
+products.get("/disposals", (c) => {
+  const db = getDb();
+  const start = c.req.query("start_date");
+  const end = c.req.query("end_date");
+  const productId = c.req.query("product_id");
+  let query = `
+    SELECT d.*, p.name AS product_name, p.cost_price, u.full_name AS user_name
+    FROM product_disposals d
+    LEFT JOIN products p ON p.id = d.product_id
+    LEFT JOIN users u ON u.id = d.user_id
+  `;
+  const conds: string[] = [];
+  const params: any[] = [];
+  if (start) { conds.push("d.business_date >= ?"); params.push(start); }
+  if (end) { conds.push("d.business_date <= ?"); params.push(end); }
+  if (productId) { conds.push("d.product_id = ?"); params.push(productId); }
+  if (conds.length) query += " WHERE " + conds.join(" AND ");
+  query += " ORDER BY d.business_date DESC, d.created_at DESC";
+  const rows = db.query(query).all(...params);
+  return c.json(rows);
+});
+
 products.get("/:id", (c) => {
   const db = getDb();
   const product = db.query("SELECT * FROM products WHERE id = ?").get(c.req.param("id"));
@@ -122,29 +148,6 @@ products.post("/", adminOnly, async (c) => {
   return c.json({ id, name: cleanName, category: cat, cost_price, selling_price, discount_price: dp });
 });
 
-// --- Disposal / wastage tracking ---
-// History across a date range, optionally filtered by product.
-products.get("/disposals", (c) => {
-  const db = getDb();
-  const start = c.req.query("start_date");
-  const end = c.req.query("end_date");
-  const productId = c.req.query("product_id");
-  let query = `
-    SELECT d.*, p.name AS product_name, p.cost_price, u.full_name AS user_name
-    FROM product_disposals d
-    LEFT JOIN products p ON p.id = d.product_id
-    LEFT JOIN users u ON u.id = d.user_id
-  `;
-  const conds: string[] = [];
-  const params: any[] = [];
-  if (start) { conds.push("d.business_date >= ?"); params.push(start); }
-  if (end) { conds.push("d.business_date <= ?"); params.push(end); }
-  if (productId) { conds.push("d.product_id = ?"); params.push(productId); }
-  if (conds.length) query += " WHERE " + conds.join(" AND ");
-  query += " ORDER BY d.business_date DESC, d.created_at DESC";
-  const rows = db.query(query).all(...params);
-  return c.json(rows);
-});
 
 // Add units to a tracked product's stock (purchase / restock / adjustment).
 products.post("/:id/restock", adminOnly, async (c) => {

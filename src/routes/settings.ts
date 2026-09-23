@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import { getDb } from "../db/database";
+import { isValidPrinterTarget } from "../services/printer";
 import { adminOnly } from "../middleware/auth";
 import type { SessionUser } from "../middleware/auth";
 
@@ -16,6 +17,19 @@ settings.get("/", (c) => {
 settings.put("/", adminOnly, async (c) => {
   const updates = await c.req.json();
   const db = getDb();
+
+  // Catch a mistyped printer address here rather than letting every receipt be
+  // written silently into a folder on the server (see isValidPrinterTarget).
+  if ("printer_address" in updates) {
+    const addr = String(updates.printer_address ?? "").trim();
+    if (addr && !isValidPrinterTarget(addr)) {
+      return c.json(
+        { error: `"${addr}" does not look like a printer. Use a share (\\\\PC-NAME\\Printer), a port (LPT1:) or a full path.` },
+        400
+      );
+    }
+  }
+
   for (const [key, value] of Object.entries(updates)) {
     db.query("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)").run(key, String(value));
   }
