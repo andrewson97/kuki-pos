@@ -60,7 +60,7 @@ mobile.get("/dashboard", (c) => {
   const lowProducts = db.query(`
     SELECT 'product' AS kind, id, name, stock_quantity AS quantity, 'unit' AS unit, stock_reorder_level AS reorder_level
     FROM products
-    WHERE track_stock = 1 AND is_active = 1 AND stock_quantity <= stock_reorder_level
+    WHERE track_stock = 1 AND is_active = 1 AND stock_reorder_level > 0 AND stock_quantity <= stock_reorder_level
   `).all() as any[];
   const lowStock = [...lowIngredients, ...lowProducts]
     .sort((a, b) => (a.quantity / Math.max(1, a.reorder_level)) - (b.quantity / Math.max(1, b.reorder_level)))

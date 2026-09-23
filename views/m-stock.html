@@ -28,6 +28,16 @@
     <div id="tracked-list"></div>
   </div>
 
+  <!-- Held stock: what open carts are reserving right now -->
+  <div id="holds-section">
+    <div style="background:white;padding:12px 14px 4px;border-top:8px solid var(--bg);display:flex;align-items:center;justify-content:space-between;gap:8px;">
+      <span style="font-weight:700;color:var(--ink-soft);text-transform:uppercase;letter-spacing:0.1em;font-size:0.72rem;">Held Stock</span>
+      <button class="btn btn-outline btn-sm" id="holds-refresh" style="width:auto;flex:0 0 auto;" onclick="refreshHolds(this)">Refresh</button>
+    </div>
+    <div id="holds-note" style="background:white;padding:2px 14px 10px;font-size:0.76rem;color:var(--ink-soft);border-bottom:1px solid var(--line);"></div>
+    <div id="holds-list"></div>
+  </div>
+
   <div class="sheet" id="restock-sheet" onclick="if(event.target===this)closeSheet('restock-sheet')">
     <div class="sheet-inner">
       <div class="sheet-handle"></div>
@@ -73,24 +83,34 @@
 
   <script src="/public/js/mobile.js"></script>
   <script>
-    let items = [], cats = [], tracked = [];
+    let items = [], cats = [], tracked = [], holds = [];
+
+    // A hold has no expiry by design (the owner rejected auto-release), so a cart
+    // killed by a closed tab or a flat battery strands its stock forever. Three
+    // hours is the line: a cart only exists once the customer has confirmed the
+    // order, and a confirmed order at this counter is paid within minutes, so
+    // nothing live survives an afternoon. Highlight only — nothing is released
+    // for you. Kept in step with the same constant in views/stock.html.
+    const HOLD_STALE_HOURS = 3;
 
     async function load() {
       await bootMobile();
       if (currentUser.role !== 'admin') { $('fab').style.display = 'none'; toast('Read-only — admin needed to edit'); }
       else $('fab').style.display = 'block';
-      const [stocks, allCats, prods] = await Promise.all([
+      const [stocks, allCats, prods, activeHolds] = await Promise.all([
         api('/api/stock/items'),
         api('/api/stock/categories'),
         api('/api/products'),
+        api('/api/pos/reservations'),
       ]);
-      items = stocks; cats = allCats;
+      items = stocks; cats = allCats; holds = activeHolds;
       tracked = prods.filter(p => p.is_active && p.track_stock);
       const catOpts = '<option value="">All categories</option>' + cats.map(c => `<option value="${c.id}">${escapeHtml(c.name)}</option>`).join('');
       $('s-cat').innerHTML = catOpts;
       $('s-cat-sel').innerHTML = cats.map(c => `<option value="${c.id}">${escapeHtml(c.name)}</option>`).join('');
       render();
       renderTracked();
+      renderHolds();
       $('s-search').addEventListener('input', () => { render(); renderTracked(); });
       $('s-cat').addEventListener('change', render);
     }
@@ -253,6 +273,79 @@
         toast(`Recorded ${qty > 0 ? '+' : ''}${qty}${it ? ` — on hand ${it.quantity}` : ''}`);
         render();
       }, 'Recording…');
+    }
+
+    // ===== Held stock (cart reservations) =====
+    // Listing holds is open to any logged-in user; releasing someone else's hold
+    // is adminOnly on the server, so the Release button is rendered for admins
+    // only — this page already runs read-only for a cashier, and a button that
+    // can only ever return 403 is worse than a line of text saying who can.
+
+    // Relative age, e.g. "2h 14m". parseDbDate() (mobile.js) tags the SQLite
+    // timestamp as UTC first; subtracting a raw string would read 5h30m out in
+    // Colombo and hide every stale hold.
+    function heldFor(created_at) {
+      const dt = parseDbDate(created_at);
+      if (!dt) return { text: 'unknown', hours: 0 };
+      const mins = Math.max(0, Math.floor((Date.now() - dt.getTime()) / 60000));
+      const h = Math.floor(mins / 60);
+      return { text: h > 0 ? `${h}h ${mins % 60}m` : `${mins}m`, hours: mins / 60 };
+    }
+
+    function renderHolds() {
+      const note = $('holds-note');
+      const list = $('holds-list');
+      const isAdmin = currentUser.role === 'admin';
+
+      if (!holds.length) {
+        note.textContent = '';
+        list.innerHTML = '<div class="empty">No stock is currently held — every tracked item is free to sell.</div>';
+        return;
+      }
+
+      const stale = holds.filter(h => heldFor(h.created_at).hours >= HOLD_STALE_HOURS).length;
+      note.innerHTML = stale
+        ? `<b style="color:var(--red);">${stale} hold${stale === 1 ? '' : 's'} older than ${HOLD_STALE_HOURS}h.</b> A live cart is paid within minutes, so these were probably stranded by a closed tab or a flat tablet. Releasing one puts its stock back on sale.`
+        : `${holds.length} live hold${holds.length === 1 ? '' : 's'}. Nothing older than ${HOLD_STALE_HOURS}h.`;
+
+      list.innerHTML = holds.map(h => {
+        const age = heldFor(h.created_at);
+        const isStale = age.hours >= HOLD_STALE_HOURS;
+        const name = escapeHtml(h.product_name || `Product #${h.product_id}`);
+        return `<div class="list-item"${isStale ? ' style="background:#fff5f5;"' : ''}>
+          <div class="list-head">
+            <span class="list-title">${name}${isStale ? ' <span class="badge danger">Stale</span>' : ''}</span>
+            <span class="list-amount">${h.quantity}</span>
+          </div>
+          <div class="list-meta" style="word-break:break-all;">cart ${escapeHtml(h.cart_id || '-')} · ${escapeHtml(h.cashier_name || '-')}</div>
+          <div class="list-meta"${isStale ? ' style="color:var(--red);font-weight:600;"' : ''}>held ${escapeHtml(age.text)} · ${escapeHtml(formatDateTime(h.created_at))}</div>
+          ${isAdmin
+            ? `<button class="btn btn-danger btn-sm" style="margin-top:8px;" onclick="releaseStockHold(${h.id}, this)">Release</button>`
+            : '<div class="list-meta">Admin needed to release</div>'}
+        </div>`;
+      }).join('');
+    }
+
+    async function refreshHolds(btn) {
+      await withBusy(btn, async () => {
+        holds = await api('/api/pos/reservations');
+        renderHolds();
+      }, 'Refreshing…');
+    }
+
+    // confirm() sits OUTSIDE withBusy on purpose: the guard exists to stop a
+    // second tap while the DELETE is in flight, and a modal prompt inside it
+    // would hold the button disabled for as long as the dialog stayed open.
+    async function releaseStockHold(id, btn) {
+      const h = holds.find(x => x.id === id);
+      if (!h) return;
+      const name = h.product_name || `product #${h.product_id}`;
+      if (!confirm(`Release the hold on ${h.quantity} x "${name}" from cart ${h.cart_id}?\n\nThe stock goes back on sale immediately. If that cart is still live at another till, its sale will fail.`)) return;
+      await withBusy(btn, async () => {
+        await api(`/api/pos/reservations/${id}`, { method: 'DELETE' });
+        toast(`Released ${h.quantity} x ${name}`);
+        load();
+      }, 'Releasing…');
     }
 
     load();
