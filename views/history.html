@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Stock History - Cake Shop POS</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="/public/css/style.css" rel="stylesheet">
+  <style>
+    /* Direction is the thing the eye should catch first: a coloured rail down
+       the left of the row plus a big signed quantity. Cake sold vs cake received
+       must be readable without reading. */
+    .hist-in  { border-left: 4px solid #198754; }
+    .hist-out { border-left: 4px solid #dc3545; }
+    .hist-info { border-left: 4px solid #adb5bd; }
+    .hist-qty { font-weight: 700; font-size: 1.05rem; white-space: nowrap; }
+    .hist-qty.in  { color: #198754; }
+    .hist-qty.out { color: #dc3545; }
+    .hist-qty.info { color: #6c757d; font-weight: 500; }
+    .hist-table td { vertical-align: middle; }
+    .hist-note { color: #6c757d; font-size: 0.85rem; }
+    .hist-when small { color: #6c757d; }
+  </style>
+</head>
+<body>
+  <div class="sidebar" id="sidebar"></div>
+  <div class="main-content">
+    <div class="top-bar"><h5 class="mb-0">Stock History</h5><div id="top-bar-user"></div></div>
+    <div class="content-area">
+      <div class="d-flex flex-wrap gap-2 mb-3">
+        <input type="date" class="form-control" id="hist-start" style="width:160px;">
+        <input type="date" class="form-control" id="hist-end" style="width:160px;">
+        <select class="form-select" id="hist-item" style="width:230px;">
+          <option value="">All items</option>
+        </select>
+        <select class="form-select" id="hist-type" style="width:180px;">
+          <option value="">All movements</option>
+        </select>
+        <select class="form-select" id="hist-direction" style="width:150px;">
+          <option value="">In &amp; Out</option>
+          <option value="in">Stock IN only</option>
+          <option value="out">Stock OUT only</option>
+          <option value="info">Notes only</option>
+        </select>
+        <input type="text" class="form-control" id="hist-q" placeholder="Search item name..." style="width:200px;">
+        <button class="btn btn-primary" onclick="applyFilters()">Filter</button>
+        <button class="btn btn-outline-secondary" onclick="resetFilters()">Reset</button>
+      </div>
+
+      <div class="d-flex justify-content-between align-items-center mb-2">
+        <div class="text-muted" id="hist-summary">Loading...</div>
+        <div class="d-flex gap-3 small text-muted">
+          <span><span class="badge bg-success">&nbsp;</span> Stock in</span>
+          <span><span class="badge bg-danger">&nbsp;</span> Stock out</span>
+          <span><span class="badge bg-secondary">&nbsp;</span> Related note</span>
+        </div>
+      </div>
+
+      <div class="table-container">
+        <table class="table table-hover hist-table mb-0">
+          <thead>
+            <tr>
+              <th style="width:150px;">When</th>
+              <th>Item</th>
+              <th style="width:130px;">Movement</th>
+              <th style="width:110px;" class="text-end">Change</th>
+              <th>Why / Note</th>
+              <th style="width:140px;">Reference</th>
+              <th style="width:140px;">By</th>
+            </tr>
+          </thead>
+          <tbody id="hist-table"></tbody>
+        </table>
+      </div>
+
+      <div class="text-center mt-3">
+        <button class="btn btn-outline-primary" id="hist-more" style="display:none;" onclick="loadMore(this)">Load more</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+  <script src="/public/js/app.js"></script>
+  <script>
+    const PAGE_SIZE = 200;
+    let histRows = [];
+    let histOffset = 0;
+    let histTotal = 0;
+
+    function esc(v) {
+      if (v === null || v === undefined) return '';
+      return String(v)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
+    const TYPE_LABELS = {
+      purchase: 'Purchase',
+      usage: 'Used',
+      adjustment: 'Adjustment',
+      waste: 'Waste',
+      restock: 'Restocked',
+      sale: 'Sold',
+      disposal: 'Disposed',
+      hold_released: 'Hold released',
+      refund: 'Bill refunded',
+    };
+
+    const TYPE_BADGE = {
+      purchase: 'bg-success',
+      usage: 'bg-warning text-dark',
+      adjustment: 'bg-info text-dark',
+      waste: 'bg-danger',
+      restock: 'bg-success',
+      sale: 'bg-primary',
+      disposal: 'bg-danger',
+      hold_released: 'bg-secondary',
+      refund: 'bg-secondary',
+    };
+
+    initApp('/history', async () => {
+      const today = todayISO();
+      const firstOfMonth = today.substring(0, 8) + '01';
+      document.getElementById('hist-start').value = firstOfMonth;
+      document.getElementById('hist-end').value = today;
+      document.getElementById('hist-q').addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') applyFilters();
+      });
+      if (!await loadFilterOptions()) return;
+      await applyFilters();
+    });
+
+    function showDenied() {
+      // The API is adminOnly; the page itself is reachable by any signed-in user,
+      // so say why it is empty instead of showing a broken screen.
+      document.getElementById('hist-summary').textContent = 'Admin access required.';
+      document.getElementById('hist-table').innerHTML =
+        '<tr><td colspan="7" class="text-center text-muted py-5">This screen is for admins only.</td></tr>';
+    }
+
+    async function loadFilterOptions() {
+      let data;
+      try {
+        data = await api('/api/history/items');
+      } catch (err) {
+        showDenied();
+        return false;
+      }
+      const products = (data.products || [])
+        .map(p => `<option value="product:${p.id}">${esc(p.name)}</option>`).join('');
+      const ingredients = (data.ingredients || [])
+        .map(i => `<option value="ingredient:${i.id}">${esc(i.name)}</option>`).join('');
+      document.getElementById('hist-item').innerHTML =
+        '<option value="">All items</option>' +
+        (products ? `<optgroup label="Products">${products}</optgroup>` : '') +
+        (ingredients ? `<optgroup label="Ingredients">${ingredients}</optgroup>` : '');
+
+      const types = (data.movement_types || [])
+        .map(t => `<option value="${esc(t)}">${esc(TYPE_LABELS[t] || t)}</option>`).join('');
+      document.getElementById('hist-type').innerHTML = '<option value="">All movements</option>' + types;
+      return true;
+    }
+
+    function currentParams() {
+      const params = new URLSearchParams();
+      const s = document.getElementById('hist-start').value;
+      const e = document.getElementById('hist-end').value;
+      const item = document.getElementById('hist-item').value;
+      const type = document.getElementById('hist-type').value;
+      const dir = document.getElementById('hist-direction').value;
+      const q = document.getElementById('hist-q').value.trim();
+      if (s) params.set('start_date', s);
+      if (e) params.set('end_date', e);
+      if (item) {
+        const parts = item.split(':');
+        params.set('item_kind', parts[0]);
+        params.set('item_id', parts[1]);
+      }
+      if (type) params.set('type', type);
+      if (dir) params.set('direction', dir);
+      if (q) params.set('q', q);
+      params.set('limit', String(PAGE_SIZE));
+      return params;
+    }
+
+    async function loadHistory(reset) {
+      if (reset) {
+        histRows = [];
+        histOffset = 0;
+      }
+      const params = currentParams();
+      params.set('offset', String(histOffset));
+      const data = await api(`/api/history/stock?${params}`);
+      histRows = histRows.concat(data.rows || []);
+      histTotal = data.total || 0;
+      histOffset = histRows.length;
+      document.getElementById('hist-more').style.display = data.has_more ? '' : 'none';
+      render();
+    }
+
+    async function applyFilters() {
+      try {
+        await loadHistory(true);
+      } catch (err) {
+        showToast(err.message || 'Could not load history', 'error');
+      }
+    }
+
+    function resetFilters() {
+      const today = todayISO();
+      document.getElementById('hist-start').value = today.substring(0, 8) + '01';
+      document.getElementById('hist-end').value = today;
+      document.getElementById('hist-item').value = '';
+      document.getElementById('hist-type').value = '';
+      document.getElementById('hist-direction').value = '';
+      document.getElementById('hist-q').value = '';
+      applyFilters();
+    }
+
+    async function loadMore(btn) {
+      await withBusy(btn, async () => {
+        await loadHistory(false);
+      }, 'Loading...');
+    }
+
+    function qtyCell(r) {
+      const qty = r.quantity === null || r.quantity === undefined ? null : Number(r.quantity);
+      const unit = r.unit ? ` ${esc(r.unit)}` : '';
+      if (r.direction === 'in') {
+        return `<span class="hist-qty in">&#9650; +${qty}${unit}</span>`;
+      }
+      if (r.direction === 'out') {
+        return `<span class="hist-qty out">&#9660; −${qty}${unit}</span>`;
+      }
+      return `<span class="hist-qty info">${qty === null ? '—' : qty + unit}</span>`;
+    }
+
+    function render() {
+      const body = document.getElementById('hist-table');
+      if (!histRows.length) {
+        body.innerHTML =
+          '<tr><td colspan="7" class="text-center text-muted py-5">' +
+          '<div style="font-size:2rem;">\u{1F4E6}</div>' +
+          'No stock movements for these filters.<br>' +
+          '<small>Try widening the date range or clearing the item filter.</small>' +
+          '</td></tr>';
+        document.getElementById('hist-summary').textContent = 'No movements found';
+        return;
+      }
+
+      body.innerHTML = histRows.map(r => {
+        const dir = r.direction === 'in' ? 'in' : r.direction === 'out' ? 'out' : 'info';
+        const kindBadge = r.item_kind === 'ingredient'
+          ? '<span class="badge bg-light text-dark border">Ingredient</span>'
+          : r.item_kind === 'product'
+            ? '<span class="badge bg-light text-dark border">Product</span>'
+            : '';
+        const typeLabel = TYPE_LABELS[r.movement_type] || r.movement_type;
+        const typeBadge = TYPE_BADGE[r.movement_type] || 'bg-secondary';
+        const loss = (r.cost_loss !== null && r.cost_loss !== undefined && Number(r.cost_loss) > 0)
+          ? ` <span class="text-danger">(loss ${esc(formatCurrency(r.cost_loss))})</span>`
+          : '';
+        return `<tr class="hist-${dir}">
+          <td class="hist-when">${esc(formatDate(r.occurred_at))}<br><small>${esc(formatTime(r.occurred_at))}</small></td>
+          <td><strong>${esc(r.item_name)}</strong><br>${kindBadge}</td>
+          <td><span class="badge ${typeBadge}">${esc(typeLabel)}</span></td>
+          <td class="text-end">${qtyCell(r)}</td>
+          <td class="hist-note">${esc(r.note) || '-'}${loss}</td>
+          <td class="hist-note">${esc(r.reference) || '-'}</td>
+          <td class="hist-note">${esc(r.user_name) || '-'}</td>
+        </tr>`;
+      }).join('');
+
+      document.getElementById('hist-summary').textContent =
+        `Showing ${histRows.length} of ${histTotal} movement${histTotal === 1 ? '' : 's'}`;
+    }
+  </script>
+</body>
+</html>

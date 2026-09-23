@@ -190,6 +190,7 @@ function renderLayout(activePage) {
     { path: '/products', icon: '\u{1F382}', label: 'Products', admin: true },
     { path: '/recipes', icon: '\u{1F4D6}', label: 'Recipes', admin: true },
     { path: '/stock', icon: '\u{1F4E6}', label: 'Stock', admin: true },
+    { path: '/history', icon: '\u{1F553}', label: 'Stock History', admin: true },
     { divider: 'Finance' },
     { path: '/cash', icon: '\u{1F4B5}', label: 'Cash Drawer', admin: false },
     { path: '/expenses', icon: '\u{1F4B8}', label: 'Expenses', admin: false, badge: 'pending_expenses' },

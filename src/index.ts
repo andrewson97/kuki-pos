@@ -19,6 +19,7 @@ import reportRoutes from "./routes/reports";
 import settingsRoutes from "./routes/settings";
 import cashRoutes from "./routes/cash";
 import taskRoutes from "./routes/tasks";
+import historyRoutes from "./routes/history";
 import mobileRoutes from "./routes/mobile";
 
 // Initialize database
@@ -82,6 +83,7 @@ app.route("/api/reports", reportRoutes);
 app.route("/api/settings", settingsRoutes);
 app.route("/api/cash", cashRoutes);
 app.route("/api/tasks", taskRoutes);
+app.route("/api/history", historyRoutes);
 app.route("/api/mobile", mobileRoutes);
 
 // Auto-redirect phones hitting the main admin pages to their mobile equivalents.
@@ -126,6 +128,7 @@ const pages = [
   { path: "/m/customers", file: "views/m-customers.html" },
   { path: "/m/tasks", file: "views/m-tasks.html" },
   { path: "/recipes", file: "views/recipes.html" },
+  { path: "/history", file: "views/history.html" },
   { path: "/income", file: "views/income.html" },
   { path: "/settings", file: "views/settings.html" },
   { path: "/users", file: "views/users.html" },
