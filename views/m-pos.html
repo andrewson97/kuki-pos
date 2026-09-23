@@ -40,6 +40,11 @@
     .cart-item .qn { font-weight: 700; min-width: 22px; text-align: center; }
     .cart-item .ci-total { font-weight: 700; min-width: 70px; text-align: right; font-size: 0.92rem; }
     .cart-item .ci-rm { color: var(--red); background: transparent; border: none; font-size: 1.3rem; padding: 0 4px; }
+    /* Quick-add customer sits on top of the cart sheet (same z-index otherwise) */
+    #cust-new-sheet { z-index: 110; }
+    .cust-row { display: flex; gap: 8px; align-items: stretch; }
+    .cust-row input { flex: 1; min-width: 0; }
+    .cust-row .cust-new { flex: 0 0 auto; width: auto; padding: 0 14px; font-size: 0.85rem; white-space: nowrap; }
     .sum-row { display: flex; justify-content: space-between; padding: 4px 0; font-size: 0.9rem; }
     .sum-row.total { font-weight: 700; font-size: 1.05rem; padding: 8px 0; border-top: 1.5px solid var(--line); margin-top: 6px; }
   </style>
@@ -84,7 +89,10 @@
 
       <div class="field" style="margin-top:14px;">
         <label>Customer (optional)</label>
-        <input type="text" id="cust-search" placeholder="Search by name or phone" autocomplete="off">
+        <div class="cust-row">
+          <input type="text" id="cust-search" placeholder="Search by name or phone" autocomplete="off">
+          <button type="button" class="btn btn-outline cust-new" id="cust-new-btn" onclick="openNewCust()">+ New</button>
+        </div>
         <div id="cust-dropdown" style="display:none;background:white;border:1px solid var(--line);border-radius:8px;max-height:180px;overflow-y:auto;margin-top:4px;"></div>
         <div id="cust-selected" style="display:none;margin-top:6px;color:var(--green);font-size:0.85rem;font-weight:600;"></div>
         <input type="hidden" id="cust-id">
@@ -92,8 +100,24 @@
 
       <div class="btn-row" style="margin-top:14px;">
         <button class="btn btn-success" id="pay-cash" onclick="openCashPay()">Cash</button>
-        <button class="btn btn-primary" id="pay-card" onclick="checkout('card')">Card</button>
-        <button class="btn btn-outline" id="pay-upi" onclick="checkout('upi')">UPI</button>
+        <button class="btn btn-primary" id="pay-card" onclick="checkout('card', null, this)">Card</button>
+        <button class="btn btn-outline" id="pay-upi" onclick="checkout('upi', null, this)">UPI</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- New customer sheet (quick-add from the till; mirrors /m/customers) -->
+  <div class="sheet" id="cust-new-sheet" onclick="if(event.target===this)closeSheet('cust-new-sheet')">
+    <div class="sheet-inner">
+      <div class="sheet-handle"></div>
+      <h3>New customer</h3>
+      <div class="field"><label>Name</label><input type="text" id="nc-name"></div>
+      <div class="field"><label>Phone</label><input type="tel" id="nc-phone" inputmode="tel"></div>
+      <div class="field"><label>Address (optional)</label><input type="text" id="nc-addr"></div>
+      <div class="field"><label>Notes (optional)</label><textarea id="nc-notes" rows="2"></textarea></div>
+      <div class="btn-row">
+        <button class="btn btn-outline" onclick="closeSheet('cust-new-sheet')">Cancel</button>
+        <button class="btn btn-primary" onclick="saveNewCust(this)">Save &amp; select</button>
       </div>
     </div>
   </div>
@@ -387,6 +411,33 @@
       $('cust-selected').style.display = 'none'; $('cust-selected').textContent = '';
     }
 
+    // Quick-add a customer without leaving the till. Same fields as /m/customers.
+    function openNewCust() {
+      const typed = $('cust-search').value.trim();
+      const looksLikePhone = typed.length > 0 && /^[\d+\-\s()]+$/.test(typed);
+      $('nc-name').value = looksLikePhone ? '' : typed;
+      $('nc-phone').value = looksLikePhone ? typed : '';
+      $('nc-addr').value = '';
+      $('nc-notes').value = '';
+      $('cust-dropdown').style.display = 'none';
+      openSheet('cust-new-sheet');
+      setTimeout(() => $(looksLikePhone ? 'nc-name' : 'nc-phone').focus(), 200);
+    }
+
+    async function saveNewCust(btn) {
+      const name = $('nc-name').value.trim();
+      if (!name) { toast('Name required', 'error'); $('nc-name').focus(); return; }
+      await withBusy(btn, async () => {
+        const body = { name, phone: $('nc-phone').value.trim(), address: $('nc-addr').value.trim(), notes: $('nc-notes').value.trim() };
+        const created = await api('/api/customers', { method: 'POST', body });
+        // Keep the in-memory search list in sync so the new name is findable too.
+        customers.push({ id: created.id, name: created.name || name, phone: body.phone, address: body.address, notes: body.notes });
+        closeSheet('cust-new-sheet');
+        toast('Customer added');
+        pickCust(created.id, created.name || name); // same path as the dropdown
+      }, 'Saving…');
+    }
+
     function getCurrentTotal() {
       const subtotal = cart.reduce((s, i) => s + i.quantity * i.unit_price, 0);
       const discount = parseFloat($('s-discount').value) || 0;
@@ -412,11 +463,13 @@
         $('cash-warn').style.display = (amt > 0 && amt < total) ? 'block' : 'none';
         $('cash-confirm').disabled = amt < total;
       };
-      $('cash-confirm').onclick = () => {
+      $('cash-confirm').onclick = (ev) => {
         const amt = parseFloat($('cash-given').value) || 0;
         if (amt < total) return;
-        closeSheet('cash-sheet');
-        checkout('cash', amt);
+        // Keep the sheet up while the bill posts so the busy label on this button
+        // is actually visible; checkout() closes it once the bill exists. The
+        // button itself is guarded by withBusy(), so a second tap does nothing.
+        checkout('cash', amt, ev.currentTarget);
       };
       closeSheet('cart-sheet');
       openSheet('cash-sheet');
@@ -424,28 +477,68 @@
     }
     function quickCash(v) { $('cash-given').value = v; $('cash-given').dispatchEvent(new Event('input')); }
 
-    async function checkout(method, amountGiven) {
+    // ===== Checkout (double-submit guarded) =====
+    // POST /api/pos/bill prints the receipt inside the request, so a slow or
+    // offline printer can keep it running for many seconds while the cart sheet
+    // stays on screen with Card/UPI still tappable. A second tap there is a whole
+    // duplicate bill: duplicate sale, duplicate stock deduction, a burnt token.
+    // One flag guards the function itself, and all three payment buttons are
+    // locked for the duration — otherwise the cashier just taps another one.
+    const PAY_IDS = ['pay-cash', 'pay-card', 'pay-upi'];
+    let checkoutInProgress = false;
+
+    function setPayButtons(busy, exceptId) {
+      PAY_IDS.forEach(id => {
+        const b = $(id);
+        if (!b) return;
+        if (busy) {
+          b.style.opacity = '0.55';
+          // The trigger is left to withBusy(), which disables it, swaps in the
+          // busy label and restores both when the request settles.
+          if (id !== exceptId) b.disabled = true;
+        } else {
+          b.disabled = false;
+          b.style.opacity = '';
+        }
+      });
+    }
+
+    async function checkout(method, amountGiven, btn) {
+      if (checkoutInProgress) return;
       if (!cart.length) { toast('Cart is empty'); return; }
       if (shiftBlocked) { toast('Cash shift not open', 'error'); return; }
+      // The cash path passes #cash-confirm; otherwise use the tapped payment button.
+      const trigger = btn || $('pay-' + method);
+
+      checkoutInProgress = true;
+      setPayButtons(true, trigger ? trigger.id : null);
       try {
-        const result = await api('/api/pos/bill', { method: 'POST', body: {
+        const result = await withBusy(trigger, () => api('/api/pos/bill', { method: 'POST', body: {
           items: cart.map(i => ({ product_id: i.product_id, product_name: i.product_name, quantity: i.quantity, unit_price: i.unit_price, original_price: i.original_price || i.unit_price })),
           customer_id: $('cust-id').value ? parseInt($('cust-id').value) : null,
           discount: parseFloat($('s-discount').value) || 0,
           tax_rate: taxRate,
           payment_method: method,
           amount_given: method === 'cash' && amountGiven ? amountGiven : null,
-        }});
+        }}), 'Processing…');
+        if (!result) return; // failed — withBusy already showed the error toast
+
         lastReceiptText = result.receipt_text;
         lastKitchenText = result.kitchen_text || '';
         $('rec-token').textContent = `Token #${String(result.token_number).padStart(3,'0')}`;
         $('rec-total').textContent = fmt(result.total);
+        closeSheet('cash-sheet');
         closeSheet('cart-sheet');
         openSheet('receipt-sheet');
         clearCart();
-        const t = await api('/api/pos/token');
-        $('token-badge').textContent = `#${String(t.next_token).padStart(3,'0')}`;
-      } catch (err) { toast(err.message, 'error'); }
+        try {
+          const t = await api('/api/pos/token');
+          $('token-badge').textContent = `#${String(t.next_token).padStart(3,'0')}`;
+        } catch {}
+      } finally {
+        checkoutInProgress = false;
+        setPayButtons(false); // never leave a button stuck, success or failure
+      }
     }
 
     async function printSlip(which) {

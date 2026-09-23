@@ -44,7 +44,7 @@
           <div class="mb-3"><label class="form-label">Description</label><input type="text" class="form-control" id="inc-desc"></div>
           <div class="mb-3"><label class="form-label">Date</label><input type="date" class="form-control" id="inc-date"></div>
         </div>
-        <div class="modal-footer"><button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button><button class="btn btn-primary" onclick="saveIncome()">Save</button></div>
+        <div class="modal-footer"><button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button><button class="btn btn-primary" onclick="saveIncome(this)">Save</button></div>
       </div>
     </div>
   </div>
@@ -89,19 +89,21 @@
       new bootstrap.Modal(document.getElementById('incomeModal')).show();
     }
 
-    async function saveIncome() {
-      await api('/api/income', {
-        method: 'POST',
-        body: {
-          source: document.getElementById('inc-source').value,
-          amount: parseFloat(document.getElementById('inc-amount').value),
-          description: document.getElementById('inc-desc').value,
-          income_date: document.getElementById('inc-date').value,
-        },
-      });
-      bootstrap.Modal.getInstance(document.getElementById('incomeModal')).hide();
-      showToast('Income recorded!');
-      loadIncome();
+    async function saveIncome(btn) {
+      await withBusy(btn, async () => {
+        await api('/api/income', {
+          method: 'POST',
+          body: {
+            source: document.getElementById('inc-source').value,
+            amount: parseFloat(document.getElementById('inc-amount').value),
+            description: document.getElementById('inc-desc').value,
+            income_date: document.getElementById('inc-date').value,
+          },
+        });
+        bootstrap.Modal.getInstance(document.getElementById('incomeModal')).hide();
+        showToast('Income recorded!');
+        await loadIncome();
+      }, 'Saving...');
     }
 
     async function deleteIncome(id) {

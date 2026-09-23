@@ -36,7 +36,7 @@
           <div class="mb-3"><label class="form-label">Address</label><input type="text" class="form-control" id="cust-address"></div>
           <div class="mb-3"><label class="form-label">Notes</label><textarea class="form-control" id="cust-notes" rows="2"></textarea></div>
         </div>
-        <div class="modal-footer"><button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button><button class="btn btn-primary" onclick="saveCustomer()">Save</button></div>
+        <div class="modal-footer"><button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button><button class="btn btn-primary" onclick="saveCustomer(this)">Save</button></div>
       </div>
     </div>
   </div>
@@ -104,7 +104,7 @@
       new bootstrap.Modal(document.getElementById('customerModal')).show();
     }
 
-    async function saveCustomer() {
+    async function saveCustomer(btn) {
       const id = document.getElementById('cust-id').value;
       const data = {
         name: document.getElementById('cust-name').value,
@@ -112,11 +112,13 @@
         address: document.getElementById('cust-address').value,
         notes: document.getElementById('cust-notes').value,
       };
-      if (id) await api(`/api/customers/${id}`, { method: 'PUT', body: data });
-      else await api('/api/customers', { method: 'POST', body: data });
-      bootstrap.Modal.getInstance(document.getElementById('customerModal')).hide();
-      showToast('Customer saved!');
-      loadCustomers();
+      await withBusy(btn, async () => {
+        if (id) await api(`/api/customers/${id}`, { method: 'PUT', body: data });
+        else await api('/api/customers', { method: 'POST', body: data });
+        bootstrap.Modal.getInstance(document.getElementById('customerModal')).hide();
+        showToast('Customer saved!');
+        await loadCustomers();
+      }, 'Saving...');
     }
 
     async function viewOrders(id, name) {

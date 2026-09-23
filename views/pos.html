@@ -54,7 +54,10 @@
         </div>
         <div style="padding:10px 20px;">
           <div class="mb-2 position-relative">
-            <input type="text" class="form-control form-control-sm" id="customer-search" placeholder="Search customer (name/phone)..." autocomplete="off">
+            <div class="input-group input-group-sm">
+              <input type="text" class="form-control form-control-sm" id="customer-search" placeholder="Search customer (name/phone)..." autocomplete="off">
+              <button class="btn btn-outline-secondary" type="button" id="customer-add-btn" onclick="openNewCustomer()" title="Add a new customer" style="padding:0 10px;font-weight:700;">+</button>
+            </div>
             <input type="hidden" id="customer-id" value="">
             <div id="customer-dropdown" class="position-absolute w-100 bg-white border rounded shadow-sm" style="display:none;z-index:999;max-height:200px;overflow-y:auto;top:100%;"></div>
             <div id="customer-selected" class="d-flex align-items-center justify-content-between mt-1" style="display:none!important;">
@@ -64,8 +67,8 @@
           </div>
           <div class="d-flex gap-2 mb-2">
             <button class="btn btn-sm flex-fill" id="pay-cash" onclick="openCashModal()" style="background:#28a745;color:white;">Cash</button>
-            <button class="btn btn-sm flex-fill" id="pay-card" onclick="checkout('card')" style="background:#007bff;color:white;">Card</button>
-            <button class="btn btn-sm flex-fill" id="pay-upi" onclick="checkout('upi')" style="background:#6f42c1;color:white;">UPI</button>
+            <button class="btn btn-sm flex-fill" id="pay-card" onclick="checkout('card', null, this)" style="background:#007bff;color:white;">Card</button>
+            <button class="btn btn-sm flex-fill" id="pay-upi" onclick="checkout('upi', null, this)" style="background:#6f42c1;color:white;">UPI</button>
           </div>
         </div>
       </div>
@@ -135,6 +138,28 @@
           <button class="btn btn-outline-warning" onclick="printSlip('kitchen')">Print Kitchen Copy</button>
           <button class="btn btn-outline-secondary" onclick="printSlip('customer')">Print Customer Copy</button>
           <button class="btn btn-primary" data-bs-dismiss="modal">Done</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- New Customer Modal (quick-add from the till; mirrors the form on /customers) -->
+  <div class="modal fade" id="newCustomerModal" tabindex="-1">
+    <div class="modal-dialog">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title">New Customer</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body">
+          <div class="mb-3"><label class="form-label">Name</label><input type="text" class="form-control" id="nc-name" required></div>
+          <div class="mb-3"><label class="form-label">Phone</label><input type="text" class="form-control" id="nc-phone"></div>
+          <div class="mb-3"><label class="form-label">Address</label><input type="text" class="form-control" id="nc-address"></div>
+          <div class="mb-3"><label class="form-label">Notes</label><textarea class="form-control" id="nc-notes" rows="2"></textarea></div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button class="btn btn-primary" onclick="saveNewCustomer(this)">Save &amp; Select</button>
         </div>
       </div>
     </div>
@@ -288,6 +313,39 @@
       document.getElementById('customer-id').value = '';
       document.getElementById('customer-search').value = '';
       document.getElementById('customer-selected').style.cssText = 'display:none!important;';
+    }
+
+    // Quick-add a customer without leaving the till. Same fields as /customers.
+    function openNewCustomer() {
+      const typed = document.getElementById('customer-search').value.trim();
+      const looksLikePhone = typed.length > 0 && /^[\d+\-\s()]+$/.test(typed);
+      document.getElementById('nc-name').value = looksLikePhone ? '' : typed;
+      document.getElementById('nc-phone').value = looksLikePhone ? typed : '';
+      document.getElementById('nc-address').value = '';
+      document.getElementById('nc-notes').value = '';
+      document.getElementById('customer-dropdown').style.display = 'none';
+      new bootstrap.Modal(document.getElementById('newCustomerModal')).show();
+      setTimeout(() => document.getElementById(looksLikePhone ? 'nc-name' : 'nc-phone').focus(), 250);
+    }
+
+    async function saveNewCustomer(btn) {
+      const name = document.getElementById('nc-name').value.trim();
+      if (!name) { showToast('Customer name is required', 'warning'); document.getElementById('nc-name').focus(); return; }
+      await withBusy(btn, async () => {
+        const body = {
+          name,
+          phone: document.getElementById('nc-phone').value.trim(),
+          address: document.getElementById('nc-address').value.trim(),
+          notes: document.getElementById('nc-notes').value.trim(),
+        };
+        const created = await api('/api/customers', { method: 'POST', body });
+        // Keep the in-memory search list in sync so the new name is findable too.
+        customers.push({ id: created.id, name: created.name || name, phone: body.phone, address: body.address, notes: body.notes });
+        bootstrap.Modal.getInstance(document.getElementById('newCustomerModal')).hide();
+        showToast('Customer added');
+        // Same path as picking from the search dropdown.
+        selectCustomer(created.id, created.name || name);
+      }, 'Saving...');
     }
 
     function renderProducts() {
@@ -570,9 +628,14 @@
         document.getElementById('cash-confirm').disabled = amt < total;
       };
       document.getElementById('cash-confirm').disabled = true;
-      document.getElementById('cash-confirm').onclick = () => {
+      document.getElementById('cash-confirm').onclick = (ev) => {
         const amt = parseFloat(given.value) || 0;
         if (amt < total) return;
+        // Explicitly lock the confirm button. Hiding the modal happens to take it
+        // off screen too, but don't rely on that — a second click here would post
+        // a second bill. openCashModal() re-disables it every time it opens, and
+        // the amount handler re-enables it once a valid amount is entered.
+        ev.currentTarget.disabled = true;
         bootstrap.Modal.getInstance(document.getElementById('cashModal')).hide();
         checkout('cash', amt);
       };
@@ -587,16 +650,47 @@
       input.dispatchEvent(new Event('input'));
     }
 
-    async function checkout(paymentMethod, amountGiven) {
+    // ===== Checkout (double-submit guarded) =====
+    // POST /api/pos/bill prints the receipt inside the request, so a slow or
+    // jammed printer can keep it running for many seconds while the cart still
+    // looks untouched. A second tap in that window creates a whole duplicate
+    // bill: duplicate sale, duplicate stock deduction, a burnt token number.
+    // So: one flag for the function itself (covers keyboard shortcuts and the
+    // cash modal, which have no button of their own) plus all three payment
+    // buttons locked for the duration — otherwise the cashier just hits another
+    // one. Releasing goes through updateShiftUI() rather than `disabled = false`
+    // so the cash-shift rule stays the single source of truth for the resting
+    // state; it runs in a finally, so nothing stays stuck after a failure.
+    const PAYMENT_BUTTON_IDS = ['pay-cash', 'pay-card', 'pay-upi'];
+    let checkoutInProgress = false;
+
+    function lockPaymentButtons(exceptId) {
+      PAYMENT_BUTTON_IDS.forEach(id => {
+        const b = document.getElementById(id);
+        if (!b) return;
+        b.style.opacity = '0.5';
+        b.style.cursor = 'progress';
+        // The trigger is left to withBusy(), which disables it, swaps in the
+        // busy label and restores both when the request settles.
+        if (id !== exceptId) b.disabled = true;
+      });
+    }
+
+    async function checkout(paymentMethod, amountGiven, btn) {
+      if (checkoutInProgress) return;
       if (cart.length === 0) { showToast('Cart is empty', 'warning'); return; }
       if (shiftBlocked) { showToast(shiftBlockReason.replace(/<[^>]+>/g, ''), 'error'); return; }
 
       const discount = parseFloat(document.getElementById('discount-input').value) || 0;
       const customerId = document.getElementById('customer-id').value || null;
+      // Keyboard shortcuts and the cash modal pass no button — fall back to the
+      // matching payment button so there is always visible progress feedback.
+      const trigger = btn || document.getElementById('pay-' + paymentMethod);
 
-      let result;
+      checkoutInProgress = true;
+      lockPaymentButtons(trigger ? trigger.id : null);
       try {
-        result = await api('/api/pos/bill', {
+        const result = await withBusy(trigger, () => api('/api/pos/bill', {
           method: 'POST',
           body: {
             items: cart.map(i => ({
@@ -612,28 +706,29 @@
             payment_method: paymentMethod,
             amount_given: paymentMethod === 'cash' && amountGiven ? amountGiven : null,
           },
-        });
-      } catch (err) {
-        showToast('Failed to create bill: ' + err.message, 'error');
-        return;
+        }).catch(err => { throw new Error('Failed to create bill: ' + err.message); }), 'Processing...');
+        if (!result) return; // failed — withBusy already showed the error toast
+
+        // Bill created successfully — everything below is non-critical
+        // Show receipt
+        document.getElementById('receipt-token').textContent = `Token #${String(result.token_number).padStart(3,'0')}`;
+        document.getElementById('receipt-total').textContent = formatCurrency(result.total);
+        document.getElementById('receipt-text').textContent = result.receipt_text;
+        lastReceiptText = result.receipt_text;
+        lastKitchenText = result.kitchen_text || '';
+        new bootstrap.Modal(document.getElementById('receiptModal')).show();
+        showToast('Bill created successfully!');
+
+        // Reset cart and refresh token
+        clearCart();
+        try {
+          const token = await api('/api/pos/token');
+          document.getElementById('token-badge').textContent = `Token #${String(token.next_token).padStart(3,'0')}`;
+        } catch {}
+      } finally {
+        checkoutInProgress = false;
+        updateShiftUI(); // restores the buttons, shift rule included
       }
-
-      // Bill created successfully — everything below is non-critical
-      // Show receipt
-      document.getElementById('receipt-token').textContent = `Token #${String(result.token_number).padStart(3,'0')}`;
-      document.getElementById('receipt-total').textContent = formatCurrency(result.total);
-      document.getElementById('receipt-text').textContent = result.receipt_text;
-      lastReceiptText = result.receipt_text;
-      lastKitchenText = result.kitchen_text || '';
-      new bootstrap.Modal(document.getElementById('receiptModal')).show();
-      showToast('Bill created successfully!');
-
-      // Reset cart and refresh token
-      clearCart();
-      try {
-        const token = await api('/api/pos/token');
-        document.getElementById('token-badge').textContent = `Token #${String(token.next_token).padStart(3,'0')}`;
-      } catch {}
     }
 
     async function printSlip(which) {
@@ -666,6 +761,10 @@
 
     // Keyboard shortcuts
     document.addEventListener('keydown', (e) => {
+      // Holding a key makes the OS auto-repeat it ~30x/sec. On F10/F11 that was
+      // one bill per repeat; on F9/Escape it re-opened the modal / re-cleared the
+      // cart continuously. One guard covers every shortcut below.
+      if (e.repeat) return;
       if (e.key === 'F2') { e.preventDefault(); document.getElementById('product-search').focus(); }
       if (e.key === 'F9') { e.preventDefault(); openCashModal(); }
       if (e.key === 'F10') { e.preventDefault(); checkout('card'); }

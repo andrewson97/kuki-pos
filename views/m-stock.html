@@ -38,9 +38,9 @@
       <div class="field"><label>Note (optional)</label><input type="text" id="restock-note" placeholder="supplier, batch, etc."></div>
       <div class="btn-row">
         <button class="btn btn-outline" onclick="closeSheet('restock-sheet')">Cancel</button>
-        <button class="btn btn-success" onclick="submitRestock()">Add to stock</button>
+        <button class="btn btn-success" onclick="submitRestock(this)">Add to stock</button>
       </div>
-      <button class="btn btn-danger" style="margin-top:8px;" onclick="disposeFromSheet()">Dispose expired…</button>
+      <button class="btn btn-danger" style="margin-top:8px;" onclick="disposeFromSheet(this)">Dispose expired…</button>
     </div>
   </div>
 
@@ -60,14 +60,14 @@
       <div class="field"><label>Reorder level</label><input type="number" id="s-reorder" min="0" step="0.001" inputmode="decimal"></div>
       <div class="btn-row">
         <button class="btn btn-outline" onclick="closeSheet('stock-sheet')">Cancel</button>
-        <button class="btn btn-primary" onclick="saveItem()">Save</button>
+        <button class="btn btn-primary" onclick="saveItem(this)">Save</button>
       </div>
       <hr style="margin:18px 0;border:none;border-top:1px solid var(--line);">
       <h3 style="font-size:0.95rem;">Quick stock movement</h3>
       <div class="field"><label>Quantity change (+ in, − out)</label><input type="number" id="tx-qty" step="0.001" placeholder="e.g., 5 or -2" inputmode="decimal"></div>
       <div class="field"><label>Type</label><select id="tx-type"><option value="purchase">Purchase / Stock-in</option><option value="adjustment">Adjustment</option><option value="waste">Waste</option></select></div>
       <div class="field"><label>Reference (optional)</label><input type="text" id="tx-ref" placeholder="e.g., supplier #123"></div>
-      <button class="btn btn-success" onclick="addTx()">Record movement</button>
+      <button class="btn btn-success" onclick="addTx(this)">Record movement</button>
     </div>
   </div>
 
@@ -139,19 +139,19 @@
       openSheet('restock-sheet');
     }
 
-    async function submitRestock() {
+    async function submitRestock(btn) {
       const id = $('restock-id').value;
       const qty = parseFloat($('restock-add').value);
       if (!qty || qty <= 0) { toast('Enter a quantity', 'error'); return; }
-      try {
+      await withBusy(btn, async () => {
         await api(`/api/products/${id}/restock`, { method: 'POST', body: { quantity: qty, note: $('restock-note').value.trim() } });
         closeSheet('restock-sheet');
         toast(`Added ${qty} to stock`);
         load();
-      } catch (err) { toast(err.message, 'error'); }
+      }, 'Adding…');
     }
 
-    async function disposeFromSheet() {
+    async function disposeFromSheet(btn) {
       const id = $('restock-id').value;
       const p = tracked.find(x => x.id === parseInt(id));
       if (!p) return;
@@ -161,12 +161,12 @@
       if (!qty || qty <= 0) { toast('Invalid quantity', 'error'); return; }
       const reason = prompt('Reason (e.g., expired, damaged)?', 'expired');
       if (reason === null) return;
-      try {
+      await withBusy(btn, async () => {
         const r = await api(`/api/products/${id}/dispose`, { method: 'POST', body: { quantity: qty, reason } });
         closeSheet('restock-sheet');
         toast(`Disposed ${qty} — loss ${fmt(r.cost_loss)}`);
         load();
-      } catch (err) { toast(err.message, 'error'); }
+      }, 'Disposing…');
     }
 
     function render() {
@@ -211,7 +211,7 @@
       ['tx-qty', 'tx-ref'].forEach(id => $(id).value = '');
       openSheet('stock-sheet');
     }
-    async function saveItem() {
+    async function saveItem(btn) {
       const id = $('s-id').value;
       const body = {
         name: $('s-name').value.trim(),
@@ -222,34 +222,37 @@
         reorder_level: parseFloat($('s-reorder').value) || 0,
       };
       if (!body.name) { toast('Name required', 'error'); return; }
-      try {
+      await withBusy(btn, async () => {
         if (id) await api(`/api/stock/items/${id}`, { method: 'PUT', body });
         else await api('/api/stock/items', { method: 'POST', body });
         closeSheet('stock-sheet');
         toast('Saved');
         items = await api('/api/stock/items');
         render();
-      } catch (err) { toast(err.message, 'error'); }
+      }, 'Saving…');
     }
-    async function addTx() {
+    // This sheet deliberately stays open after a movement so several movements can
+    // be entered in a row, so the busy guard below is the ONLY thing stopping a
+    // repeat tap from moving the stock twice. On success we also clear the inputs
+    // immediately, so a tap after the guard releases hits the "enter a quantity"
+    // check instead of re-sending the same movement.
+    async function addTx(btn) {
       const id = $('s-id').value;
       if (!id) { toast('Save the item first', 'error'); return; }
       const qty = parseFloat($('tx-qty').value);
       if (!qty) { toast('Enter a quantity change', 'error'); return; }
-      try {
-        await api(`/api/stock/items/${id}/transaction`, { method: 'POST', body: {
-          type: $('tx-type').value,
-          quantity: qty,
-          reference: $('tx-ref').value.trim() || null,
-        }});
-        toast('Movement recorded');
+      const type = $('tx-type').value;
+      const reference = $('tx-ref').value.trim() || null;
+      await withBusy(btn, async () => {
+        await api(`/api/stock/items/${id}/transaction`, { method: 'POST', body: { type, quantity: qty, reference } });
+        $('tx-qty').value = '';
+        $('tx-ref').value = '';
         items = await api('/api/stock/items');
         const it = items.find(x => x.id === parseInt(id));
         if (it) { $('s-qty').value = it.quantity; }
-        $('tx-qty').value = '';
-        $('tx-ref').value = '';
+        toast(`Recorded ${qty > 0 ? '+' : ''}${qty}${it ? ` — on hand ${it.quantity}` : ''}`);
         render();
-      } catch (err) { toast(err.message, 'error'); }
+      }, 'Recording…');
     }
 
     load();

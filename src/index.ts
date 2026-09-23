@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { serveStatic } from "hono/bun";
 import { getCookie } from "hono/cookie";
+import { HTTPException } from "hono/http-exception";
 import "./utils/paths"; // side effect: ensures the data directory exists before the DB is opened
 import { runMigrations, seedDefaults } from "./db/migrations";
 import { authMiddleware } from "./middleware/auth";
@@ -25,6 +26,20 @@ runMigrations();
 seedDefaults();
 
 const app = new Hono();
+
+// Any error that escapes a route handler. Without this Hono answers with a
+// plain-text 500, which the frontend's api() cannot parse — so the user saw an
+// opaque JSON syntax error instead of a message. Log the real error here and
+// send back the same { error } shape every route uses; never the stack trace.
+app.onError((err, c) => {
+  console.error(`[error] ${c.req.method} ${c.req.path}`, err);
+  // Deliberate HTTP errors keep their status and message; anything else is an
+  // internal failure, so the client only ever sees a generic line.
+  if (err instanceof HTTPException) {
+    return c.json({ error: err.message || "Request failed" }, err.status);
+  }
+  return c.json({ error: "Something went wrong. Please try again." }, 500);
+});
 
 // Static files
 app.use("/public/*", serveStatic({ root: "./" }));

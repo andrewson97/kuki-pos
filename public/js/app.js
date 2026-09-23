@@ -12,9 +12,70 @@ async function api(url, options = {}) {
     if (res.status === 401) window.location.href = '/login';
     throw new Error('Access denied');
   }
-  const data = await res.json();
+  // The body is not always JSON. A cold-started machine, a proxy error page or an
+  // uncaught server error can answer with plain text, and parsing that blindly threw
+  // an opaque "Unexpected token E in JSON" that told the user nothing. Report the
+  // HTTP status instead.
+  const text = await res.text();
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    throw new Error(res.ok ? 'Unexpected response from server' : `Server error (${res.status})`);
+  }
   if (!res.ok) throw new Error(data.error || 'Request failed');
   return data;
+}
+
+// ===== withBusy: one-at-a-time guard for save buttons =====
+// This app runs on fly.io with auto_stop_machines and min_machines_running = 0,
+// so the first request after an idle period pays a cold start and can take
+// several seconds. Nothing on the server de-duplicates writes, so a user staring
+// at a button that looks untouched clicks it again and again and ends up with N
+// duplicate rows. withBusy() disables the button, optionally swaps in a busy
+// label, and refuses to run the action again until the first one settles.
+// It also catches errors so a failed save surfaces as a toast instead of dying
+// silently in the console — callers never need their own try/catch.
+const busyFns = new Set();
+
+async function withBusy(btn, fn, busyLabel) {
+  const el = typeof btn === 'string' ? document.getElementById(btn) : btn;
+
+  // Re-entry guard. With an element the state lives on the element itself, so it
+  // survives re-renders of the surrounding markup; without one we fall back to a
+  // module-level set keyed off the function.
+  if (el) {
+    if (el.getAttribute('data-busy') === '1') return;
+  } else {
+    if (busyFns.has(fn)) return;
+    busyFns.add(fn);
+  }
+
+  let prevLabel = null;
+  if (el) {
+    el.setAttribute('data-busy', '1');
+    el.disabled = true;
+    if (busyLabel) {
+      prevLabel = el.textContent;
+      el.textContent = busyLabel;
+    }
+  }
+
+  try {
+    return await fn();
+  } catch (err) {
+    showToast((err && err.message) || 'Something went wrong. Please try again.', 'error');
+    return undefined;
+  } finally {
+    // Always restore, even if fn() threw or closed the modal the button lives in.
+    if (el) {
+      el.removeAttribute('data-busy');
+      el.disabled = false;
+      if (prevLabel !== null) el.textContent = prevLabel;
+    } else {
+      busyFns.delete(fn);
+    }
+  }
 }
 
 function showToast(message, type = 'success') {

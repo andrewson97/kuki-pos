@@ -50,7 +50,7 @@
           <tbody id="usage-items-body"></tbody>
         </table>
         <div id="usage-empty" class="text-center text-muted py-3">Search and add items above</div>
-        <button class="btn btn-warning w-100" onclick="submitUsage()" id="usage-submit-btn" disabled>Confirm Usage</button>
+        <button class="btn btn-warning w-100" onclick="submitUsage(this)" id="usage-submit-btn" disabled>Confirm Usage</button>
       </div>
 
       <div class="table-container">
@@ -98,7 +98,7 @@
             <div class="col"><label class="form-label">Expiry Date</label><input type="date" class="form-control" id="stock-expiry"></div>
           </div>
         </div>
-        <div class="modal-footer"><button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button><button class="btn btn-primary" onclick="saveStockItem()">Save</button></div>
+        <div class="modal-footer"><button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button><button class="btn btn-primary" onclick="saveStockItem(this)">Save</button></div>
       </div>
     </div>
   </div>
@@ -122,7 +122,7 @@
           <div class="mb-3"><label class="form-label">Quantity (use negative to remove)</label><input type="number" class="form-control" id="txn-qty" step="0.01"></div>
           <div class="mb-3"><label class="form-label">Reference/Note</label><input type="text" class="form-control" id="txn-ref"></div>
         </div>
-        <div class="modal-footer"><button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button><button class="btn btn-primary" onclick="saveTransaction()">Save</button></div>
+        <div class="modal-footer"><button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button><button class="btn btn-primary" onclick="saveTransaction(this)">Save</button></div>
       </div>
     </div>
   </div>
@@ -133,7 +133,7 @@
       <div class="modal-content">
         <div class="modal-header"><h5 class="modal-title">Add Category</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
         <div class="modal-body"><input type="text" class="form-control" id="new-category-name" placeholder="Category name"></div>
-        <div class="modal-footer"><button class="btn btn-primary" onclick="saveCategory()">Save</button></div>
+        <div class="modal-footer"><button class="btn btn-primary" onclick="saveCategory(this)">Save</button></div>
       </div>
     </div>
   </div>
@@ -203,7 +203,7 @@
           <td>
             <div class="d-flex gap-1" style="max-width:200px;">
               <input type="number" class="form-control form-control-sm" id="restock-qty-${p.id}" min="0.01" step="1" placeholder="qty">
-              <button class="btn btn-sm btn-success" onclick="restock(${p.id})">Add</button>
+              <button class="btn btn-sm btn-success" onclick="restock(${p.id}, this)">Add</button>
             </div>
           </td>
           <td><button class="btn btn-sm btn-outline-danger" onclick="dispose(${p.id})" title="Dispose expired">Dispose</button></td>
@@ -215,16 +215,16 @@
       return String(s == null ? '' : s).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
     }
 
-    async function restock(id) {
+    async function restock(id, btn) {
       const input = document.getElementById('restock-qty-' + id);
       const qty = parseFloat(input.value);
       if (!qty || qty <= 0) { showToast('Enter a quantity', 'warning'); return; }
       const note = prompt('Optional note (supplier, batch, etc):') || '';
-      try {
+      await withBusy(btn, async () => {
         await api(`/api/products/${id}/restock`, { method: 'POST', body: { quantity: qty, note } });
         showToast(`Added ${qty} to stock`);
-        loadStock();
-      } catch (err) { showToast(err.message, 'error'); }
+        await loadStock();
+      }, 'Adding...');
     }
 
     async function dispose(id) {
@@ -308,7 +308,7 @@
       new bootstrap.Modal(document.getElementById('stockModal')).show();
     }
 
-    async function saveStockItem() {
+    async function saveStockItem(btn) {
       const id = document.getElementById('stock-id').value;
       const data = {
         name: document.getElementById('stock-name').value,
@@ -318,15 +318,17 @@
         reorder_level: parseFloat(document.getElementById('stock-reorder').value) || 0,
         expiry_date: document.getElementById('stock-expiry').value || null,
       };
-      if (id) {
-        await api(`/api/stock/items/${id}`, { method: 'PUT', body: data });
-      } else {
-        data.quantity = parseFloat(document.getElementById('stock-qty').value) || 0;
-        await api('/api/stock/items', { method: 'POST', body: data });
-      }
-      bootstrap.Modal.getInstance(document.getElementById('stockModal')).hide();
-      showToast('Stock item saved!');
-      loadStock();
+      await withBusy(btn, async () => {
+        if (id) {
+          await api(`/api/stock/items/${id}`, { method: 'PUT', body: data });
+        } else {
+          data.quantity = parseFloat(document.getElementById('stock-qty').value) || 0;
+          await api('/api/stock/items', { method: 'POST', body: data });
+        }
+        bootstrap.Modal.getInstance(document.getElementById('stockModal')).hide();
+        showToast('Stock item saved!');
+        await loadStock();
+      }, 'Saving...');
     }
 
     function showTransaction(id) {
@@ -339,19 +341,23 @@
       new bootstrap.Modal(document.getElementById('transactionModal')).show();
     }
 
-    async function saveTransaction() {
+    async function saveTransaction(btn) {
       const id = document.getElementById('txn-item-id').value;
-      await api(`/api/stock/items/${id}/transaction`, {
-        method: 'POST',
-        body: {
-          type: document.getElementById('txn-type').value,
-          quantity: parseFloat(document.getElementById('txn-qty').value),
-          reference: document.getElementById('txn-ref').value,
-        },
-      });
-      bootstrap.Modal.getInstance(document.getElementById('transactionModal')).hide();
-      showToast('Stock updated!');
-      loadStock();
+      await withBusy(btn, async () => {
+        const qty = parseFloat(document.getElementById('txn-qty').value);
+        if (!qty) throw new Error('Enter a quantity');
+        await api(`/api/stock/items/${id}/transaction`, {
+          method: 'POST',
+          body: {
+            type: document.getElementById('txn-type').value,
+            quantity: qty,
+            reference: document.getElementById('txn-ref').value,
+          },
+        });
+        bootstrap.Modal.getInstance(document.getElementById('transactionModal')).hide();
+        showToast('Stock updated!');
+        await loadStock();
+      }, 'Saving...');
     }
 
     function showAddCategory() {
@@ -359,11 +365,13 @@
       new bootstrap.Modal(document.getElementById('categoryModal')).show();
     }
 
-    async function saveCategory() {
-      await api('/api/stock/categories', { method: 'POST', body: { name: document.getElementById('new-category-name').value } });
-      bootstrap.Modal.getInstance(document.getElementById('categoryModal')).hide();
-      showToast('Category added!');
-      loadStock();
+    async function saveCategory(btn) {
+      await withBusy(btn, async () => {
+        await api('/api/stock/categories', { method: 'POST', body: { name: document.getElementById('new-category-name').value } });
+        bootstrap.Modal.getInstance(document.getElementById('categoryModal')).hide();
+        showToast('Category added!');
+        await loadStock();
+      }, 'Saving...');
     }
 
     // ===== Mark as Used =====
@@ -452,7 +460,7 @@
       `).join('');
     }
 
-    async function submitUsage() {
+    async function submitUsage(btn) {
       const purpose = document.getElementById('usage-purpose').value.trim();
       if (usageItems.length === 0) return;
 
@@ -465,7 +473,7 @@
         return;
       }
 
-      try {
+      await withBusy(btn, async () => {
         await api('/api/stock/usage', {
           method: 'POST',
           body: {
@@ -474,11 +482,16 @@
           },
         });
         showToast(`${valid.length} item(s) marked as used!`);
+        usageItems = [];
         toggleUsageMode();
-        loadStock();
-      } catch (err) {
-        showToast('Failed: ' + err.message, 'error');
-      }
+        await loadStock();
+      }, 'Saving...');
+
+      // withBusy always re-enables the button in its finally. renderUsageItems()
+      // owns the real enabled state (empty list => disabled), so re-assert it:
+      // after a success the list is empty and the button must go back to
+      // disabled; after a failure the list still has rows so it stays clickable.
+      renderUsageItems();
     }
   </script>
 </body>

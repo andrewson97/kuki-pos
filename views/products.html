@@ -114,7 +114,7 @@
         </div>
         <div class="modal-footer">
           <button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-          <button class="btn btn-primary" onclick="saveProduct()">Save</button>
+          <button class="btn btn-primary" onclick="saveProduct(this)">Save</button>
         </div>
       </div>
     </div>
@@ -126,11 +126,13 @@
     let allProducts = [];
     initApp('/products', loadProducts);
 
+    // Wired once, here: loadProducts() runs again after every save/delete and
+    // would stack a duplicate listener each time.
+    document.getElementById('product-search').addEventListener('input', renderProducts);
+
     async function loadProducts() {
       allProducts = await api('/api/products');
       renderProducts();
-      renderCategoryOptions();
-      document.getElementById('product-search').addEventListener('input', renderProducts);
     }
 
     // ===== Components (composite products) =====
@@ -367,7 +369,7 @@
       new bootstrap.Modal(document.getElementById('productModal')).show();
     }
 
-    async function saveProduct() {
+    async function saveProduct(btn) {
       const id = document.getElementById('product-id').value;
       const discountInput = document.getElementById('product-discount').value;
       const data = {
@@ -382,15 +384,19 @@
         stock_reorder_level: parseFloat(document.getElementById('product-reorder').value) || 0,
         components: currentComponents.filter(c => c.component_product_id && c.quantity > 0),
       };
-      if (id) {
-        await api(`/api/products/${id}`, { method: 'PUT', body: data });
-      } else {
-        await api('/api/products', { method: 'POST', body: data });
-      }
+      await withBusy(btn, async () => {
+        // Blank / NaN would become JSON null and blow up on selling_price NOT NULL.
+        if (!data.selling_price || data.selling_price < 0) throw new Error('Selling price is required');
+        if (id) {
+          await api(`/api/products/${id}`, { method: 'PUT', body: data });
+        } else {
+          await api('/api/products', { method: 'POST', body: data });
+        }
 
-      bootstrap.Modal.getInstance(document.getElementById('productModal')).hide();
-      showToast('Product saved!');
-      await loadProducts();
+        bootstrap.Modal.getInstance(document.getElementById('productModal')).hide();
+        showToast('Product saved!');
+        await loadProducts();
+      }, 'Saving...');
     }
 
     async function deleteProduct(id) {

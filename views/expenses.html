@@ -61,7 +61,7 @@
           <div class="mb-3"><label class="form-label">Description / Note</label><input type="text" class="form-control" id="exp-desc" placeholder="e.g., emergency cream purchase"></div>
           <div class="mb-3"><label class="form-label">Date</label><input type="date" class="form-control" id="exp-date"></div>
         </div>
-        <div class="modal-footer"><button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button><button class="btn btn-primary" onclick="saveExpense()">Save</button></div>
+        <div class="modal-footer"><button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button><button class="btn btn-primary" onclick="saveExpense(this)">Save</button></div>
       </div>
     </div>
   </div>
@@ -71,7 +71,7 @@
       <div class="modal-content">
         <div class="modal-header"><h5 class="modal-title">Add Category</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
         <div class="modal-body"><input type="text" class="form-control" id="new-exp-cat" placeholder="Category name"></div>
-        <div class="modal-footer"><button class="btn btn-primary" onclick="saveExpCategory()">Save</button></div>
+        <div class="modal-footer"><button class="btn btn-primary" onclick="saveExpCategory(this)">Save</button></div>
       </div>
     </div>
   </div>
@@ -158,25 +158,27 @@
       new bootstrap.Modal(document.getElementById('expenseModal')).show();
     }
 
-    async function saveExpense() {
+    async function saveExpense(btn) {
       const desc = document.getElementById('exp-desc').value.trim();
       if (currentUser.role !== 'admin' && !desc) {
         showToast('Please enter a description/note', 'error');
         return;
       }
-      const res = await api('/api/expenses', {
-        method: 'POST',
-        body: {
-          category_id: parseInt(document.getElementById('exp-category').value),
-          amount: parseFloat(document.getElementById('exp-amount').value),
-          description: desc,
-          expense_date: document.getElementById('exp-date').value,
-          payment_source: document.getElementById('exp-source').value,
-        },
-      });
-      bootstrap.Modal.getInstance(document.getElementById('expenseModal')).hide();
-      showToast(res.status === 'pending' ? 'Submitted for admin approval' : 'Expense added!');
-      loadExpenses();
+      await withBusy(btn, async () => {
+        const res = await api('/api/expenses', {
+          method: 'POST',
+          body: {
+            category_id: parseInt(document.getElementById('exp-category').value),
+            amount: parseFloat(document.getElementById('exp-amount').value),
+            description: desc,
+            expense_date: document.getElementById('exp-date').value,
+            payment_source: document.getElementById('exp-source').value,
+          },
+        });
+        bootstrap.Modal.getInstance(document.getElementById('expenseModal')).hide();
+        showToast(res.status === 'pending' ? 'Submitted for admin approval' : 'Expense added!');
+        await loadExpenses();
+      }, 'Saving...');
     }
 
     async function deleteExpense(id) {
@@ -191,12 +193,14 @@
       new bootstrap.Modal(document.getElementById('expCatModal')).show();
     }
 
-    async function saveExpCategory() {
-      await api('/api/expenses/categories', { method: 'POST', body: { name: document.getElementById('new-exp-cat').value } });
-      bootstrap.Modal.getInstance(document.getElementById('expCatModal')).hide();
-      expCategories = await api('/api/expenses/categories');
-      renderCatOptions();
-      showToast('Category added!');
+    async function saveExpCategory(btn) {
+      await withBusy(btn, async () => {
+        await api('/api/expenses/categories', { method: 'POST', body: { name: document.getElementById('new-exp-cat').value } });
+        expCategories = await api('/api/expenses/categories');
+        renderCatOptions();
+        bootstrap.Modal.getInstance(document.getElementById('expCatModal')).hide();
+        showToast('Category added!');
+      }, 'Saving...');
     }
   </script>
 </body>

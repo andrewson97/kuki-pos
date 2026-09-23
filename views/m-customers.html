@@ -30,9 +30,9 @@
       <div class="field"><label>Notes (optional)</label><textarea id="c-notes" rows="2"></textarea></div>
       <div class="btn-row">
         <button class="btn btn-outline" onclick="closeSheet('c-sheet')">Cancel</button>
-        <button class="btn btn-primary" onclick="saveCust()">Save</button>
+        <button class="btn btn-primary" onclick="saveCust(this)">Save</button>
       </div>
-      <button class="btn btn-danger" style="margin-top:8px;" id="c-del" onclick="delCust()">Delete</button>
+      <button class="btn btn-danger" style="margin-top:8px;" id="c-del" onclick="delCust(this)">Delete</button>
     </div>
   </div>
 
@@ -73,23 +73,27 @@
       $('c-del').style.display = 'block';
       openSheet('c-sheet');
     }
-    async function saveCust() {
+    async function saveCust(btn) {
       const id = $('c-id').value;
       const body = { name: $('c-name').value.trim(), phone: $('c-phone').value.trim(), address: $('c-addr').value.trim(), notes: $('c-notes').value.trim() };
       if (!body.name) { toast('Name required', 'error'); return; }
-      try {
+      await withBusy(btn, async () => {
         if (id) await api(`/api/customers/${id}`, { method: 'PUT', body });
         else await api('/api/customers', { method: 'POST', body });
         closeSheet('c-sheet');
         toast('Saved');
         all = await api('/api/customers'); render();
-      } catch (err) { toast(err.message, 'error'); }
+      }, 'Saving…');
     }
-    async function delCust() {
+    async function delCust(btn) {
       const id = $('c-id').value;
       if (!id || !confirm('Delete this customer?')) return;
-      try { await api(`/api/customers/${id}`, { method: 'DELETE' }); closeSheet('c-sheet'); toast('Deleted'); all = await api('/api/customers'); render(); }
-      catch (err) { toast(err.message, 'error'); }
+      await withBusy(btn, async () => {
+        await api(`/api/customers/${id}`, { method: 'DELETE' });
+        closeSheet('c-sheet');
+        toast('Deleted');
+        all = await api('/api/customers'); render();
+      }, 'Deleting…');
     }
     load();
   </script>

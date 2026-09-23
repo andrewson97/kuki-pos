@@ -40,7 +40,7 @@
       <div id="stock-fields" style="display:none;">
         <div class="field"><label>Quantity on hand</label><input type="number" id="p-qty" min="0" step="1" value="0" inputmode="numeric"></div>
         <div class="field"><label>Reorder level (alert below)</label><input type="number" id="p-reorder" min="0" step="1" value="0" inputmode="numeric"></div>
-        <button class="btn btn-danger" id="p-dispose" style="display:none;" onclick="disposeProduct()">Dispose (expired)…</button>
+        <button class="btn btn-danger" id="p-dispose" style="display:none;" onclick="disposeProduct(this)">Dispose (expired)…</button>
       </div>
       <div class="field">
         <label>Also deducts stock from <small style="color:var(--ink-soft);">(components)</small></label>
@@ -53,9 +53,9 @@
       </div>
       <div class="btn-row">
         <button class="btn btn-outline" onclick="closeSheet('prod-sheet')">Cancel</button>
-        <button class="btn btn-primary" onclick="saveProd()">Save</button>
+        <button class="btn btn-primary" onclick="saveProd(this)">Save</button>
       </div>
-      <button class="btn btn-danger" style="margin-top:8px;" id="p-delete" onclick="delProd()">Delete</button>
+      <button class="btn btn-danger" style="margin-top:8px;" id="p-delete" onclick="delProd(this)">Delete</button>
     </div>
   </div>
 
@@ -195,7 +195,7 @@
       openSheet('prod-sheet');
     }
 
-    async function saveProd() {
+    async function saveProd(btn) {
       const id = $('p-id').value;
       const disc = $('p-disc').value;
       const body = {
@@ -212,17 +212,17 @@
       };
       if (!body.name) { toast('Name required', 'error'); return; }
       if (!body.selling_price) { toast('Selling price required', 'error'); return; }
-      try {
+      await withBusy(btn, async () => {
         if (id) await api(`/api/products/${id}`, { method: 'PUT', body });
         else await api('/api/products', { method: 'POST', body });
         closeSheet('prod-sheet');
         toast('Saved');
         allProds = await api('/api/products');
         render(); renderCatOptions();
-      } catch (err) { toast(err.message, 'error'); }
+      }, 'Saving…');
     }
 
-    async function disposeProduct() {
+    async function disposeProduct(btn) {
       const id = $('p-id').value;
       if (!id) { toast('Save the product first', 'error'); return; }
       const qtyStr = prompt('How many units to dispose?', '1');
@@ -231,26 +231,26 @@
       if (!qty || qty <= 0) { toast('Invalid quantity', 'error'); return; }
       const reason = prompt('Reason (e.g., expired, damaged)?', 'expired');
       if (reason === null) return;
-      try {
+      await withBusy(btn, async () => {
         const r = await api(`/api/products/${id}/dispose`, { method: 'POST', body: { quantity: qty, reason } });
         toast(`Disposed ${qty} — loss ${fmt(r.cost_loss)}`);
         allProds = await api('/api/products');
         const updated = allProds.find(x => x.id === parseInt(id));
         if (updated) $('p-qty').value = updated.stock_quantity || 0;
         render(); renderCatOptions();
-      } catch (err) { toast(err.message, 'error'); }
+      }, 'Disposing…');
     }
 
-    async function delProd() {
+    async function delProd(btn) {
       const id = $('p-id').value;
       if (!id || !confirm('Delete this product?')) return;
-      try {
+      await withBusy(btn, async () => {
         const r = await api(`/api/products/${id}`, { method: 'DELETE' });
         closeSheet('prod-sheet');
         toast(r.soft_deleted ? 'Has sales history — marked inactive' : 'Deleted');
         allProds = await api('/api/products');
         render(); renderCatOptions();
-      } catch (err) { toast(err.message, 'error'); }
+      }, 'Deleting…');
     }
 
     load();

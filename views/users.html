@@ -45,7 +45,7 @@
             <label class="form-check-label">Active</label>
           </div>
         </div>
-        <div class="modal-footer"><button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button><button class="btn btn-primary" onclick="saveUser()">Save</button></div>
+        <div class="modal-footer"><button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button><button class="btn btn-primary" onclick="saveUser(this)">Save</button></div>
       </div>
     </div>
   </div>
@@ -97,7 +97,7 @@
       new bootstrap.Modal(document.getElementById('userModal')).show();
     }
 
-    async function saveUser() {
+    async function saveUser(btn) {
       const id = document.getElementById('user-id').value;
       const data = {
         full_name: document.getElementById('user-fullname').value,
@@ -106,18 +106,20 @@
       };
       const pw = document.getElementById('user-password').value;
 
-      if (id) {
-        if (pw) data.password = pw;
-        await api(`/api/settings/users/${id}`, { method: 'PUT', body: data });
-      } else {
-        if (!pw) { showToast('Password is required for new users', 'error'); return; }
-        data.username = document.getElementById('user-username').value;
-        data.password = pw;
-        await api('/api/settings/users', { method: 'POST', body: data });
-      }
-      bootstrap.Modal.getInstance(document.getElementById('userModal')).hide();
-      showToast('User saved!');
-      loadUsers();
+      await withBusy(btn, async () => {
+        if (id) {
+          if (pw) data.password = pw;
+          await api(`/api/settings/users/${id}`, { method: 'PUT', body: data });
+        } else {
+          if (!pw) throw new Error('Password is required for new users');
+          data.username = document.getElementById('user-username').value;
+          data.password = pw;
+          await api('/api/settings/users', { method: 'POST', body: data });
+        }
+        bootstrap.Modal.getInstance(document.getElementById('userModal')).hide();
+        showToast('User saved!');
+        await loadUsers();
+      }, 'Saving...');
     }
   </script>
 </body>

@@ -120,7 +120,7 @@
         </div>
         <div class="modal-footer">
           <button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-          <button class="btn btn-primary" onclick="saveTask()">Save</button>
+          <button class="btn btn-primary" onclick="saveTask(this)">Save</button>
         </div>
       </div>
     </div>
@@ -239,7 +239,7 @@
       new bootstrap.Modal(document.getElementById('taskModal')).show();
     }
 
-    async function saveTask() {
+    async function saveTask(btn) {
       const id = document.getElementById('task-id').value;
       const title = document.getElementById('task-title').value.trim();
       if (!title) { showToast('Title required', 'error'); return; }
@@ -250,7 +250,7 @@
         is_active: document.getElementById('task-active').checked,
         category: document.getElementById('task-category').value,
       };
-      try {
+      await withBusy(btn, async () => {
         if (id) {
           await api(`/api/tasks/${id}`, { method: 'PUT', body });
         } else {
@@ -258,10 +258,8 @@
         }
         bootstrap.Modal.getInstance(document.getElementById('taskModal')).hide();
         showToast('Saved');
-        loadTasks();
-      } catch (err) {
-        showToast(err.message, 'error');
-      }
+        await loadTasks();
+      }, 'Saving...');
     }
 
     async function deleteTask(id) {

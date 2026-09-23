@@ -118,6 +118,25 @@ input, select, textarea, button { font-family: inherit; font-size: inherit; }
 .btn-row { display: flex; gap: 8px; }
 .btn-row .btn { flex: 1; }
 .btn-sm { padding: 8px 12px; font-size: 0.85rem; }
+/* Every .btn variant sets its own background, so the browser's default disabled
+   styling is invisible here — spell it out, or a busy save button looks live. */
+.btn:disabled, .btn[disabled] {
+  opacity: 0.55;
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
+}
+.btn:disabled:active, .btn[disabled]:active { transform: none; }
+.btn-primary:disabled, .btn-primary[disabled],
+.btn-success:disabled, .btn-success[disabled] {
+  background: #c7c9d1; color: #f3f4f6;
+}
+.btn-outline:disabled, .btn-outline[disabled] {
+  background: #f3f4f6; color: var(--ink-soft); border-color: var(--line);
+}
+.btn-danger:disabled, .btn-danger[disabled] {
+  background: #f3f4f6; color: var(--ink-soft); border-color: var(--line);
+}
 
 /* Floating action button */
 .fab {

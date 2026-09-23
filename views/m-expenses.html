@@ -67,7 +67,7 @@
       </div>
       <div class="btn-row">
         <button class="btn btn-outline" onclick="closeSheet('add-sheet')">Cancel</button>
-        <button class="btn btn-primary" onclick="saveExpense()">Save</button>
+        <button class="btn btn-primary" onclick="saveExpense(this)">Save</button>
       </div>
     </div>
   </div>
@@ -119,8 +119,8 @@
           </div>
           <div class="list-meta">by ${escapeHtml(e.user_name || '-')}${e.approver_name && e.status !== 'pending' ? ` · ${e.status} by ${escapeHtml(e.approver_name)}` : ''}${e.rejected_reason ? ` · "${escapeHtml(e.rejected_reason)}"` : ''}</div>
           ${isAdmin && e.status === 'pending' ? `<div class="btn-row" style="margin-top:8px;">
-            <button class="btn btn-success btn-sm" onclick="approve(${e.id})">Approve</button>
-            <button class="btn btn-danger btn-sm" onclick="reject(${e.id})">Reject</button>
+            <button class="btn btn-success btn-sm" onclick="approve(this, ${e.id})">Approve</button>
+            <button class="btn btn-danger btn-sm" onclick="reject(this, ${e.id})">Reject</button>
           </div>` : ''}
         </div>`;
       }).join('');
@@ -134,12 +134,12 @@
       openSheet('add-sheet');
     }
 
-    async function saveExpense() {
+    async function saveExpense(btn) {
       const desc = $('ex-desc').value.trim();
       const amt = parseFloat($('ex-amt').value);
       if (!amt || amt <= 0) { toast('Enter an amount', 'error'); return; }
       if (currentUser.role !== 'admin' && !desc) { toast('Description required', 'error'); return; }
-      try {
+      await withBusy(btn, async () => {
         const res = await api('/api/expenses', { method: 'POST', body: {
           category_id: parseInt($('ex-cat').value),
           amount: amt,
@@ -150,18 +150,24 @@
         closeSheet('add-sheet');
         toast(res.status === 'pending' ? 'Submitted for approval' : 'Saved');
         loadExpenses();
-      } catch (err) { toast(err.message, 'error'); }
+      }, 'Saving…');
     }
 
-    async function approve(id) {
-      try { await api(`/api/expenses/${id}/approve`, { method: 'POST', body: {} }); toast('Approved'); loadExpenses(); }
-      catch (err) { toast(err.message, 'error'); }
+    async function approve(btn, id) {
+      await withBusy(btn, async () => {
+        await api(`/api/expenses/${id}/approve`, { method: 'POST', body: {} });
+        toast('Approved');
+        loadExpenses();
+      }, 'Approving…');
     }
-    async function reject(id) {
+    async function reject(btn, id) {
       const reason = prompt('Reason:');
       if (reason === null) return;
-      try { await api(`/api/expenses/${id}/reject`, { method: 'POST', body: { reason: reason.trim() } }); toast('Rejected'); loadExpenses(); }
-      catch (err) { toast(err.message, 'error'); }
+      await withBusy(btn, async () => {
+        await api(`/api/expenses/${id}/reject`, { method: 'POST', body: { reason: reason.trim() } });
+        toast('Rejected');
+        loadExpenses();
+      }, 'Rejecting…');
     }
 
     load();
