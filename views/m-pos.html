@@ -183,11 +183,31 @@
     let lastKitchenText = '';
     let lastProformaText = '';
 
+    // ===== Cart identity + stock holds (state) =====
+    // Every cart carries an id of its own; the server holds stock against that
+    // id. It has to outlive a reload and travel with a parked cart, or the hold
+    // is orphaned and only an admin can give the stock back. Its own key, apart
+    // from the desktop till's, so the two screens open in one browser cannot
+    // overwrite each other's holds.
+    const CART_ID_KEY = 'kuki_mpos_cart_id';
+    let cartId = '';
+    // The cart exactly as the server last accepted it. A rejected sync rolls the
+    // server back whole, so this is the state the screen must revert to.
+    let lastSyncedCart = [];
+    let holdsOnServer = false;
+    // Ordering: every cart change bumps `syncSeq`, and `syncChain` runs the
+    // requests strictly one at a time. A queued sync that a newer change has
+    // already superseded never leaves the phone, so the last change wins.
+    let syncSeq = 0;
+    let syncChain = Promise.resolve();
+
     async function load() {
       await bootMobile();
       taxRate = parseFloat(appSettings.tax_rate || '0');
       const [prods, custs, token] = await Promise.all([
-        api('/api/products/active'),
+        // Without ?cart= the till's own holds count as somebody else's and its
+        // own items vanish from its own grid.
+        api(`/api/products/active?cart=${encodeURIComponent(getCartId())}`),
         api('/api/customers'),
         api('/api/pos/token'),
       ]);
@@ -201,6 +221,7 @@
       $('s-discount').addEventListener('input', recalc);
       checkShift();
       renderHeldBadge();
+      await rehydrateHolds();
     }
 
     async function checkShift() {
@@ -218,10 +239,15 @@
     }
 
     function inStock(p) {
-      if (p.track_stock && p.stock_quantity <= 0) return false;
+      // available_quantity = on hand minus what OTHER carts hold, so a fully
+      // held item hides exactly like an out-of-stock one. Falls back to the
+      // on-hand count if the grid was ever loaded without the reservation fields.
+      const avail = p.available_quantity ?? p.stock_quantity ?? 0;
+      if (p.track_stock && avail <= 0) return false;
       if (Array.isArray(p.components)) {
         for (const c of p.components) {
-          if (c.component_track_stock && (c.component_stock_quantity ?? 0) < c.quantity) return false;
+          const compAvail = c.component_available_quantity ?? c.component_stock_quantity ?? 0;
+          if (c.component_track_stock && compAvail < c.quantity) return false;
         }
       }
       return true;
@@ -254,11 +280,19 @@
         const priceHtml = p.discount_price
           ? `<div class="price"><s>${fmt(p.selling_price)}</s>${fmt(eff)}</div>`
           : `<div class="price">${fmt(eff)}</div>`;
-        // Always show the count when tracked. Larger + red when low.
-        const low = p.track_stock && p.stock_reorder_level > 0 && p.stock_quantity <= p.stock_reorder_level;
+        // Always show the count when tracked — but the SELLABLE count
+        // (available_quantity), not what's in the fridge, because units another
+        // cart holds cannot be sold here. When some are held, a pause mark and
+        // the held count ride along inside the same pill ("3 ⏸2"), so the number
+        // never looks wrong to someone who just counted the shelf. Larger + red
+        // when low.
+        const avail = p.available_quantity ?? p.stock_quantity ?? 0;
+        const heldElsewhere = Math.max(0, (p.stock_quantity ?? 0) - avail);
+        const low = p.track_stock && p.stock_reorder_level > 0 && avail <= p.stock_reorder_level;
+        const heldTag = heldElsewhere > 0 ? ` <span style="opacity:0.75;font-weight:600;">&#9208;${heldElsewhere}</span>` : '';
         const badge = !p.track_stock ? '' : (low
-          ? `<div style="position:absolute;top:2px;right:2px;background:#dc2626;color:white;font-size:0.78rem;padding:3px 9px;border-radius:999px;font-weight:800;box-shadow:0 2px 5px rgba(220,38,38,0.4);">${p.stock_quantity}</div>`
-          : `<div style="position:absolute;top:2px;right:2px;background:rgba(31,41,55,0.78);color:white;font-size:0.58rem;padding:1px 5px;border-radius:999px;font-weight:700;">${p.stock_quantity}</div>`);
+          ? `<div style="position:absolute;top:2px;right:2px;background:#dc2626;color:white;font-size:0.78rem;padding:3px 9px;border-radius:999px;font-weight:800;box-shadow:0 2px 5px rgba(220,38,38,0.4);">${avail}${heldTag}</div>`
+          : `<div style="position:absolute;top:2px;right:2px;background:rgba(31,41,55,0.78);color:white;font-size:0.58rem;padding:1px 5px;border-radius:999px;font-weight:700;">${avail}${heldTag}</div>`);
         return `<div class="prod-card" onclick="addToCart(${p.id})" style="position:relative;">${badge}<div class="name">${escapeHtml(p.name)}</div>${priceHtml}</div>`;
       }).join('');
     }
@@ -270,6 +304,7 @@
       if (ex) ex.quantity++;
       else cart.push({ product_id: p.id, product_name: p.name, quantity: 1, unit_price: p.discount_price || p.selling_price, original_price: p.selling_price });
       recalc();
+      queueCartSync();
     }
 
     function recalc() {
@@ -327,9 +362,127 @@
       }).join('');
     }
 
-    function qty(idx, d) { cart[idx].quantity += d; if (cart[idx].quantity <= 0) cart.splice(idx, 1); recalc(); }
-    function rm(idx) { cart.splice(idx, 1); recalc(); }
-    function clearCart() { cart = []; $('s-discount').value = 0; clearCust(); recalc(); }
+    function qty(idx, d) { cart[idx].quantity += d; if (cart[idx].quantity <= 0) cart.splice(idx, 1); recalc(); queueCartSync(); }
+    function rm(idx) { cart.splice(idx, 1); recalc(); queueCartSync(); }
+
+    // Wipes the screen only — it touches no hold and keeps the cart id, so every
+    // caller has to say what happens to the reservation: clearCart() gives the
+    // stock back, parkCurrent() keeps it, and a completed sale has already had
+    // it released server-side inside the sale transaction.
+    function resetCartState() { cart = []; $('s-discount').value = 0; clearCust(); recalc(); }
+
+    // The Clear button: this cart is abandoned, so the stock goes back on the
+    // shelf and the next customer starts on a fresh id.
+    function clearCart() {
+      const abandoned = getCartId();
+      const hadHolds = holdsOnServer || cart.length > 0;
+      resetCartState();
+      startNewCart();
+      if (!hadHolds) return;
+      // Queue the release behind any sync still in flight for that cart: a
+      // DELETE that overtakes it would be undone by the sync landing after it.
+      syncChain = syncChain.then(() => releaseHoldsFor(abandoned)).then(refreshAvailability);
+    }
+
+    // ===== Cart identity + stock holds =====
+    function newCartId() {
+      const rand = (window.crypto && crypto.randomUUID)
+        ? crypto.randomUUID().slice(0, 8)
+        : Math.random().toString(36).slice(2, 10);
+      return `mpos-${Date.now().toString(36)}-${rand}`;
+    }
+
+    // Reads through to localStorage, so a reload re-adopts the cart it was in
+    // the middle of instead of starting a new one and stranding its holds.
+    function getCartId() {
+      if (!cartId) {
+        let stored = '';
+        try { stored = localStorage.getItem(CART_ID_KEY) || ''; } catch {}
+        adoptCartId(stored || newCartId());
+      }
+      return cartId;
+    }
+
+    function adoptCartId(id) {
+      cartId = id;
+      try { localStorage.setItem(CART_ID_KEY, id); } catch {}
+    }
+
+    // Move on to the next customer's cart. This never releases anything: the
+    // caller decides whether the id it leaves behind keeps its holds (park, and
+    // completed sales, where the server already released them) or loses them
+    // (clearCart()).
+    function startNewCart() {
+      // Anything still queued belongs to the cart being left behind, so retire
+      // its sequence number: queued runs see the bump and skip themselves.
+      syncSeq++;
+      adoptCartId(newCartId());
+      lastSyncedCart = [];
+      holdsOnServer = false;
+    }
+
+    function releaseHoldsFor(id) {
+      if (!id) return Promise.resolve();
+      // Best effort: a hold stranded by a dead network is recoverable from the
+      // admin "Held stock" screen, and nagging the cashier about it helps nobody.
+      return api(`/api/pos/reservations/cart/${encodeURIComponent(id)}`, { method: 'DELETE' }).catch(() => {});
+    }
+
+    // "This cart now holds exactly these lines." Full replace, not a delta, so
+    // re-sending is free and a lost request heals on the next change.
+    function queueCartSync() {
+      const seq = ++syncSeq;
+      const run = async () => {
+        if (seq !== syncSeq) return; // a newer change is already queued — skip
+        const id = getCartId();
+        const snapshot = cart.map(i => ({ ...i }));
+        const items = snapshot.map(i => ({ product_id: i.product_id, quantity: i.quantity }));
+        try {
+          await api('/api/pos/reservations/sync', { method: 'POST', body: { cart_id: id, items } });
+          if (id !== cartId) return; // parked or sold mid-flight — not this cart any more
+          lastSyncedCart = snapshot;
+          holdsOnServer = items.length > 0;
+        } catch (err) {
+          if (id !== cartId) { toast(err.message, 'error'); return; }
+          // Rejected syncs roll back whole, so the server still holds exactly
+          // what it held before this change. Put the screen back on that footing
+          // — never let the cashier believe stock is held when it isn't.
+          cart = lastSyncedCart.map(i => ({ ...i }));
+          recalc();
+          toast(err.message, 'error');
+          refreshAvailability();
+        }
+      };
+      syncChain = syncChain.then(run, run);
+      return syncChain;
+    }
+
+    // Re-read availability: after a sale, and whenever the held-carts state
+    // changes (park, resume, discard), since a parked cart's holds count against
+    // the new cart and a released one has to reappear without a manual reload.
+    async function refreshAvailability() {
+      try {
+        products = await api(`/api/products/active?cart=${encodeURIComponent(getCartId())}`);
+        renderCats();
+        renderProducts();
+      } catch {}
+    }
+
+    // A reload wipes the cart but not its holds. The id is re-adopted from
+    // localStorage, so re-ringing the items syncs under the same id (and simply
+    // replaces the hold) and Clear still releases them — but say so out loud,
+    // because the screen looks empty.
+    async function rehydrateHolds() {
+      try {
+        const data = await api(`/api/pos/reservations/cart/${encodeURIComponent(getCartId())}`);
+        const holds = data.holds || [];
+        if (holds.length && cart.length === 0) {
+          holdsOnServer = true;
+          const units = holds.reduce((s, h) => s + h.quantity, 0);
+          toast(`Still holding ${units} unit${units === 1 ? '' : 's'} from before the reload — ring them up again or tap Clear.`);
+        }
+      } catch {}
+    }
 
     // ===== Held carts (parked, stored in localStorage per device) =====
     const HELD_KEY = 'kuki_held_carts';
@@ -341,13 +494,18 @@
       $('held-count').textContent = held.length;
       btn.style.display = held.length > 0 ? 'inline-block' : 'none';
     }
-    function parkCurrent() {
+    async function parkCurrent() {
+      if (!cart.length) { toast('Cart is empty'); return; }
+      // Let a sync still in flight settle first: a rejected one reverts the cart,
+      // and what gets parked has to be exactly what the server holds.
+      await syncChain;
       if (!cart.length) { toast('Cart is empty'); return; }
       const custName = $('cust-selected').textContent.replace(/^✓ /, '').replace(/ \(tap × to clear\)$/, '').trim();
       const label = custName || ('Hold ' + new Date().toLocaleTimeString('en-LK', { timeZone: TZ, hour: '2-digit', minute: '2-digit' }));
       const held = getHeld();
       held.push({
         id: Date.now(),
+        cart_id: getCartId(), // the hold travels with the parked cart
         label,
         items: cart.slice(),
         customer_id: $('cust-id').value || '',
@@ -356,9 +514,14 @@
         created_at: new Date().toISOString(),
       });
       setHeld(held);
-      clearCart();
+      // Parking must NOT release — holding the stock for this customer is the
+      // whole point. The till just moves on to a new cart id, which is why the
+      // parked lines now count as another cart's and leave this grid.
+      startNewCart();
+      resetCartState();
       closeSheet('cart-sheet');
       toast('Cart parked');
+      refreshAvailability();
     }
     function openHeld() {
       const held = getHeld();
@@ -379,11 +542,16 @@
       }
       openSheet('held-sheet');
     }
-    function resumeHeld(id) {
+    async function resumeHeld(id) {
       const h = getHeld().find(x => x.id === id);
       if (!h) return;
       const swap = () => {
+        // Adopt THAT cart's id so it picks its own holds back up. Carts parked
+        // before this feature shipped have none; the sync below takes them.
+        adoptCartId(h.cart_id || newCartId());
         cart = h.items.slice();
+        lastSyncedCart = cart.map(i => ({ ...i }));
+        holdsOnServer = true;
         $('s-discount').value = h.discount || 0;
         if (h.customer_id && h.customer_label) pickCust(parseInt(h.customer_id), h.customer_label);
         else clearCust();
@@ -392,17 +560,25 @@
         closeSheet('held-sheet');
         recalc();
         toast('Resumed');
+        // Idempotent re-assert. For a cart parked under this feature the server
+        // already holds these lines; for an older one this is where the hold is
+        // taken, and where a 400 says the stock went elsewhere meanwhile.
+        queueCartSync().then(refreshAvailability);
       };
       if (cart.length > 0) {
         if (!confirm('You have items in the current cart. Park the current one and switch?')) return;
-        parkCurrent();
+        await parkCurrent();
       }
       swap();
     }
     function deleteHeld(id) {
       if (!confirm('Delete this held cart? Items will not be billed.')) return;
+      const h = getHeld().find(x => x.id === id);
       setHeld(getHeld().filter(x => x.id !== id));
       openHeld();
+      // Discarding a parked cart is the one park-side action that does hand the
+      // stock back.
+      if (h && h.cart_id) releaseHoldsFor(h.cart_id).then(refreshAvailability);
     }
     function openCart() { if (!cart.length) { toast('Cart is empty'); return; } openSheet('cart-sheet'); }
 
@@ -531,6 +707,10 @@
       checkoutInProgress = true;
       setPayButtons(true, trigger ? trigger.id : null);
       try {
+        // Inside the guard (the flag is already set, so a second tap still does
+        // nothing): let a hold sync still in flight land first, or it could
+        // re-create this cart's holds a moment after the sale released them.
+        await syncChain;
         const result = await withBusy(trigger, () => api('/api/pos/bill', { method: 'POST', body: {
           items: cart.map(i => ({ product_id: i.product_id, product_name: i.product_name, quantity: i.quantity, unit_price: i.unit_price, original_price: i.original_price || i.unit_price })),
           customer_id: $('cust-id').value ? parseInt($('cust-id').value) : null,
@@ -538,6 +718,9 @@
           tax_rate: taxRate,
           payment_method: method,
           amount_given: method === 'cash' && amountGiven ? amountGiven : null,
+          // Must be the id the holds were synced under, or this cart's own hold
+          // counts against it and the sale blocks itself.
+          cart_id: getCartId(),
         }}), 'Processing…');
         if (!result) return; // failed — withBusy already showed the error toast
 
@@ -548,7 +731,12 @@
         closeSheet('cash-sheet');
         closeSheet('cart-sheet');
         openSheet('receipt-sheet');
-        clearCart();
+        // The sale released this cart's holds inside its own transaction, so
+        // there is nothing to release here — just move on to a fresh id, and
+        // re-read the grid now that the stock moved.
+        resetCartState();
+        startNewCart();
+        refreshAvailability();
         try {
           const t = await api('/api/pos/token');
           $('token-badge').textContent = `#${String(t.next_token).padStart(3,'0')}`;
