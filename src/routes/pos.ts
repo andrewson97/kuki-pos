@@ -102,6 +102,12 @@ pos.post("/bill", async (c) => {
   // recorded sale into an error (releaseCartClaim logs and swallows). A replay
   // tidies up too - the holds were already gone either way.
   releaseCartClaim(cartId);
+  // The order became a bill, so it is not a parked order any more. Same call
+  // site and same reasoning as the claim above: outside the sale transaction
+  // (which lives in createBill() and has already committed), best-effort, and
+  // never able to turn a recorded sale into an error. A replay tidies up too —
+  // this cart is sold either way.
+  releaseParkedCart(cartId);
 
   // Generate receipt
   const db = getDb();
@@ -576,6 +582,397 @@ pos.post("/carts/claim", async (c) => {
   return c.json({ success: true, till_id: tillId, till_label: tillLabel, claims: stored });
 });
 
+// --- Parked bills ("held carts") ---------------------------------------------
+//
+// A parked bill is a CONFIRMED customer order set aside so the cashier can serve
+// somebody else. Parking deliberately KEEPS the cart's stock hold — that is the
+// point of it — but the order itself used to live only in the parking browser's
+// localStorage (kuki_held_carts). So the hold was durable and shop-wide while
+// the order that owned it was fragile and local:
+//   * no other till could see, let alone resume, an order whose stock the whole
+//     shop was already being denied;
+//   * clearing that browser's data or swapping the tablet destroyed the
+//     customer's order while its hold survived forever — stock locked until an
+//     admin force-released it from the "Held stock" screen;
+//   * only the browser that created a hold could ever give it back through
+//     ordinary use.
+// The order now lives on the server beside its hold, in parked_carts.
+//
+// This table does NOT replace cart_claims. A claim is an annotation a till
+// asserts about itself ("I am still ringing this up"); a parked bill is a stored
+// fact the server owns. An ACTIVE cart is still only knowable from the till, so
+// claims keep doing that job — see POST /carts/claim.
+//
+// Auth: no adminOnly on ANY of these. A parked bill must be visible and
+// resumable from every till — that is the whole reason it moved to the server —
+// and parking, resuming and discarding an order is ordinary cashier work.
+// Nothing here takes money, and the one destructive route (discard) hands stock
+// BACK rather than taking it. user_id always comes from getUser(c), never the
+// body.
+
+// Cart ids and till names are short (see CLAIM_MAX_LEN); a label is a customer
+// name or "Hold 10:42:03". A cart with more than 200 distinct lines is not a
+// cake-shop order, it is a buggy or hostile till. These caps exist only to stop
+// unbounded junk being written into the table.
+const PARK_MAX_LEN = 200;
+const PARK_MAX_ITEMS = 200;
+
+// Every column the API hands back, with the cashier who parked it resolved to a
+// name. Shared by the listing, the upsert's read-back and resume — so the three
+// can never return different shapes for the same row.
+const SELECT_PARKED = `
+  SELECT p.id, p.cart_id, p.label, p.items, p.customer_id, p.customer_label, p.discount,
+         p.user_id, u.full_name AS cashier_name, p.till_id, p.till_label,
+         p.created_at, p.updated_at
+  FROM parked_carts p
+  LEFT JOIN users u ON u.id = p.user_id
+`;
+
+/**
+ * Read a stored items blob back into lines.
+ *
+ * Returns an empty list rather than throwing if the blob is somehow unreadable:
+ * the parked bill is holding stock, so the screen must still be able to SEE it
+ * and an admin must still be able to discard it and get that stock back. Losing
+ * the lines is bad; a 500 that hides the order and strands the hold is worse.
+ * Everything written through POST /parked is validated and re-serialised below,
+ * so this is a corruption guard, not a normal path.
+ */
+function parseParkedItems(raw: any, cartId: string): any[] {
+  try {
+    const parsed = JSON.parse(String(raw ?? "[]"));
+    if (Array.isArray(parsed)) return parsed;
+    console.error(`[pos] parked bill ${cartId} stores items that are not an array`);
+  } catch (err: any) {
+    console.error(`[pos] could not read the items of parked bill ${cartId}:`, err?.message || err);
+  }
+  return [];
+}
+
+/** A parked_carts row in the shape every parked-bill route returns. */
+function shapeParked(row: any): any {
+  return {
+    cart_id: row.cart_id,
+    label: row.label ?? "",
+    items: parseParkedItems(row.items, row.cart_id),
+    customer_id: row.customer_id ?? null,
+    customer_label: row.customer_label ?? "",
+    discount: row.discount ?? 0,
+    user_id: row.user_id ?? null,
+    cashier_name: row.cashier_name ?? null,
+    till_id: row.till_id ?? null,
+    till_label: row.till_label ?? "",
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
+}
+
+/**
+ * Forget a cart's parked bill, because the order is not parked any more.
+ *
+ * Called where the cart's HOLDS are released and for the same reason: a parked
+ * bill must never outlive the stock set aside for it, in either direction.
+ *
+ * Best-effort and never fatal at the sale call site, exactly like
+ * releaseCartClaim(): the money is already committed there, and failing to tidy
+ * up must not report a recorded sale as a failure.
+ */
+function releaseParkedCart(cartId: string | null | undefined): boolean {
+  const cart = String(cartId || "").trim();
+  if (!cart) return false;
+  try {
+    const result = getDb().query("DELETE FROM parked_carts WHERE cart_id = ?").run(cart);
+    return Number(result.changes || 0) > 0;
+  } catch (err: any) {
+    console.error(`[pos] could not drop the parked bill for ${cart}:`, err?.message || err);
+    return false;
+  }
+}
+
+/** A number we are willing to store: finite, and not a string of nonsense. */
+function parkedNumber(value: any): number | null {
+  if (value === null || value === undefined || value === "") return null;
+  const n = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+// Every parked bill in the shop, newest first.
+//
+// Readable by ANY logged-in user, with no filter by till or cashier: a parked
+// order must be resumable from whichever till the customer comes back to, and
+// the stock it holds is denied to the whole shop, so the whole shop gets to see
+// what is holding it. That is the entire point of this table.
+pos.get("/parked", (c) => {
+  const db = getDb();
+  const rows = db.query(`${SELECT_PARKED} ORDER BY p.created_at DESC, p.id DESC`).all() as any[];
+  return c.json(rows.map(shapeParked));
+});
+
+// Park a cart. Body:
+// { cart_id, label, items: [{ product_id, product_name, quantity, unit_price,
+//   original_price }], customer_id, customer_label, discount, till_id, till_label }
+//
+// UPSERT on cart_id: re-parking the same cart (the cashier adds a line and puts
+// it down again) updates the one row instead of growing a second copy of one
+// customer's order.
+//
+// Holds are NOT touched here. Parking exists precisely to keep them, and the
+// till owns them through /reservations/sync; creating or re-checking stock here
+// would either double-hold or, worse, refuse a park because of the cart's own
+// hold and leave the cashier with an order they cannot put down.
+pos.post("/parked", async (c) => {
+  const user = getUser(c)!;
+  const body = await c.req.json().catch(() => null);
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return c.json({ error: "Body must be a JSON object" }, 400);
+  }
+
+  const cartId = typeof body.cart_id === "string" ? body.cart_id.trim() : "";
+  if (!cartId) return c.json({ error: "cart_id is required and must be a non-empty string" }, 400);
+  if (cartId.length > PARK_MAX_LEN) {
+    return c.json({ error: `cart_id must be at most ${PARK_MAX_LEN} characters` }, 400);
+  }
+
+  // A cart that has already become a bill is not parkable. The till rotates to a
+  // fresh cart id the instant a sale completes, so this can only be a bug or a
+  // stale retry — and storing it would put a ghost order in front of a cashier
+  // whose only possible outcome is the duplicate-bill replay.
+  const billed = findBillByCartId(cartId);
+  if (billed) {
+    return c.json(
+      { error: `That cart has already been billed (token #${billed.token_number}), so it cannot be parked.` },
+      400
+    );
+  }
+
+  if (body.label != null && typeof body.label !== "string") {
+    return c.json({ error: "label must be a string" }, 400);
+  }
+  const label = (typeof body.label === "string" ? body.label.trim() : "").slice(0, PARK_MAX_LEN);
+
+  if (!Array.isArray(body.items) || body.items.length === 0) {
+    return c.json({ error: "items must be a non-empty array of cart lines" }, 400);
+  }
+  if (body.items.length > PARK_MAX_ITEMS) {
+    return c.json({ error: `items must hold at most ${PARK_MAX_ITEMS} lines` }, 400);
+  }
+
+  const db = getDb();
+  const items: any[] = [];
+  for (let i = 0; i < body.items.length; i++) {
+    const raw = body.items[i];
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+      return c.json({ error: `items[${i}] must be an object` }, 400);
+    }
+
+    // product_id may be absent (a line that no longer points at a product), but
+    // if it is sent it must be a real positive integer id.
+    let productId: number | null = null;
+    if (raw.product_id != null && raw.product_id !== "") {
+      const pid = parkedNumber(raw.product_id);
+      if (pid === null || !Number.isInteger(pid) || pid <= 0) {
+        return c.json({ error: `items[${i}].product_id must be a positive integer or null` }, 400);
+      }
+      productId = pid;
+    }
+
+    // The name is what the cashier and the "Held stock" screen read, so a line
+    // without one is useless. Filled in from the product rather than rejected
+    // where that is possible: refusing a park loses the customer's order, which
+    // is the harm this whole feature exists to stop.
+    let productName = typeof raw.product_name === "string" ? raw.product_name.trim() : "";
+    if (!productName && productId) {
+      const p = db.query("SELECT name FROM products WHERE id = ?").get(productId) as any;
+      productName = (p?.name || "").trim();
+    }
+    if (!productName) {
+      return c.json({ error: `items[${i}].product_name is required` }, 400);
+    }
+    productName = productName.slice(0, PARK_MAX_LEN);
+
+    const quantity = parkedNumber(raw.quantity);
+    if (quantity === null || quantity <= 0) {
+      return c.json({ error: `items[${i}].quantity must be a number greater than 0` }, 400);
+    }
+    const unitPrice = parkedNumber(raw.unit_price);
+    if (unitPrice === null || unitPrice < 0) {
+      return c.json({ error: `items[${i}].unit_price must be a number of 0 or more` }, 400);
+    }
+    const originalPrice = parkedNumber(raw.original_price);
+    if (raw.original_price != null && raw.original_price !== "" && (originalPrice === null || originalPrice < 0)) {
+      return c.json({ error: `items[${i}].original_price must be a number of 0 or more, or null` }, 400);
+    }
+
+    // Stored normalised, never as the caller sent it: the resume that reads this
+    // back feeds a cart that takes money, so the only keys in here are the five
+    // the till actually uses, with numbers that are numbers.
+    items.push({
+      product_id: productId,
+      product_name: productName,
+      quantity,
+      unit_price: unitPrice,
+      original_price: originalPrice ?? unitPrice,
+    });
+  }
+
+  const discount = body.discount == null || body.discount === "" ? 0 : parkedNumber(body.discount);
+  if (discount === null || discount < 0) {
+    return c.json({ error: "discount must be a number of 0 or more" }, 400);
+  }
+
+  // A customer the row can no longer point at (deleted between parking and
+  // re-parking) is stored as NULL rather than refused: customer_label keeps the
+  // name on screen, and losing a link must not lose the order. A customer_id
+  // that is not an id at all is still a caller bug, so that is a 400.
+  let customerId: number | null = null;
+  if (body.customer_id != null && body.customer_id !== "") {
+    const cid = parkedNumber(body.customer_id);
+    if (cid === null || !Number.isInteger(cid) || cid <= 0) {
+      return c.json({ error: "customer_id must be a positive integer or null" }, 400);
+    }
+    const exists = db.query("SELECT id FROM customers WHERE id = ?").get(cid) as any;
+    customerId = exists ? cid : null;
+  }
+
+  if (body.customer_label != null && typeof body.customer_label !== "string") {
+    return c.json({ error: "customer_label must be a string" }, 400);
+  }
+  const customerLabel = (typeof body.customer_label === "string" ? body.customer_label.trim() : "").slice(
+    0,
+    PARK_MAX_LEN
+  );
+
+  // till_id / till_label are provenance ("which machine put this down"), shown
+  // beside the order so a cashier knows where it came from. Optional: a till
+  // that never named itself must still be able to park an order.
+  if (body.till_id != null && typeof body.till_id !== "string") {
+    return c.json({ error: "till_id must be a string or null" }, 400);
+  }
+  if (body.till_label != null && typeof body.till_label !== "string") {
+    return c.json({ error: "till_label must be a string" }, 400);
+  }
+  const tillId = (typeof body.till_id === "string" ? body.till_id.trim() : "").slice(0, PARK_MAX_LEN) || null;
+  const tillLabel =
+    (typeof body.till_label === "string" ? body.till_label.trim() : "").slice(0, PARK_MAX_LEN) || tillId || "";
+
+  // created_at is NOT in the UPDATE clause: it is when this order was first put
+  // aside, and the cashier reading "parked at 10:42" must not see that jump every
+  // time a line is added. updated_at carries "last re-parked".
+  const upsert = db.query(`
+    INSERT INTO parked_carts
+      (cart_id, label, items, customer_id, customer_label, discount, user_id, till_id, till_label, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+    ON CONFLICT(cart_id) DO UPDATE SET
+      label = excluded.label,
+      items = excluded.items,
+      customer_id = excluded.customer_id,
+      customer_label = excluded.customer_label,
+      discount = excluded.discount,
+      user_id = excluded.user_id,
+      till_id = excluded.till_id,
+      till_label = excluded.till_label,
+      updated_at = excluded.updated_at
+  `);
+
+  const stored = db.transaction(() => {
+    upsert.run(
+      cartId,
+      label,
+      JSON.stringify(items),
+      customerId,
+      customerLabel,
+      discount,
+      user.id,
+      tillId,
+      tillLabel
+    );
+    return db.query(`${SELECT_PARKED} WHERE p.cart_id = ?`).get(cartId) as any;
+  }).immediate();
+
+  return c.json({ success: true, parked: shapeParked(stored) });
+});
+
+// Resume a parked bill: hand the order back to the till that asked for it, and
+// stop it being parked.
+//
+// RACE-SAFE BY CONSTRUCTION. The read and the delete are ONE immediate
+// transaction with no await inside it, so two tills tapping Resume on the same
+// customer's order at the same moment cannot both come away owning it: whoever
+// gets there first takes the row, the other finds nothing and is told so. Two
+// cashiers each believing they are serving one order — one of them doomed to find
+// the stock gone — is the failure this endpoint must never allow.
+//
+// The cart's HOLDS are left exactly as they are: the resumed cart keeps the stock
+// that was set aside for it, which is the continuity parking promised.
+pos.post("/parked/:cartId/resume", (c) => {
+  const cartId = (c.req.param("cartId") || "").trim();
+  if (!cartId) return c.json({ error: "cart_id is required" }, 400);
+
+  const db = getDb();
+  const taken = db.transaction(() => {
+    const row = db.query(`${SELECT_PARKED} WHERE p.cart_id = ?`).get(cartId) as any;
+    if (!row) return null;
+    // The DELETE's own change count is the authority on who won, not the SELECT:
+    // only one transaction can remove this row, and 0 here means it was already
+    // gone, so its contents must not be handed out.
+    const deleted = db.query("DELETE FROM parked_carts WHERE cart_id = ?").run(cartId);
+    if (Number(deleted.changes || 0) === 0) return null;
+    return row;
+  }).immediate();
+
+  if (!taken) {
+    return c.json({ error: "That parked bill has already been resumed or discarded." }, 404);
+  }
+  return c.json({ success: true, parked: shapeParked(taken) });
+});
+
+// Discard a parked bill: the customer walked away, the order is off.
+//
+// The row and its stock holds go in ONE transaction. Discarding an order and
+// leaving its hold standing is the exact bug that started all of this — stock
+// locked shop-wide behind an order that no longer exists anywhere — so it is not
+// left to a second request that may never arrive.
+//
+// Idempotent: a cart with no parked row still has its holds released and still
+// answers success, so a retry after a dropped response finishes the job instead
+// of leaving stock locked.
+pos.delete("/parked/:cartId", (c) => {
+  const user = getUser(c)!;
+  const cartId = (c.req.param("cartId") || "").trim();
+  if (!cartId) return c.json({ error: "cart_id is required" }, 400);
+
+  const db = getDb();
+  const outcome = db.transaction(() => {
+    const row = db.query("SELECT label, items FROM parked_carts WHERE cart_id = ?").get(cartId) as any;
+    const removed = Number(db.query("DELETE FROM parked_carts WHERE cart_id = ?").run(cartId).changes || 0) > 0;
+    const released = releaseCartReservations(cartId);
+    // Logged because a discarded order is a real customer order being thrown
+    // away, and the owner should be able to see that happen rather than discover
+    // a hole later. Its own action name — nothing counts sales or stock movements
+    // from it.
+    if (removed) {
+      const lines = parseParkedItems(row?.items, cartId);
+      db.query("INSERT INTO activity_log (user_id, action, details) VALUES (?, 'discarded_parked_bill', ?)").run(
+        user.id,
+        JSON.stringify({
+          cart_id: cartId,
+          label: row?.label || "",
+          lines: lines.length,
+          items: lines.map((i: any) => ({ product_name: i.product_name, quantity: i.quantity })),
+          released,
+        })
+      );
+    }
+    return { removed, released };
+  }).immediate();
+
+  // Outside the transaction, like every other claim cleanup: a claim is only an
+  // annotation, and losing one must not roll back stock going back on the shelf.
+  releaseCartClaim(cartId);
+
+  return c.json({ success: true, cart_id: cartId, released: outcome.released, removed: outcome.removed });
+});
+
 // --- Cart stock reservations ("holds") ---------------------------------------
 //
 // Mounted on the POS router rather than a router of their own: holds are a till
@@ -621,7 +1018,16 @@ pos.get("/reservations/cart/:cartId", (c) => {
 // Cart cleared / sale abandoned / cart parked-and-dropped.
 pos.delete("/reservations/cart/:cartId", (c) => {
   const cartId = c.req.param("cartId");
-  const released = releaseCartReservations(cartId);
+  const db = getDb();
+  // The holds and any parked bill for this cart go in ONE transaction. Handing
+  // a cart's stock back while leaving its parked order on the server would leave
+  // an order the shop believes it owes with nothing set aside for it — the mirror
+  // image of the bug parked_carts exists to fix.
+  const released = db.transaction(() => {
+    const n = releaseCartReservations(cartId);
+    db.query("DELETE FROM parked_carts WHERE cart_id = ?").run(cartId);
+    return n;
+  }).immediate();
   // This cart is over, so its claim is over - nothing is left for a claim to
   // annotate. If the till keeps this cart id and holds something again, its next
   // heartbeat puts the claim straight back.
@@ -672,6 +1078,52 @@ pos.get("/reservations", (c) => {
       // date: "how long since this till was heard from" is a wall-clock
       // question, and a 5 AM business-day rollover would make nonsense of it.
       last_seen_at: cl.last_seen_at,
+      // Where this came from, so a screen never has to guess whether it is
+      // reading a till's say-so or a fact the server stores.
+      source: "till_claim",
+    });
+  }
+
+  // parked_carts OVERRIDES a till's self-report, and stands in for a missing one.
+  // A claim is an annotation a till asserts about itself; a parked bill is a
+  // stored fact this server owns, so where the two disagree the row wins. This is
+  // what finally makes "parked" trustworthy on the one screen that matters: a
+  // till switched off for the night, or one that never claimed anything at all,
+  // no longer makes a real customer's order look like a stranded hold — and the
+  // order has a NAME, so the screen can say whose cake it is.
+  //
+  // ACTIVE carts are untouched: no parked_carts row exists for one, so only the
+  // till can say it is ringing something up, exactly as before.
+  const parkedRows = db.query(`
+    SELECT p.cart_id, p.label, p.till_id, p.till_label, p.user_id, p.created_at, p.updated_at,
+           u.full_name AS user_name
+    FROM parked_carts p
+    LEFT JOIN users u ON u.id = p.user_id
+  `).all() as any[];
+
+  for (const p of parkedRows) {
+    const claim = byCart.get(p.cart_id);
+    byCart.set(p.cart_id, {
+      state: "parked",
+      // The till's own values are kept where parked_carts has nothing to say, so
+      // nothing the screen already prints disappears.
+      till_id: p.till_id || claim?.till_id || null,
+      till_label: p.till_label || claim?.till_label || "",
+      user_name: p.user_name ?? claim?.user_name ?? null,
+      // "When were we last told about this cart?" A live claim still answers that
+      // best; otherwise it is when the order was last parked — the server's own
+      // record rather than a heartbeat, which is why a till being off all night
+      // no longer makes its parked order look abandoned. Same UTC
+      // "YYYY-MM-DD HH:MM:SS" shape either way, so the frontend reads it with the
+      // same parseDbDate().
+      last_seen_at: claim?.last_seen_at || p.updated_at || p.created_at,
+      // The name the cashier gave the order (the customer, or "Hold 10:42"), so
+      // the "Held stock" screen can name what is holding the stock instead of
+      // showing a bare cart id. `label` is an alias of `parked_label`.
+      parked_label: p.label || "",
+      label: p.label || "",
+      parked_at: p.created_at,
+      source: "parked_carts",
     });
   }
 

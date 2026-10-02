@@ -361,6 +361,11 @@
         who: c.user_name || '',
         seenText: unknown ? 'check-in time unknown' : (mins < 1 ? 'checked in just now' : `checked in ${gap} ago`),
         seenStale: unknown || mins >= CLAIM_STALE_MINUTES,
+        // The parked bill's own name - a customer ("Mrs Perera") or whatever the
+        // cashier typed ("Birthday - Fernando"). `parked_label` and `label` are
+        // aliases of each other on the server; trimmed, so a blank label counts as
+        // no label and the line falls back to exactly what it said before.
+        label: String(c.parked_label ?? c.label ?? '').trim(),
       };
     }
 
@@ -386,10 +391,22 @@
       const badge = claim.kind === 'active'
         ? '<span class="badge success">Cart open</span>'
         : '<span class="badge info">Parked order</span>';
+      // Name the bill beside the badge: "Parked order - Mrs Perera" tells the
+      // owner whose cake this is and whether to go and ask about it, which
+      // "Parked order" on its own does not. Escaped, because this is a
+      // cashier-typed customer name. An empty or absent label leaves the line
+      // exactly as it reads today rather than printing a bare separator.
+      const bill = claim.kind === 'parked' && claim.label
+        ? ` <b>· ${escapeHtml(claim.label)}</b>`
+        : '';
       const who = claim.who
         ? `${escapeHtml(claim.till)} · ${escapeHtml(claim.who)}`
         : escapeHtml(claim.till);
-      return `<div class="list-meta">${badge} ${who}</div>`
+      // A dot rather than a space once the bill is named, so the name does not
+      // run into the till that is holding it on this 360px line. Without a
+      // label the line is byte-for-byte what it was before.
+      const sep = bill ? ' · ' : ' ';
+      return `<div class="list-meta">${badge}${bill}${sep}${who}</div>`
         + `<div class="list-meta"${claim.seenStale ? ' style="color:var(--amber);font-weight:600;"' : ''}>${escapeHtml(claim.seenText)}</div>`;
     }
 

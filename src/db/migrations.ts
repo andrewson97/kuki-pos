@@ -219,6 +219,52 @@ export function runMigrations(): void {
     -- an index. cart_id's UNIQUE constraint already indexes the other lookup.
     CREATE INDEX IF NOT EXISTS idx_cart_claims_till ON cart_claims(till_id);
 
+    -- Parked bills ("held carts"): a confirmed customer order the cashier has
+    -- set aside to serve someone else. These used to live ONLY in the parking
+    -- browser's localStorage (kuki_held_carts) while the stock hold they own
+    -- lives here, shop-wide — so the hold was durable and global while the order
+    -- that justified it was fragile and local: invisible from every other till,
+    -- and permanently lost (hold included, standing forever) if that tablet was
+    -- wiped or replaced. The order now lives on the server beside its hold.
+    --
+    -- cart_id is UNIQUE: one parked bill per cart, which makes re-parking the
+    -- same cart an upsert instead of a duplicate, makes resume/discard a lookup
+    -- by cart id, and is the key the holds listing joins on.
+    --
+    -- items is the cart lines as JSON text — the same shape the till sends and
+    -- receives, [{ product_id, product_name, quantity, unit_price,
+    -- original_price }]. JSON, not a child table: this is a snapshot of an
+    -- unsold cart that is only ever read and written whole (never joined,
+    -- aggregated or reported on), and it must keep the prices as quoted to the
+    -- customer even if the product's price changes while the bill is parked.
+    -- The real line items become rows in bill_items when the sale completes.
+    --
+    -- customer_id is nullable and customer_label is kept alongside it so a
+    -- parked order still names its customer even if that customer row is gone.
+    -- created_at is when the order was first parked (an upsert keeps it, so the
+    -- "parked at" time the cashier sees does not jump); updated_at moves on
+    -- every re-park.
+    CREATE TABLE IF NOT EXISTS parked_carts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      cart_id TEXT NOT NULL UNIQUE,
+      label TEXT NOT NULL DEFAULT '',
+      items TEXT NOT NULL DEFAULT '[]',
+      customer_id INTEGER REFERENCES customers(id),
+      customer_label TEXT NOT NULL DEFAULT '',
+      discount REAL NOT NULL DEFAULT 0,
+      user_id INTEGER REFERENCES users(id),
+      till_id TEXT,
+      till_label TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    -- The listing is "every parked bill, newest first" (any till may resume any
+    -- of them), so created_at is what it orders on. cart_id's UNIQUE constraint
+    -- already indexes the by-cart lookups that resume, discard, the completed
+    -- sale and the holds listing all use.
+    CREATE INDEX IF NOT EXISTS idx_parked_carts_created ON parked_carts(created_at DESC);
+
     CREATE TABLE IF NOT EXISTS cash_counts (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       count_type TEXT NOT NULL CHECK(count_type IN ('open', 'close')),

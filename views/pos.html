@@ -33,7 +33,7 @@
           <span>Cart <span class="badge bg-secondary" id="cart-count">0</span></span>
           <div class="d-flex gap-2">
             <button class="btn btn-sm btn-outline-primary" onclick="openHeld()">⏸ Held <span class="badge bg-primary" id="held-count" style="display:none;">0</span></button>
-            <button class="btn btn-sm btn-outline-info" onclick="parkCurrent()">Park</button>
+            <button class="btn btn-sm btn-outline-info" onclick="parkCurrent(this)">Park</button>
             <button class="btn btn-sm btn-outline-danger" onclick="clearCart()">Clear</button>
           </div>
         </div>
@@ -139,7 +139,7 @@
     <div class="modal-dialog modal-lg modal-dialog-scrollable">
       <div class="modal-content">
         <div class="modal-header">
-          <h5 class="modal-title">Held carts</h5>
+          <h5 class="modal-title">Parked bills &mdash; all tills</h5>
           <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
         </div>
         <div class="modal-body">
@@ -295,7 +295,11 @@
       renderProducts();
       setupCustomerSearch();
       await checkShiftState();
-      renderHeldBadge();
+      // Bills parked in this browser before parked bills moved to the server go
+      // up FIRST, so the list read next already includes them.
+      await migrateLegacyParked();
+      await loadParked(); // fills the badge
+
       // Needs the grid: a restored line is reconciled against it. Before
       // rehydrateHolds(), which is now only the fallback for holds with no
       // saved cart behind them.
@@ -731,8 +735,8 @@
     // ===== The cart itself, persisted (same lifetime as its hold) =====
     // Same field set parkCurrent() snapshots — lines, discount, customer — so a
     // restored cart and a resumed one are the same sale. Storage is wrapped the
-    // way getHeld()/setHeld() are: it can throw (private mode, full quota) and a
-    // till that cannot save a cart still has to be able to sell.
+    // way every other storage read here is: it can throw (private mode, full
+    // quota) and a till that cannot save a cart still has to be able to sell.
     function persistCart() {
       if (!cartStorageReady) return;
       try {
@@ -847,95 +851,182 @@
       await refreshAvailability();
     }
 
-    // ===== Held carts (parked, stored in localStorage per device) =====
-    const HELD_KEY = 'kuki_held_carts';
-    function getHeld() { try { return JSON.parse(localStorage.getItem(HELD_KEY) || '[]'); } catch { return []; } }
-    // Storage can throw (private mode, quota). getHeld() already tolerates that;
-    // this did not, so a park died inside here and left the cart on screen with
-    // nothing said. Report it instead: the cart is still sellable, it just could
-    // not be put aside.
-    function setHeld(arr) {
-      let saved = true;
-      try { localStorage.setItem(HELD_KEY, JSON.stringify(arr)); } catch { saved = false; }
-      renderHeldBadge();
-      return saved;
+    // ===== Parked bills (on the SERVER, shared by every till) =====
+    // These used to live in this browser's localStorage, which meant a confirmed
+    // customer order was invisible from the other counter and died with a cleared
+    // cache — while the stock hold it kept on purpose lived on forever. The
+    // server owns them now: /api/pos/parked is the only source of truth, and
+    // `parkedBills` is simply the last answer it gave, so the badge, the list and
+    // the claim report all describe the same thing.
+    let parkedBills = [];
+    // Which of those THIS till parked. Used only by reportClaims(), which is
+    // per-till with replace semantics, so this till must name its own and only
+    // its own.
+    const myParkedCartIds = new Set();
+
+    // Silent on failure on purpose: a till that cannot read the parked list must
+    // still be able to sell, and the badge just keeps showing the last count.
+    // Callers who need to know (resume's 404 refresh) read the return value.
+    async function loadParked() {
+      try {
+        const rows = await api('/api/pos/parked');
+        parkedBills = Array.isArray(rows) ? rows : [];
+        // Reconcile "mine": a bill resumed or discarded from another till drops
+        // out by itself, and after a reload this till re-adopts its own — by
+        // till_id, which the server echoes back, so two tills with the same
+        // cashier signed in are still told apart. The label is only a fallback
+        // for a row stored before till_id was kept.
+        const myTill = getTillId();
+        const myLabel = tillLabel();
+        const live = [];
+        for (const b of parkedBills) {
+          if (!b || !b.cart_id) continue;
+          const id = String(b.cart_id);
+          const isMine = b.till_id ? b.till_id === myTill : b.till_label === myLabel;
+          if (isMine || myParkedCartIds.has(id)) live.push(id);
+        }
+        myParkedCartIds.clear();
+        live.forEach(id => myParkedCartIds.add(id));
+        renderHeldBadge();
+        return true;
+      } catch {
+        return false;
+      }
     }
+
     function renderHeldBadge() {
-      const held = getHeld();
       const badge = document.getElementById('held-count');
-      if (held.length) { badge.style.display = 'inline-block'; badge.textContent = held.length; }
+      if (!badge) return;
+      if (parkedBills.length) { badge.style.display = 'inline-block'; badge.textContent = parkedBills.length; }
       else { badge.style.display = 'none'; }
     }
-    async function parkCurrent() {
-      if (!cart.length) { showToast('Cart is empty', 'warning'); return; }
+
+    // This bill is no longer parked: it was resumed, discarded, or found gone.
+    function forgetParked(cartId) {
+      const id = String(cartId);
+      parkedBills = parkedBills.filter(b => b && String(b.cart_id) !== id);
+      myParkedCartIds.delete(id);
+      renderHeldBadge();
+    }
+
+    // Park: put a confirmed order aside WITHOUT releasing its hold — keeping the
+    // stock for that customer is the whole point. Returns true only when the
+    // server took the bill, because nothing may clear this cart until it did.
+    async function parkCurrent(btn) {
+      if (!cart.length) { showToast('Cart is empty', 'warning'); return false; }
+      // withBusy guards the button itself; this only stops the second click from
+      // reporting an in-flight park as a failure below.
+      if (btn && btn.getAttribute('data-busy') === '1') return false;
       // Let a sync still in flight settle first: a rejected one reverts the cart,
       // and what gets parked has to be exactly what the server holds.
       await syncChain;
-      if (!cart.length) { showToast('Cart is empty', 'warning'); return; }
+      if (!cart.length) { showToast('Cart is empty', 'warning'); return false; }
       const custLabel = document.getElementById('customer-selected-name').textContent || '';
       const label = custLabel || ('Hold ' + new Date().toLocaleTimeString());
-      const held = getHeld();
-      held.push({
-        id: Date.now(),
-        cart_id: getCartId(), // the hold travels with the parked cart
+      const parkedCartId = getCartId(); // the hold travels with the parked bill
+      const body = {
+        cart_id: parkedCartId,
         label,
-        items: cart.slice(),
+        items: cart.map(i => ({
+          product_id: i.product_id,
+          product_name: i.product_name,
+          quantity: i.quantity,
+          unit_price: i.unit_price,
+          original_price: i.original_price || i.unit_price,
+        })),
         customer_id: document.getElementById('customer-id').value || '',
         customer_label: custLabel,
         discount: parseFloat(document.getElementById('discount-input').value) || 0,
-        created_at: new Date().toISOString(),
-      });
-      // If storage refused the write the cart was never parked, so leave it on
-      // screen under the same id rather than clearing it into nowhere. The hold
-      // still stands, so nothing is oversold either way.
-      if (!setHeld(held)) {
-        showToast('Could not park this cart - the browser refused to save it. Finish the sale or clear it.', 'error');
-        return;
+        till_id: getTillId(),
+        till_label: tillLabel(),
+      };
+      const res = await withBusy(btn || null, () => api('/api/pos/parked', { method: 'POST', body }), 'Parking...');
+      // withBusy turns a failure into a toast and returns undefined. Either way
+      // the bill was never parked, so the cart stays on screen under the same id
+      // with its hold intact — exactly what the old storage-failure path did.
+      if (!res || !res.success) {
+        showToast('Could not park this bill - the server did not save it. The cart is still here: finish the sale, or press Park again.', 'error');
+        return false;
       }
-      // Parking must NOT release — holding the stock for this customer is the
-      // whole point. The till just moves on to a new cart id, which is why the
-      // parked lines now count as another cart's and leave this grid.
+      const parked = res.parked || { ...body, cashier_name: (currentUser && currentUser.full_name) || '', created_at: new Date().toISOString() };
+      parkedBills = [parked, ...parkedBills.filter(b => b && String(b.cart_id) !== String(parkedCartId))];
+      myParkedCartIds.add(String(parkedCartId));
+      renderHeldBadge();
+      // Parking must NOT release. The till just moves on to a new cart id, which
+      // is why the parked lines now count as another cart's and leave this grid.
+      // startNewCart() reports the claims, and the parked id is already in
+      // myParkedCartIds, so it goes up as parked in the same breath.
       startNewCart();
       resetCartState();
-      // The sale now lives in held carts, which have storage of their own.
+      // The bill lives on the server now, not in the saved-cart slot.
       clearPersistedCart();
-      showToast('Cart parked');
+      showToast('Bill parked');
       refreshAvailability();
-    }
-    function openHeld() {
-      renderHeldCards();
-      new bootstrap.Modal(document.getElementById('heldModal')).show();
+      return true;
     }
 
-    function renderHeldCards() {
-      const held = getHeld();
-      const wrap = document.getElementById('held-cards');
-      if (!held.length) {
-        wrap.innerHTML = '<div class="col-12 text-center text-muted py-4">No held carts. Park a cart from the POS to see it here.</div>';
+    async function openHeld() {
+      renderHeldCards(true);
+      new bootstrap.Modal(document.getElementById('heldModal')).show();
+      // Always re-read on open: the other counter may have parked, resumed or
+      // discarded something since the last beat.
+      if (!await loadParked()) {
+        document.getElementById('held-cards').innerHTML =
+          '<div class="col-12 text-center text-muted py-4">Could not reach the server to read the parked bills. Check the connection and open this again.</div>';
         return;
       }
-      wrap.innerHTML = held.map(h => {
-        const total = h.items.reduce((s, i) => s + i.quantity * i.unit_price, 0);
-        const itemCount = h.items.reduce((s, i) => s + i.quantity, 0);
-        const preview = h.items.slice(0, 4).map(i => `<li>${i.quantity}× ${i.product_name} <span class="text-muted">${formatCurrency(i.quantity * i.unit_price)}</span></li>`).join('');
-        const more = h.items.length > 4 ? `<li class="text-muted">+ ${h.items.length - 4} more…</li>` : '';
-        const time = new Date(h.created_at).toLocaleTimeString('en-LK', { timeZone: 'Asia/Colombo', hour: '2-digit', minute: '2-digit' });
+      renderHeldCards();
+    }
+
+    function renderHeldCards(loading) {
+      const wrap = document.getElementById('held-cards');
+      if (!wrap) return;
+      if (loading) {
+        wrap.innerHTML = '<div class="col-12 text-center text-muted py-4">Loading parked bills&hellip;</div>';
+        return;
+      }
+      if (!parkedBills.length) {
+        wrap.innerHTML = '<div class="col-12 text-center text-muted py-4">No parked bills. Park a cart from any till to see it here.</div>';
+        return;
+      }
+      wrap.innerHTML = parkedBills.map(h => {
+        const id = String(h.cart_id || '');
+        const items = Array.isArray(h.items) ? h.items : [];
+        const total = items.reduce((s, i) => s + i.quantity * i.unit_price, 0);
+        const itemCount = items.reduce((s, i) => s + i.quantity, 0);
+        const preview = items.slice(0, 4).map(i => `<li>${i.quantity}&times; ${escapeHtml(i.product_name)} <span class="text-muted">${formatCurrency(i.quantity * i.unit_price)}</span></li>`).join('');
+        const more = items.length > 4 ? `<li class="text-muted">+ ${items.length - 4} more&hellip;</li>` : '';
+        const when = parseDbDate(h.created_at);
+        const time = when ? when.toLocaleTimeString('en-LK', { timeZone: 'Asia/Colombo', hour: '2-digit', minute: '2-digit' }) : '';
+        // Every till's bills are in this list now, so say whose each one is: a
+        // cashier has to be able to tell their own order from the other counter's
+        // before resuming or discarding it.
+        const mine = myParkedCartIds.has(id);
+        // till_label already reads "Counter · Nimali", so the cashier's name is
+        // only added when it is not already in there.
+        const whose = escapeHtml(h.till_label && h.cashier_name && !String(h.till_label).includes(h.cashier_name)
+          ? `${h.cashier_name} · ${h.till_label}`
+          : (h.till_label || h.cashier_name || ''));
         return `
           <div class="col-md-6">
-            <div class="card h-100" style="border:2px solid #e9ecef;border-radius:12px;">
+            <div class="card h-100" style="border:2px solid ${mine ? '#0d6efd' : '#e9ecef'};border-radius:12px;">
               <div class="card-body d-flex flex-column">
                 <div class="d-flex justify-content-between align-items-start mb-2">
                   <div>
-                    <h6 class="card-title mb-0 fw-bold">${h.label}</h6>
-                    <small class="text-muted">Parked at ${time}${h.customer_label ? ' · ' + h.customer_label : ''}</small>
+                    <h6 class="card-title mb-0 fw-bold">${escapeHtml(h.label || 'Parked bill')}</h6>
+                    <small class="text-muted">Parked${time ? ' at ' + time : ''}${h.customer_label ? ' &middot; ' + escapeHtml(h.customer_label) : ''}</small>
                   </div>
                   <span class="badge bg-primary fs-6">${formatCurrency(total)}</span>
+                </div>
+                <div class="mb-2">
+                  <span class="badge ${mine ? 'bg-success' : 'bg-secondary'}">${mine ? 'This till' : 'Another till'}</span>
+                  ${whose ? `<small class="text-muted ms-1">${whose}</small>` : ''}
                 </div>
                 <ul class="small mb-2 ps-3" style="line-height:1.5;">${preview}${more}</ul>
                 <div class="text-muted small mb-3">${itemCount} item${itemCount === 1 ? '' : 's'}</div>
                 <div class="mt-auto d-flex gap-2">
-                  <button class="btn btn-primary flex-fill" onclick="resumeAndClose(${h.id})">Resume</button>
-                  <button class="btn btn-outline-danger" onclick="deleteHeldFromModal(${h.id})">Delete</button>
+                  <button class="btn btn-primary flex-fill" onclick="resumeHeld('${escapeHtml(id)}', this)">Resume</button>
+                  <button class="btn btn-outline-danger" onclick="discardHeld('${escapeHtml(id)}', this)">Delete</button>
                 </div>
               </div>
             </div>
@@ -943,59 +1034,192 @@
       }).join('');
     }
 
-    function resumeAndClose(id) {
-      bootstrap.Modal.getInstance(document.getElementById('heldModal')).hide();
-      resumeHeld(id);
-    }
-
-    function deleteHeldFromModal(id) {
-      if (!confirm('Delete this held cart? Items will not be billed.')) return;
-      const h = getHeld().find(x => x.id === id);
-      setHeld(getHeld().filter(x => x.id !== id));
-      renderHeldCards();
-      reportClaims(); // one fewer parked cart to claim
-      // Discarding a parked cart is the one park-side action that does hand the
-      // stock back.
-      if (h && h.cart_id) releaseHoldsFor(h.cart_id).then(refreshAvailability);
-    }
-    async function resumeHeld(id) {
-      const h = getHeld().find(x => x.id === id);
-      if (!h) return;
-      const swap = () => {
-        // Adopt THAT cart's id so it picks its own holds back up. Carts parked
-        // before this feature shipped have none; the sync below takes them.
-        adoptCartId(h.cart_id || newCartId());
-        cart = h.items.slice();
-        lastSyncedCart = cart.map(i => ({ ...i }));
-        holdsOnServer = true;
-        document.getElementById('discount-input').value = h.discount || 0;
-        if (h.customer_id && h.customer_label) selectCustomer(parseInt(h.customer_id), h.customer_label);
-        else clearCustomer();
-        // Refetch held inside swap — parkCurrent may have added to it.
-        setHeld(getHeld().filter(x => x.id !== id));
-        reportClaims(); // this cart is the active claim now, not a parked one
-        renderCart();
-        showToast('Resumed');
-        // Idempotent re-assert. For a cart parked under this feature the server
-        // already holds these lines; for an older one this is where the hold is
-        // taken, and where a 400 says the stock went elsewhere meanwhile.
-        queueCartSync().then(refreshAvailability);
-      };
+    async function resumeHeld(cartId, btn) {
+      const id = String(cartId || '');
+      if (!id) return;
+      // Confirm first, outside the busy guard.
       if (cart.length > 0) {
         if (!confirm('You have items in the current cart. Park the current one and switch?')) return;
-        await parkCurrent();
+        // A park that failed has left this cart on screen: switching now would
+        // throw away a real order, so stop here. parkCurrent() already said why.
+        if (!await parkCurrent()) return;
       }
-      swap();
+      const res = await withBusy(btn || null, async () => {
+        try {
+          return await api(`/api/pos/parked/${encodeURIComponent(id)}/resume`, { method: 'POST' });
+        } catch (err) {
+          // Another till got there first. That is not a fault to shout about:
+          // the cashier is told plainly and the list stops offering a bill that
+          // is not there any more.
+          if (err && err.status === 404) return { gone: true, message: err.message };
+          throw err;
+        }
+      }, 'Resuming...');
+      if (!res) return; // failed - withBusy toasted it; this cart is untouched
+      if (res.gone) {
+        forgetParked(id);
+        showToast(res.message || 'That parked bill has already been resumed or discarded.', 'warning');
+        await loadParked();
+        renderHeldCards(); // the modal is still open, now without that bill
+        reportClaims();
+        return;
+      }
+      const bill = res.parked || {};
+      const items = Array.isArray(bill.items) ? bill.items : [];
+      if (!items.length) {
+        forgetParked(bill.cart_id || id);
+        showToast('That parked bill has no items on it, so there was nothing to restore.', 'warning');
+        renderHeldCards();
+        return;
+      }
+      // The row is gone server-side, so this till owns the bill from here.
+      forgetParked(bill.cart_id || id);
+      // Adopt THAT cart's id so it picks its own holds back up. A bill carried
+      // over from the old browser-storage format may hold nothing; the sync below
+      // is where its stock is taken.
+      adoptCartId(String(bill.cart_id || id));
+      cart = items.map(i => ({ ...i }));
+      lastSyncedCart = cart.map(i => ({ ...i }));
+      holdsOnServer = true;
+      document.getElementById('discount-input').value = bill.discount || 0;
+      if (bill.customer_id && bill.customer_label) selectCustomer(parseInt(bill.customer_id), bill.customer_label);
+      else clearCustomer();
+      reportClaims(); // this cart is the active claim now, not a parked one
+      renderCart();   // ...which also writes it to the saved-cart slot
+      const inst = bootstrap.Modal.getInstance(document.getElementById('heldModal'));
+      if (inst) inst.hide();
+      showToast('Bill resumed');
+      // Idempotent re-assert. For a bill parked under this feature the server
+      // already holds these lines; for one carried over from the old format this
+      // is where the hold is taken, and where a 400 says the stock went elsewhere
+      // meanwhile.
+      queueCartSync().then(refreshAvailability);
+    }
+
+    async function discardHeld(cartId, btn) {
+      const id = String(cartId || '');
+      if (!id) return;
+      // Confirm stays outside the busy guard.
+      if (!confirm('Delete this parked bill? Items will not be billed and the stock goes back on the shelf.')) return;
+      const res = await withBusy(btn || null, async () => {
+        try {
+          return await api(`/api/pos/parked/${encodeURIComponent(id)}`, { method: 'DELETE' });
+        } catch (err) {
+          // Someone else already resumed or discarded it: what the cashier wanted
+          // gone is gone. Refresh rather than complain.
+          if (err && err.status === 404) return { gone: true };
+          throw err;
+        }
+      }, 'Deleting...');
+      if (!res) return; // failed - nothing was deleted and nothing released
+      forgetParked(id);
+      // Discarding is the one park-side action that hands the stock back, and the
+      // DELETE above does that inside its own transaction - which is why there is
+      // no releaseHoldsFor() call here any more.
+      showToast(res.gone ? 'That parked bill was already gone.' : 'Parked bill deleted - its stock is back on the shelf.');
+      reportClaims(); // one fewer parked cart to claim
+      await loadParked();
+      renderHeldCards();
+      refreshAvailability();
+    }
+
+    // ===== One-time migration: bills parked in THIS browser before now =====
+    // Cashiers have real customer orders sitting under this key right now. Each
+    // one is pushed to the server on the next load and the key is cleared only
+    // then, so nothing is lost on the way; the endpoint upserts on cart_id, so a
+    // second run is harmless. This is the ONLY code left that touches the key.
+    const LEGACY_HELD_KEY = 'kuki_held_carts';
+
+    async function migrateLegacyParked() {
+      let legacy;
+      try {
+        const raw = localStorage.getItem(LEGACY_HELD_KEY);
+        if (!raw) return;
+        legacy = JSON.parse(raw);
+      } catch { return; } // unreadable storage: nothing to migrate, nothing to clear
+      if (!Array.isArray(legacy) || !legacy.length) {
+        try { localStorage.removeItem(LEGACY_HELD_KEY); } catch {}
+        return;
+      }
+      // Entries written before the cart id travelled with a parked cart have no
+      // cart_id at all, and the server keys a parked bill on one. Dropping them
+      // would throw away a real customer's order, so each is stamped with a fresh
+      // cart id - the very id resumeHeld() used to mint for them on the fly - and
+      // the stamp is written back to storage BEFORE anything is posted, so a run
+      // cut short cannot mint a second id for the same bill and park it twice.
+      // Such a bill holds no stock (it never had an id to hold under); the sync on
+      // resume takes the stock then, exactly as it did before.
+      const stampedIds = new Set();
+      legacy = legacy.map(h => {
+        if (!h || typeof h !== 'object' || h.cart_id) return h;
+        const id = newCartId();
+        stampedIds.add(id);
+        return { ...h, cart_id: id };
+      });
+      if (stampedIds.size) {
+        try { localStorage.setItem(LEGACY_HELD_KEY, JSON.stringify(legacy)); } catch {}
+      }
+      const leftover = [];
+      let moved = 0;
+      let movedWithoutHold = 0;
+      for (const h of legacy) {
+        const items = (h && Array.isArray(h.items) ? h.items : [])
+          .filter(i => i && i.product_id && (Number(i.quantity) || 0) > 0)
+          .map(i => ({
+            product_id: i.product_id,
+            product_name: i.product_name || '',
+            quantity: Math.floor(Number(i.quantity) || 0),
+            unit_price: Number(i.unit_price) || 0,
+            original_price: Number(i.original_price || i.unit_price) || 0,
+          }));
+        // Nothing billable on it, so it is not an order at all: dropping it loses
+        // nothing a cashier could ever have sold.
+        if (!items.length) continue;
+        try {
+          await api('/api/pos/parked', {
+            method: 'POST',
+            body: {
+              cart_id: String(h.cart_id),
+              label: h.label || 'Parked bill',
+              items,
+              customer_id: h.customer_id || '',
+              customer_label: h.customer_label || '',
+              discount: parseFloat(h.discount) || 0,
+              till_id: getTillId(),
+              till_label: tillLabel(),
+            },
+          });
+          moved++;
+          if (stampedIds.has(String(h.cart_id))) movedWithoutHold++;
+          myParkedCartIds.add(String(h.cart_id));
+        } catch {
+          leftover.push(h); // keep it local and try again next load
+        }
+      }
+      try {
+        // Only what did NOT make it stays behind. Re-posting a bill that did make
+        // it and has since been resumed would resurrect a phantom order.
+        if (leftover.length) localStorage.setItem(LEGACY_HELD_KEY, JSON.stringify(leftover));
+        else localStorage.removeItem(LEGACY_HELD_KEY);
+      } catch {}
+      if (moved) {
+        showToast(`Moved ${moved} parked bill${moved === 1 ? '' : 's'} off this device and onto the server - every till can see ${moved === 1 ? 'it' : 'them'} now.`);
+        if (movedWithoutHold) {
+          showToast(`${movedWithoutHold} of them ${movedWithoutHold === 1 ? 'was' : 'were'} parked by an older version and ${movedWithoutHold === 1 ? 'holds' : 'hold'} no stock - the stock is taken when the bill is resumed.`, 'warning');
+        }
+      }
+      if (leftover.length) {
+        showToast(`${leftover.length} parked bill${leftover.length === 1 ? '' : 's'} could not be moved to the server and ${leftover.length === 1 ? 'is' : 'are'} still only on this device. Nothing was lost - reload to try again.`, 'error');
+      }
     }
 
     // ===== Till claims: which carts this screen is still holding =====
-    // Cart holds never expire, and a PARKED cart keeps its hold on purpose — but
-    // a parked cart lives only in THIS browser's localStorage, so the admin
-    // "Held stock" screen cannot tell a hold somebody still means to sell from
-    // one stranded by a reload nobody ever came back to. So the till says so out
-    // loud: it posts the complete set of cart ids it is still claiming, and the
-    // server replaces whatever it held for this till_id — which makes a re-send
-    // free and every report self-healing.
+    // Cart holds never expire, and a PARKED cart keeps its hold on purpose, so
+    // the admin "Held stock" screen cannot tell a hold somebody still means to
+    // sell from one stranded by a reload nobody ever came back to. So the till
+    // says so out loud: it posts the complete set of cart ids it is still
+    // claiming, and the server replaces whatever it held for this till_id — which
+    // makes a re-send free and every report self-healing.
     //
     // This is bookkeeping, not part of taking money. Nothing here touches the
     // cart, its holds, the payment locks or the saved cart, and every call is
@@ -1035,9 +1259,20 @@
 
     function reportClaims() {
       try {
-        // Carts parked before the cart id travelled with them have no cart_id
-        // and hold nothing, so they are skipped rather than sent as blanks.
-        const parked = getHeld().filter(h => h && h.cart_id).map(h => String(h.cart_id));
+        // Parked bills live on the server now — but cart_claims is still what
+        // the owner's "Held stock" screen reads to tell a hold somebody means to
+        // sell from one stranded by a reload, and a claim set REPLACES this
+        // till's previous one. If the till stopped naming its parked carts they
+        // would lose their till the moment the next beat went out and go straight
+        // back to looking abandoned. So they are still reported — only sourced
+        // from the server's list instead of localStorage, which makes the set
+        // self-healing: a bill another till resumed drops out on the next refresh.
+        //
+        // This till's OWN parked bills only: another counter's belong in ITS claim
+        // set, not ours. The active cart is filtered out because a cart cannot be
+        // both, and the server rejects the whole report if it is.
+        const active = getCartId();
+        const parked = Array.from(myParkedCartIds).filter(id => id && id !== active);
         api('/api/pos/carts/claim', {
           method: 'POST',
           body: {
@@ -1060,13 +1295,21 @@
     // hour. Each beat sends the whole set, so a beat lost to a flaky connection
     // heals on the next one.
     const CLAIM_HEARTBEAT_MS = 5 * 60 * 1000;
+    // Parked bills are shared between tills now, so the beat re-reads them
+    // before reporting: the badge keeps up with the other counter, and the claim
+    // set goes out from a fresh list rather than a stale one. loadParked() never
+    // rejects, but the claim still goes out if it somehow does.
+    function refreshParkedAndClaims() {
+      loadParked().then(reportClaims, reportClaims);
+    }
+
     function startClaimHeartbeat() {
-      setInterval(reportClaims, CLAIM_HEARTBEAT_MS);
+      setInterval(refreshParkedAndClaims, CLAIM_HEARTBEAT_MS);
       // Timers do not fire while a tablet sleeps or the tab sits in the
       // background, and the till may have been away for hours — so report again
       // the moment the screen comes back rather than waiting out the interval.
       document.addEventListener('visibilitychange', () => {
-        if (!document.hidden) reportClaims();
+        if (!document.hidden) refreshParkedAndClaims();
       });
     }
 
