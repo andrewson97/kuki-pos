@@ -40,7 +40,7 @@
           <div class="col-md-2"><div class="stat-card"><div class="stat-label">Gross Profit</div><div class="stat-value" id="m-gross">-</div></div></div>
           <div class="col-md-2"><div class="stat-card"><div class="stat-label">Expenses</div><div class="stat-value" id="m-expenses">-</div></div></div>
           <div class="col-md-2"><div class="stat-card"><div class="stat-label">Other Income</div><div class="stat-value" id="m-income">-</div></div></div>
-          <div class="col-md-2"><div class="stat-card"><div class="stat-label">Net Profit</div><div class="stat-value" id="m-profit">-</div></div></div>
+          <div class="col-md-2"><div class="stat-card"><div class="stat-label">Net Profit</div><div class="stat-value" id="m-profit">-</div><div class="small text-muted d-none" id="m-disposal-note"></div></div></div>
         </div>
         <div class="row g-4 mb-4">
           <div class="col-md-8"><div class="table-container p-3"><canvas id="chart-daily-sales" height="200"></canvas></div></div>
@@ -336,6 +336,16 @@
       const profitEl = document.getElementById('m-profit');
       profitEl.textContent = formatCurrency(data.net_profit);
       profitEl.style.color = data.net_profit >= 0 ? '#28a745' : '#dc3545';
+
+      // Wastage is subtracted from net profit, so say so — otherwise the figure
+      // is simply lower than the arithmetic above it appears to give.
+      const dispNote = document.getElementById('m-disposal-note');
+      if (data.disposal_loss > 0) {
+        dispNote.textContent = `after ${formatCurrency(data.disposal_loss)} disposal loss`;
+        dispNote.classList.remove('d-none');
+      } else {
+        dispNote.classList.add('d-none');
+      }
 
       // Expense categories
       document.getElementById('m-exp-cats').innerHTML = data.expenses.by_category.map(c =>

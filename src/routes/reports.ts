@@ -127,9 +127,18 @@ reports.get("/monthly", (c) => {
     WHERE b.bill_date LIKE ? AND b.status = 'completed'
   `).get(`${prefix}%`) as any;
 
+  // Wastage is a real cost of the month, so it comes off net profit here exactly
+  // as it does in /range. These two reports disagreeing over the same period was
+  // the bug: a month and a custom range covering it returned different figures.
+  const disposals = db.query(`
+    SELECT COALESCE(SUM(cost_loss), 0) AS total_loss, COUNT(*) AS count
+    FROM product_disposals WHERE business_date LIKE ?
+  `).get(`${prefix}%`) as any;
+
   const grossProfit = sales.total_sales - totalCost.total_cost;
   const totalIncome = sales.total_sales + otherIncome.total_income;
-  const netProfit = totalIncome - totalCost.total_cost - expenses.total_expenses;
+  const netProfit =
+    totalIncome - totalCost.total_cost - expenses.total_expenses - disposals.total_loss;
 
   return c.json({
     month: prefix,
@@ -141,6 +150,8 @@ reports.get("/monthly", (c) => {
     other_income: otherIncome.total_income,
     total_income: totalIncome,
     net_profit: netProfit,
+    disposal_loss: disposals.total_loss,
+    disposal_count: disposals.count,
     top_products: topProducts,
   });
 });
