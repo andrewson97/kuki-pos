@@ -36,6 +36,10 @@
       <button class="btn btn-outline btn-sm" id="holds-refresh" style="width:auto;flex:0 0 auto;" onclick="refreshHolds(this)">Refresh</button>
     </div>
     <div id="holds-note" style="background:white;padding:2px 14px 10px;font-size:0.76rem;color:var(--ink-soft);border-bottom:1px solid var(--line);"></div>
+    <!-- Admin cleanup control (the bulk "unreported holds" release), filled by
+         renderUnreportedControl(). Left empty for cashiers, so the section looks
+         exactly as it did for them. -->
+    <div id="holds-bulk"></div>
     <div id="holds-list"></div>
   </div>
 
@@ -87,6 +91,13 @@
   <script>
     let items = [], cats = [], tracked = [], holds = [];
 
+    // The server's answer to "which holds is nothing reporting any more?" —
+    // { count, carts, quantity, threshold_minutes, hold_ids, holds }. null means
+    // we have not got one (a cashier, or the request failed). This screen never
+    // works that set out for itself: it shows what the server listed and posts
+    // back those exact ids.
+    let unreportedPreview = null;
+
     // A hold has no expiry by design (the owner rejected auto-release), so a cart
     // killed by a closed tab or a flat battery strands its stock forever. Three
     // hours is the line: a cart only exists once the customer has confirmed the
@@ -112,6 +123,7 @@
         api('/api/pos/reservations'),
       ]);
       items = stocks; cats = allCats; holds = activeHolds;
+      await loadUnreportedPreview();
       tracked = prods.filter(p => p.is_active && p.track_stock);
       const catOpts = '<option value="">All categories</option>' + cats.map(c => `<option value="${c.id}">${escapeHtml(c.name)}</option>`).join('');
       $('s-cat').innerHTML = catOpts;
@@ -414,6 +426,7 @@
       const note = $('holds-note');
       const list = $('holds-list');
       const isAdmin = currentUser.role === 'admin';
+      renderUnreportedControl();
 
       if (!holds.length) {
         note.textContent = '';
@@ -466,6 +479,9 @@
     async function refreshHolds(btn) {
       await withBusy(btn, async () => {
         holds = await api('/api/pos/reservations');
+        // Together, so the cleanup button's count can never be staler than the
+        // list printed beside it.
+        await loadUnreportedPreview();
         renderHolds();
       }, 'Refreshing…');
     }
@@ -481,6 +497,120 @@
       await withBusy(btn, async () => {
         await api(`/api/pos/reservations/${id}`, { method: 'DELETE' });
         toast(`Released ${h.quantity} x ${name}`);
+        load();
+      }, 'Releasing…');
+    }
+
+    // ===== Releasing the holds nothing is reporting any more =====
+    //
+    // Holds never expire by design, so a cart abandoned part-way through ringing
+    // up (closed tab, sleeping tablet, end of shift) keeps its stock forever: it
+    // was never parked, so it never appears in the parked list, and nothing ever
+    // reclaims it. This is the owner's manual cleanup for exactly that — a
+    // button, never a timer.
+    //
+    // The rule lives on the server (GET /api/pos/reservations/unreported): no
+    // parked bill owns the cart AND no till has checked in for it recently. This
+    // screen deliberately does NOT re-derive it from `claim` — that would be a
+    // second definition, free to drift from the one the server deletes by, and
+    // this section would start promising something it is not showing.
+    async function loadUnreportedPreview() {
+      // adminOnly on the server, exactly like the release and the per-row
+      // Release button, so a cashier is never asked for it.
+      if (currentUser.role !== 'admin') { unreportedPreview = null; return; }
+      try {
+        unreportedPreview = await api('/api/pos/reservations/unreported');
+      } catch (err) {
+        // A failed preview must never take the Held stock list down with it —
+        // the per-row Release is the thing that always has to keep working.
+        unreportedPreview = null;
+        console.error('Could not check for unreported holds', err);
+      }
+    }
+
+    // The preview, as plain lines for the confirm dialog: product, quantity,
+    // cart, age and why it qualified. claimOf()/heldFor() are reused so these
+    // read exactly like the cards below.
+    function unreportedLines(preview, max) {
+      const lines = preview.holds.slice(0, max).map(h => {
+        const claim = claimOf(h);
+        const why = claim.kind === 'unclaimed' || claim.kind === 'unsupported'
+          ? 'no till reporting it'
+          : `${claim.till} ${claim.seenText}`;
+        const name = h.product_name || `product #${h.product_id}`;
+        return `- ${h.quantity} x ${name}\n  cart ${h.cart_id}\n  held ${heldFor(h.created_at).text} · ${why}`;
+      });
+      if (preview.holds.length > max) lines.push(`- ...and ${preview.holds.length - max} more`);
+      return lines.join('\n');
+    }
+
+    // Secondary on purpose: the quiet outline button, not the red one every row
+    // carries. Releasing a named hold is the normal path; this is housekeeping.
+    // When nothing qualifies it says so instead of offering a dead button.
+    function renderUnreportedControl() {
+      const box = $('holds-bulk');
+      if (!box) return;
+      if (currentUser.role !== 'admin') { box.innerHTML = ''; return; }
+      const wrap = (inner) => `<div style="background:white;padding:0 14px 12px;font-size:0.76rem;color:var(--ink-soft);border-bottom:1px solid var(--line);">${inner}</div>`;
+      if (!unreportedPreview) {
+        box.innerHTML = wrap('Could not check which holds are unreported — tap Refresh to try again.');
+        return;
+      }
+      const p = unreportedPreview;
+      if (!p.count) {
+        box.innerHTML = wrap('Nothing to clean up — every hold is either a parked bill or a cart a till is still reporting.');
+        return;
+      }
+      const holdWord = `hold${p.count === 1 ? '' : 's'}`;
+      const cartWord = `cart${p.carts === 1 ? '' : 's'}`;
+      box.innerHTML = wrap(
+        `<button class="btn btn-outline btn-sm" id="holds-sweep" onclick="releaseUnreportedHolds(this)">Release ${p.count} unreported ${holdWord} (${p.carts} ${cartWord})</button>`
+        + `<div style="margin-top:6px;">Cleanup tool: carts no till has reported for over ${p.threshold_minutes} minutes with no parked bill behind them — abandoned part-way through ringing up. Parked bills and carts a till is checking in for are never touched.</div>`
+      );
+    }
+
+    // confirm() sits OUTSIDE withBusy, as everywhere else here: the guard exists
+    // to stop a second tap while the POST is in flight, and a modal prompt inside
+    // it would hold the button disabled for as long as the dialog stayed open.
+    // The preview is re-fetched first so the dialog names what is true NOW rather
+    // than what the label was built from minutes ago, and the ids from THAT fetch
+    // are what gets posted. The list is not re-rendered before the confirm on
+    // purpose — it would replace the very button withBusy is guarding.
+    async function releaseUnreportedHolds(btn) {
+      await loadUnreportedPreview();
+      const p = unreportedPreview;
+      if (!p) {
+        toast('Could not check which holds are unreported. Please try again.', 'error');
+        renderUnreportedControl();
+        return;
+      }
+      if (!p.count) {
+        toast('Nothing to release — every hold is reported by a till or owned by a parked bill.');
+        renderUnreportedControl();
+        return;
+      }
+      const ids = p.hold_ids.slice();
+      const holdWord = `hold${p.count === 1 ? '' : 's'}`;
+      const cartWord = `cart${p.carts === 1 ? '' : 's'}`;
+      if (!confirm(`Release ${p.count} unreported ${holdWord} from ${p.carts} ${cartWord}?\n\n${unreportedLines(p, 8)}\n\nThat stock goes back on sale immediately. Parked bills, and carts a till is checking in for, are not touched.`)) return;
+
+      await withBusy(btn, async () => {
+        let res;
+        try {
+          res = await api('/api/pos/reservations/release-unreported', { method: 'POST', body: { hold_ids: ids } });
+        } catch (err) {
+          // 409: something in that set became legitimate between the preview and
+          // this tap — a cart resumed, or a bill parked on it. The server
+          // released NOTHING, so say what happened and reload the list.
+          if (err && err.data && err.data.needs_refresh) {
+            toast(err.message, 'error');
+            load();
+            return;
+          }
+          throw err;
+        }
+        const gone = res.already_gone ? ` ${res.already_gone} had already gone.` : '';
+        toast(`Released ${res.released} hold${res.released === 1 ? '' : 's'} from ${res.carts} cart${res.carts === 1 ? '' : 's'}.${gone}`);
         load();
       }, 'Releasing…');
     }

@@ -1051,7 +1051,14 @@ pos.delete("/reservations/cart/:cartId", (c) => {
 // so - and the screen decides what to show. `claim.last_seen_at` is the piece
 // that separates "parked, till seen a minute ago" from "nothing has claimed
 // this since Tuesday".
-pos.get("/reservations", (c) => {
+//
+// The decoration itself lives in listHoldsWithClaims() rather than in the
+// handler, because it is now read TWICE: once by this screen, and once by the
+// bulk "release unreported holds" action below, which must decide what nothing
+// is reporting any more from exactly the same facts this listing prints. Two
+// derivations of "no till is behind this" could drift, and the screen would
+// start promising to release something it is not showing as unclaimed.
+function listHoldsWithClaims(): any[] {
   const holds = listActiveHolds();
   const db = getDb();
 
@@ -1127,7 +1134,11 @@ pos.get("/reservations", (c) => {
     });
   }
 
-  return c.json(holds.map((h: any) => ({ ...h, claim: byCart.get(h.cart_id) ?? null })));
+  return holds.map((h: any) => ({ ...h, claim: byCart.get(h.cart_id) ?? null }));
+}
+
+pos.get("/reservations", (c) => {
+  return c.json(listHoldsWithClaims());
 });
 
 // Admin recovery: release one stranded hold.
@@ -1156,6 +1167,305 @@ pos.delete("/reservations/:id", adminOnly, (c) => {
   })();
 
   return c.json({ success: true });
+});
+
+// --- Admin recovery: release the holds nothing is reporting any more ----------
+//
+// Holds are created in ONE place (the cart sync, while items are in a cart) and
+// expire NEVER, by the owner's deliberate decision. Two things legitimately keep
+// stock that way: a cart a till is actively ringing up, and a parked bill — a
+// confirmed customer order the server itself stores in parked_carts.
+//
+// What leaks is the third case: a cart abandoned part-way through ringing up.
+// The tablet sleeps, the tab is closed, the shift ends, the cashier moves to the
+// phone. It was never parked, so it never shows up in the parked list, and
+// nothing ever hands its stock back. The owner releases those one at a time,
+// forever.
+//
+// This is that job done in one go — and deliberately still a BUTTON, not a cron:
+// the owner asked to stay in control, so nothing here runs unless an admin asks
+// for it, having first seen the list. There is still no TTL anywhere.
+//
+// The rule, in one sentence: a hold is UNREPORTED when no parked bill owns its
+// cart AND no till is meaningfully reporting it. Both halves are read off the
+// SAME decorated hold the "Held stock" screen shows (listHoldsWithClaims), so
+// the screen and the sweep can never disagree about what is about to go.
+
+// How long a claiming till may go quiet before its claim stops counting as a
+// till reporting the cart.
+//
+// Tills heartbeat their claims every 5 minutes (CLAIM_HEARTBEAT_MS in pos.html
+// and m-pos.html), so 60 minutes is TWELVE consecutive missed heartbeats. That
+// is far past anything ordinary — flaky shop wifi, a fly.io cold start, a tablet
+// asleep in a cashier's hand between two customers, a browser throttling timers
+// in a background tab — and still inside the same trading session, so an
+// abandoned cart's stock comes back the day it was abandoned rather than next
+// week.
+//
+// Deliberately much more conservative than the 30-minute CLAIM_STALE_MINUTES the
+// stock screens use to colour a row amber: that one only changes how loud a row
+// looks, this one decides whether stock is taken off a cart. Where the two
+// disagree the screen warns earlier than it sweeps, which is the right way round.
+const UNREPORTED_CLAIM_MINUTES = 60;
+
+// A cap on the id list a release may carry. A cake shop has tens of live holds,
+// not thousands; this only stops a buggy or hostile caller posting an unbounded
+// array.
+const UNREPORTED_MAX_IDS = 2000;
+
+type UnreportedReason = "no_claim" | "till_quiet";
+
+/**
+ * Why this hold counts as unreported — or null if something is still reporting
+ * it, and it must be left alone.
+ *
+ * `claim` is exactly what the holds listing hands the screen, which is what
+ * makes this one definition rather than a second one.
+ */
+function unreportedReason(claim: any, cutoff: string): UnreportedReason | null {
+  // No till has ever told us about this cart, and no parked bill owns it.
+  if (!claim) return "no_claim";
+
+  // A parked bill owns it. NEVER released by this action, at ANY age: it is a
+  // real customer order the server itself records, not a till's say-so, and the
+  // listing already lets parked_carts override a till's claim. Discard the bill
+  // (which hands the stock back) or release the row by hand instead.
+  if (claim.source === "parked_carts") return null;
+
+  // What is left is a till's self-report on a cart with no parked bill behind
+  // it. It counts only while the till is still checking in. Both timestamps are
+  // UTC "YYYY-MM-DD HH:MM:SS" from datetime('now'), a format that sorts
+  // chronologically as text, so this compares as strings with no date parsing
+  // and no timezone to get wrong.
+  const seen = String(claim.last_seen_at || "");
+  if (!seen) return "till_quiet";
+  // A blank cutoff (impossible in practice) is read the safe way round: nothing
+  // is swept on the strength of a threshold we could not compute.
+  if (!cutoff) return null;
+  return seen < cutoff ? "till_quiet" : null;
+}
+
+/**
+ * Every live hold, plus the subset that nothing is reporting any more.
+ *
+ * Returns the whole decorated listing as well, so a caller can say what a hold
+ * it did NOT release is claimed by now without going back to the database.
+ */
+function unreportedSnapshot(): { cutoff: string; all: any[]; rows: any[] } {
+  const db = getDb();
+  const cutoff = String(
+    (db.query("SELECT datetime('now', ?) AS cutoff").get(`-${UNREPORTED_CLAIM_MINUTES} minutes`) as any)?.cutoff || ""
+  );
+
+  // One query for every hold's age rather than one per row, and computed by
+  // SQLite so "how old" is measured against the same clock that wrote
+  // created_at.
+  const ages = new Map<number, number>();
+  for (const r of db.query(
+    "SELECT id, CAST(ROUND((julianday('now') - julianday(created_at)) * 1440) AS INTEGER) AS held_minutes FROM stock_reservations"
+  ).all() as any[]) {
+    ages.set(Number(r.id), Number(r.held_minutes || 0));
+  }
+
+  const all = listHoldsWithClaims();
+  const rows: any[] = [];
+  for (const h of all) {
+    const reason = unreportedReason(h.claim, cutoff);
+    if (!reason) continue;
+    rows.push({
+      ...h,
+      // Why it qualified, so the screen can tell "nothing ever claimed this"
+      // from "the till that claimed it went quiet an hour ago".
+      reason,
+      held_minutes: ages.get(Number(h.id)) ?? null,
+      last_seen_at: h.claim?.last_seen_at ?? null,
+      till_label: h.claim?.till_label || h.claim?.till_id || "",
+    });
+  }
+  return { cutoff, all, rows };
+}
+
+/** The headline numbers both the preview and the release report. */
+function unreportedTotals(rows: any[]) {
+  return {
+    count: rows.length,
+    quantity: rows.reduce((sum, r) => sum + Number(r.quantity || 0), 0),
+    carts: new Set(rows.map((r) => String(r.cart_id))).size,
+  };
+}
+
+// The preview. Read-only: it destroys nothing, and it exists so the admin can
+// SEE what the button is about to release — a bulk destructive action with
+// nothing behind it but a number is not something anybody should click.
+//
+// adminOnly, matching the release and the per-row Release button it sits beside.
+// (The plain holds listing stays open to everyone: a cashier hunting for the
+// last cake benefits from seeing who holds it. This one is purely the admin
+// cleanup tool's own view.)
+//
+// `hold_ids` is the contract with the release below: the client posts back the
+// very list it was shown.
+pos.get("/reservations/unreported", adminOnly, (c) => {
+  const { cutoff, rows } = unreportedSnapshot();
+  return c.json({
+    threshold_minutes: UNREPORTED_CLAIM_MINUTES,
+    cutoff,
+    ...unreportedTotals(rows),
+    hold_ids: rows.map((r) => r.id),
+    holds: rows,
+  });
+});
+
+// The release itself.
+//
+// Takes the exact set of hold ids the preview showed, and re-derives the
+// unreported set INSIDE the same immediate transaction that deletes — so the
+// write lock is held across "decide" and "delete" and nothing can be parked or
+// claimed in between.
+//
+// The preview/confirm race is handled by refusing it, not by papering over it:
+//   * a requested hold that is STILL unreported is released;
+//   * a requested hold that has since become legitimate (its cart was resumed
+//     and is being claimed again, or a bill was parked on it) ABORTS the whole
+//     request with 409 and releases NOTHING. Releasing stock that just became a
+//     real order again is the failure worth avoiding, and an admin re-reading a
+//     refreshed list costs one click;
+//   * a requested hold that has simply gone (its cart was sold or cleared) is
+//     not an error — there is nothing left to release and nothing to protect —
+//     so it is counted and skipped;
+//   * a hold that became unreported AFTER the preview is left alone. It was
+//     never shown, so it was never promised; the next preview will offer it.
+pos.post("/reservations/release-unreported", adminOnly, async (c) => {
+  const user = getUser(c)!;
+  const body = await c.req.json().catch(() => null);
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return c.json({ error: "Body must be a JSON object" }, 400);
+  }
+  // Required, and never inferred: "release whatever you think qualifies right
+  // now" is precisely the blind bulk delete this endpoint refuses to be.
+  if (!Array.isArray(body.hold_ids)) {
+    return c.json({ error: "hold_ids must be an array of the hold ids the preview showed" }, 400);
+  }
+  if (body.hold_ids.length > UNREPORTED_MAX_IDS) {
+    return c.json({ error: `hold_ids must hold at most ${UNREPORTED_MAX_IDS} ids` }, 400);
+  }
+  const requested: number[] = [];
+  for (let i = 0; i < body.hold_ids.length; i++) {
+    const id = Number(body.hold_ids[i]);
+    if (!Number.isInteger(id) || id <= 0) {
+      return c.json({ error: `hold_ids[${i}] must be a positive hold id` }, 400);
+    }
+    if (!requested.includes(id)) requested.push(id);
+  }
+
+  const db = getDb();
+  const outcome = db.transaction(() => {
+    const { cutoff, all, rows } = unreportedSnapshot();
+    const unreported = new Map<number, any>(rows.map((r) => [Number(r.id), r]));
+    const live = new Map<number, any>(all.map((h) => [Number(h.id), h]));
+
+    const release: any[] = [];
+    const conflicts: any[] = [];
+    let alreadyGone = 0;
+    for (const id of requested) {
+      const row = unreported.get(id);
+      if (row) {
+        release.push(row);
+        continue;
+      }
+      const hold = live.get(id);
+      if (!hold) {
+        // Sold, or cleared by its own till. Already back on the shelf.
+        alreadyGone++;
+        continue;
+      }
+      const claim = hold.claim;
+      conflicts.push({
+        hold_id: id,
+        product: hold.product_name || `product #${hold.product_id}`,
+        quantity: hold.quantity,
+        cart_id: hold.cart_id,
+        // What is standing behind it now, in the same words the screen uses.
+        now: claim?.source === "parked_carts" ? "parked" : claim?.state === "active" ? "active" : "claimed",
+        label: claim?.parked_label || claim?.label || "",
+        till_label: claim?.till_label || claim?.till_id || "",
+      });
+    }
+
+    if (conflicts.length) return { conflicts, cutoff, unreported_now: rows.length };
+
+    for (const row of release) releaseHold(Number(row.id));
+
+    const carts = [...new Set(release.map((r) => String(r.cart_id)))];
+    for (const cart of carts) {
+      // Same rule as the single-hold release: a claim describing a cart that
+      // holds nothing describes nothing. A cart that still has holds standing
+      // keeps its claim.
+      db.query(
+        "DELETE FROM cart_claims WHERE cart_id = ? AND cart_id NOT IN (SELECT cart_id FROM stock_reservations)"
+      ).run(cart);
+    }
+
+    // One log row for one admin action, in the same transaction as the deletes,
+    // and itemised: "released 7 holds" on its own would not let anybody work
+    // out afterwards whose stock came back. Skipped when nothing was actually
+    // released, so a no-op leaves no trail suggesting otherwise.
+    if (release.length) {
+      db.query("INSERT INTO activity_log (user_id, action, details) VALUES (?, 'released_unreported_stock_holds', ?)").run(
+        user.id,
+        JSON.stringify({
+          released: release.length,
+          carts: carts.length,
+          threshold_minutes: UNREPORTED_CLAIM_MINUTES,
+          already_gone: alreadyGone,
+          holds: release.map((r) => ({
+            hold_id: r.id,
+            product: r.product_name,
+            quantity: r.quantity,
+            cart_id: r.cart_id,
+            reason: r.reason,
+            held_minutes: r.held_minutes,
+          })),
+        })
+      );
+    }
+
+    return {
+      released: release.length,
+      carts: carts.length,
+      already_gone: alreadyGone,
+      quantity: unreportedTotals(release).quantity,
+      holds: release.map((r) => ({
+        hold_id: r.id,
+        product: r.product_name,
+        quantity: r.quantity,
+        cart_id: r.cart_id,
+        reason: r.reason,
+      })),
+    };
+  }).immediate() as any;
+
+  if (outcome?.conflicts) {
+    const n = outcome.conflicts.length;
+    const names = outcome.conflicts
+      .slice(0, 5)
+      .map((x: any) => `${x.quantity} x ${x.product}`)
+      .join(", ");
+    return c.json(
+      {
+        error:
+          `${n} of those holds ${n === 1 ? "is" : "are"} being reported again since you looked ` +
+          `(${names}${n > 5 ? ", and more" : ""}). Nothing was released — look at the list again.`,
+        needs_refresh: true,
+        conflicts: outcome.conflicts,
+        unreported_now: outcome.unreported_now,
+        released: 0,
+      },
+      409
+    );
+  }
+
+  return c.json({ success: true, threshold_minutes: UNREPORTED_CLAIM_MINUTES, ...outcome });
 });
 
 export default pos;
