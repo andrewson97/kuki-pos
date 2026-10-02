@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import { getDb } from "../db/database";
+import { getUser } from "../middleware/auth";
 import { todayDate } from "../utils/helpers";
 import { getStockAlerts } from "../services/stock";
 
@@ -9,6 +10,13 @@ const mobile = new Hono();
 mobile.get("/dashboard", (c) => {
   const db = getDb();
   const today = todayDate();
+
+  // Same rule as /api/dashboard/stats: the day's money is the owner's business,
+  // so it is left out of the response for a cashier rather than merely hidden in
+  // the view - anyone can open this endpoint directly. Everything a cashier
+  // actually works from (bill count, tasks, stock alerts) still comes through.
+  const user = getUser(c);
+  const isAdmin = user?.role === "admin";
 
   const todaySales = db.query(`
     SELECT COUNT(*) AS bill_count, COALESCE(SUM(total), 0) AS total_sales
@@ -61,14 +69,19 @@ mobile.get("/dashboard", (c) => {
 
   return c.json({
     date: today,
-    today: {
-      sales: todaySales.total_sales,
-      bills: todaySales.bill_count,
-      cost: todayCost.total_cost,
-      profit: todaySales.total_sales - todayCost.total_cost,
-      expenses_approved: todayExpensesApproved.total,
-      net: todaySales.total_sales - todayCost.total_cost - todayExpensesApproved.total,
-    },
+    // Omitted, not nulled: a missing key cannot be mistaken for a figure, while
+    // null would reach fmt() and render as "Rs. 0.00" - a wrong number is worse
+    // than no number.
+    today: isAdmin
+      ? {
+          sales: todaySales.total_sales,
+          bills: todaySales.bill_count,
+          cost: todayCost.total_cost,
+          profit: todaySales.total_sales - todayCost.total_cost,
+          expenses_approved: todayExpensesApproved.total,
+          net: todaySales.total_sales - todayCost.total_cost - todayExpensesApproved.total,
+        }
+      : { bills: todaySales.bill_count },
     pending_expenses: pendingExpenses,
     tasks: taskSummary,
     // `low_stock` keeps its name — views/mobile.html reads it — and the second

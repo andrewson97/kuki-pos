@@ -17,28 +17,28 @@
     </div>
     <div class="content-area" id="page-content">
       <div class="row g-4 mb-4">
-        <div class="col-md-3">
+        <div class="col-md-3" data-money>
           <div class="stat-card position-relative">
             <div class="stat-label">Today's Sales</div>
             <div class="stat-value" id="stat-sales">-</div>
             <div class="stat-icon">&#128176;</div>
           </div>
         </div>
-        <div class="col-md-3">
+        <div class="col-md-3" id="col-bills">
           <div class="stat-card position-relative">
             <div class="stat-label">Bills Today</div>
             <div class="stat-value" id="stat-bills">-</div>
             <div class="stat-icon">&#128196;</div>
           </div>
         </div>
-        <div class="col-md-3">
+        <div class="col-md-3" data-money>
           <div class="stat-card position-relative">
             <div class="stat-label">Cost of Goods</div>
             <div class="stat-value" id="stat-cost">-</div>
             <div class="stat-icon">&#128184;</div>
           </div>
         </div>
-        <div class="col-md-3">
+        <div class="col-md-3" data-money>
           <div class="stat-card position-relative">
             <div class="stat-label">Gross Profit</div>
             <div class="stat-value" id="stat-profit">-</div>
@@ -47,20 +47,20 @@
         </div>
       </div>
       <div class="row g-4 mb-4">
-        <div class="col-md-3">
+        <div class="col-md-3" data-money>
           <div class="stat-card position-relative">
             <div class="stat-label">Today's Expenses</div>
             <div class="stat-value" id="stat-expenses">-</div>
           </div>
         </div>
-        <div class="col-md-3">
+        <div class="col-md-3" data-money>
           <div class="stat-card position-relative">
             <div class="stat-label">Net Profit</div>
             <div class="stat-value" id="stat-net-profit">-</div>
           </div>
         </div>
       </div>
-      <div class="row g-4 mb-4">
+      <div class="row g-4 mb-4" id="stats-row-main">
         <div class="col-md-3">
           <div class="stat-card">
             <div class="stat-label">Active Products</div>
@@ -80,7 +80,7 @@
             <div class="small text-muted d-none" id="stat-out-earlier"></div>
           </div>
         </div>
-        <div class="col-md-3 d-flex align-items-stretch">
+        <div class="col-md-3 d-flex align-items-stretch" id="col-pos">
           <a href="/pos" class="stat-card text-decoration-none text-dark d-flex align-items-center justify-content-center w-100" style="background:linear-gradient(135deg,#e83e8c,#d63384);color:white!important;">
             <div class="text-center">
               <div style="font-size:2rem">&#128722;</div>
@@ -173,20 +173,54 @@
       return label ? `<span class="badge bg-light text-dark border">${label}</span>` : '';
     }
 
+    // The day's money is admin-only. The server already leaves those fields out
+    // of the response for a cashier, so the tiles are taken out of the layout
+    // rather than left showing a dash - and the remaining tiles are rearranged
+    // so the page still reads as a finished dashboard instead of a gap.
+    function applyMoneyVisibility() {
+      if (currentUser && currentUser.role === 'admin') return;
+      document.querySelectorAll('[data-money]').forEach(el => el.remove());
+      const mainRow = document.getElementById('stats-row-main');
+      const bills = document.getElementById('col-bills');
+      if (mainRow && bills) mainRow.insertBefore(bills, mainRow.firstElementChild);
+      // Any row left holding nothing would render as blank vertical space.
+      document.querySelectorAll('#page-content .row').forEach(row => {
+        if (!row.querySelector('.col-md-3, .col-md-4, .col-md-6, .col-md-12')) row.remove();
+      });
+      // Four tiles fill the row; the POS shortcut goes full width underneath,
+      // which suits the one thing a cashier opens this page to do.
+      const pos = document.getElementById('col-pos');
+      if (pos) pos.className = 'col-12 d-flex align-items-stretch';
+    }
+
+    // Tiles are removed for a cashier, so every write has to tolerate a missing
+    // element and a missing figure.
+    function setStat(id, value, color) {
+      const el = document.getElementById(id);
+      if (!el || value === undefined || value === null) return;
+      el.textContent = value;
+      if (color) el.style.color = color;
+    }
+
     async function loadDashboard() {
+      // Runs before the fetch so a cashier never sees the money tiles flash in.
+      // initApp() has already populated currentUser by the time it calls us.
+      applyMoneyVisibility();
       try {
         const stats = await api('/api/dashboard/stats');
-        document.getElementById('stat-sales').textContent = formatCurrency(stats.today.sales);
-        document.getElementById('stat-bills').textContent = stats.today.bill_count;
-        document.getElementById('stat-cost').textContent = formatCurrency(stats.today.cost_of_goods);
-        document.getElementById('stat-profit').textContent = formatCurrency(stats.today.gross_profit);
-        document.getElementById('stat-profit').style.color = stats.today.gross_profit >= 0 ? '#28a745' : '#dc3545';
-        document.getElementById('stat-expenses').textContent = formatCurrency(stats.today.expenses);
-        document.getElementById('stat-net-profit').textContent = formatCurrency(stats.today.net_profit);
-        document.getElementById('stat-net-profit').style.color = stats.today.net_profit >= 0 ? '#28a745' : '#dc3545';
-        document.getElementById('stat-products').textContent = stats.total_products;
-        document.getElementById('stat-customers').textContent = stats.total_customers;
-        document.getElementById('stat-lowstock').textContent = stats.low_stock_count;
+        const t = stats.today || {};
+        const signColor = v => (v >= 0 ? '#28a745' : '#dc3545');
+        setStat('stat-sales', t.sales === undefined ? undefined : formatCurrency(t.sales));
+        setStat('stat-bills', t.bill_count);
+        setStat('stat-cost', t.cost_of_goods === undefined ? undefined : formatCurrency(t.cost_of_goods));
+        setStat('stat-profit', t.gross_profit === undefined ? undefined : formatCurrency(t.gross_profit),
+                t.gross_profit === undefined ? null : signColor(t.gross_profit));
+        setStat('stat-expenses', t.expenses === undefined ? undefined : formatCurrency(t.expenses));
+        setStat('stat-net-profit', t.net_profit === undefined ? undefined : formatCurrency(t.net_profit),
+                t.net_profit === undefined ? null : signColor(t.net_profit));
+        setStat('stat-products', stats.total_products);
+        setStat('stat-customers', stats.total_customers);
+        setStat('stat-lowstock', stats.low_stock_count);
 
         const billsTbody = document.getElementById('recent-bills');
         if (stats.recent_bills.length === 0) {

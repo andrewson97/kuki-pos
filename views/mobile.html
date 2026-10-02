@@ -118,14 +118,26 @@
         await bootMobile();
         const data = await api('/api/mobile/dashboard');
         $('user-name').textContent = currentUser.full_name;
-        renderHero(data.today);
+        renderHero(data.today, data.date);
         renderPending(data.pending_expenses, currentUser.role === 'admin');
         renderTasks(data.tasks);
         renderStock(data);
       } catch (err) { toast(err.message, 'error'); }
     }
 
-    function renderHero(t) {
+    // The server leaves the money out of the response for a cashier, so there is
+    // nothing to hide here - but an empty gradient box would look broken. Lead
+    // with the one figure a cashier does own: how many bills they have rung up.
+    function renderHero(t, dateLabel) {
+      const money = t && t.sales !== undefined;
+      const bills = (t && t.bills) || 0;
+      if (!money) {
+        $('stats-hero').innerHTML = `
+          <div class="label">Bills today</div>
+          <div class="big">${bills}</div>
+          <div class="sub">${escapeHtml(dateLabel || '')}</div>`;
+        return;
+      }
       $('stats-hero').innerHTML = `
         <div class="label">Today's sales</div>
         <div class="big">${fmt(t.sales)}</div>
