@@ -1,0 +1,1011 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Pre-orders - Cake Shop POS</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="/public/css/style.css" rel="stylesheet">
+  <style>
+    /* A pre-order is a job on a list, not a row in a ledger: the card has to
+       show the lines (for a cake, the specification IS the order) without a click. */
+    .po-card {
+      background: #fff; border: 1px solid #e5e7eb; border-left: 5px solid #adb5bd;
+      border-radius: 10px; padding: 12px 14px; margin-bottom: 10px;
+    }
+    .po-card.s-ready { border-left-color: #198754; }
+    .po-card.s-overdue { border-left-color: #dc3545; background: #fff6f6; }
+    .po-card.s-done, .po-card.s-cancelled { border-left-color: #ced4da; background: #f8f9fa; }
+    .po-group {
+      display: flex; align-items: center; gap: 10px;
+      font-size: 0.78rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em;
+      color: #6b7280; margin: 18px 0 8px;
+    }
+    .po-group:first-child { margin-top: 0; }
+    .po-group .line { flex: 1; height: 1px; background: #e5e7eb; }
+    .po-group.danger { color: #b02a37; }
+    .po-group.danger .line { background: #f1aeb5; }
+    .po-lines { list-style: none; margin: 8px 0 0; padding: 0; }
+    .po-lines li { font-size: 0.9rem; padding: 2px 0; }
+    .po-lines .qty { display: inline-block; min-width: 2.2em; font-weight: 700; color: #495057; }
+    .po-lines .custom { color: #6f42c1; }
+    .po-money { white-space: nowrap; font-size: 0.86rem; }
+    .po-note {
+      background: #fffbe6; border: 1px solid #ffe69c; border-radius: 6px;
+      padding: 5px 8px; font-size: 0.84rem; margin-top: 8px; white-space: pre-wrap;
+    }
+    .po-readonly { font-size: 0.84rem; color: #6c757d; }
+    .edit-line-row { display: flex; gap: 6px; align-items: center; margin-bottom: 6px; }
+  </style>
+</head>
+<body>
+  <div class="sidebar" id="sidebar"></div>
+  <div class="main-content">
+    <div class="top-bar">
+      <h5 class="mb-0">Pre-orders</h5>
+      <div id="top-bar-user"></div>
+    </div>
+    <div class="content-area">
+
+      <!-- What has to be made, and what money is tied up in it -->
+      <div id="summary-strip" class="row g-2 mb-3"></div>
+
+      <div class="d-flex flex-wrap gap-2 align-items-center mb-3">
+        <div class="btn-group" role="group">
+          <button class="btn btn-outline-primary active" id="view-btn-work" onclick="setView('work')">To make</button>
+          <button class="btn btn-outline-primary" id="view-btn-today" onclick="setView('today')">Today</button>
+          <button class="btn btn-outline-danger" id="view-btn-overdue" onclick="setView('overdue')">Overdue</button>
+          <button class="btn btn-outline-secondary" id="view-btn-record" onclick="setView('record')">All orders</button>
+        </div>
+        <div id="record-filters" class="d-none flex-wrap gap-2 align-items-center">
+          <input type="date" class="form-control" id="f-from" style="width:160px;" title="Collection from">
+          <input type="date" class="form-control" id="f-to" style="width:160px;" title="Collection to">
+          <select class="form-select" id="f-status" style="width:160px;">
+            <option value="all">Any status</option>
+            <option value="open">Still owed</option>
+            <option value="taken">To make</option>
+            <option value="ready">Ready</option>
+            <option value="collected">Collected</option>
+            <option value="cancelled">Cancelled</option>
+          </select>
+          <input type="text" class="form-control" id="f-q" placeholder="Customer, phone, cake..." style="width:230px;">
+          <button class="btn btn-primary" onclick="loadOrders()">Search</button>
+        </div>
+        <button class="btn btn-outline-secondary ms-auto" onclick="loadAll()">Refresh</button>
+      </div>
+
+      <div id="orders-area"><div class="text-center text-muted py-5">Loading...</div></div>
+    </div>
+  </div>
+
+  <!-- Order detail: the record half of the screen (payments, bill, who took it) -->
+  <div class="modal fade" id="detailModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title" id="detail-title">Pre-order</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body" id="detail-body"></div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Edit: only reachable while taken/ready -->
+  <div class="modal fade" id="editModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title" id="edit-title">Edit pre-order</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body">
+          <input type="hidden" id="edit-id">
+          <div class="row g-2 mb-3">
+            <div class="col-md-4">
+              <label class="form-label">Collection date</label>
+              <input type="date" class="form-control" id="edit-date">
+            </div>
+            <div class="col-md-4">
+              <label class="form-label">Time (free text)</label>
+              <input type="text" class="form-control" id="edit-time" placeholder="e.g. 4 pm" maxlength="50">
+            </div>
+            <div class="col-md-4">
+              <label class="form-label">Order total</label>
+              <div class="form-control-plaintext fw-bold fs-5" id="edit-total">-</div>
+            </div>
+          </div>
+          <label class="form-label">Lines <small class="text-muted">(saving replaces every line)</small></label>
+          <div id="edit-lines"></div>
+          <div class="d-flex flex-wrap gap-2 mt-2">
+            <select class="form-select" id="edit-product" style="width:320px;"></select>
+            <button class="btn btn-outline-secondary" onclick="addProductLine()">Add menu item</button>
+            <button class="btn btn-outline-primary" onclick="addCustomLine()">Add custom cake line</button>
+          </div>
+          <div class="mt-3">
+            <label class="form-label">Notes</label>
+            <textarea class="form-control" id="edit-notes" rows="2" maxlength="2000"></textarea>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button class="btn btn-primary" id="btn-edit-save" onclick="submitEdit(this)">Save changes</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Take a payment before collection -->
+  <div class="modal fade" id="paymentModal" tabindex="-1">
+    <div class="modal-dialog">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title">Take a payment</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body">
+          <input type="hidden" id="pay-id">
+          <div class="alert alert-light border mb-3" id="pay-order-line"></div>
+          <div class="mb-3">
+            <label class="form-label">Amount</label>
+            <input type="number" class="form-control form-control-lg" id="pay-amount" min="0" step="0.01">
+          </div>
+          <div class="mb-3">
+            <label class="form-label">Method</label>
+            <select class="form-select" id="pay-method">
+              <option value="cash">Cash</option>
+              <option value="card">Card</option>
+              <option value="upi">UPI</option>
+            </select>
+          </div>
+          <div class="mb-0">
+            <label class="form-label">Paid on</label>
+            <input type="date" class="form-control" id="pay-date">
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button class="btn btn-success" id="btn-pay-save" onclick="submitPayment(this)">Record payment</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Collect: the moment of sale -->
+  <div class="modal fade" id="collectModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title" id="collect-title">Collect order</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body">
+          <div id="collect-body"></div>
+          <div class="row g-2 mt-2">
+            <div class="col-md-4">
+              <label class="form-label">Discount</label>
+              <input type="number" class="form-control" id="collect-discount" min="0" step="0.01" value="0" oninput="recalcCollect()">
+            </div>
+            <div class="col-md-4">
+              <label class="form-label">Payment method</label>
+              <select class="form-select" id="collect-method" onchange="recalcCollect()">
+                <option value="cash">Cash</option>
+                <option value="card">Card</option>
+                <option value="upi">UPI</option>
+              </select>
+            </div>
+            <div class="col-md-4" id="collect-cash-wrap">
+              <label class="form-label">Cash received</label>
+              <input type="number" class="form-control" id="collect-cash" min="0" step="0.01" placeholder="optional" oninput="recalcCollect()">
+            </div>
+          </div>
+          <div id="collect-summary" class="mt-3"></div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button class="btn btn-success btn-lg" id="btn-collect-save" onclick="submitCollect(this)">Collect &amp; bill</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Receipt, the same modal shape the till uses -->
+  <div class="modal fade" id="receiptModal" tabindex="-1">
+    <div class="modal-dialog">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title">Receipt</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body">
+          <div class="text-center mb-3">
+            <img src="/public/img/kuki_logo.png" alt="KUKI" style="max-width:140px;max-height:100px;display:block;margin:0 auto 8px;">
+            <span class="badge bg-success fs-5" id="receipt-token">Receipt</span>
+            <div class="mt-2 fs-4 fw-bold" id="receipt-headline"></div>
+          </div>
+          <div class="receipt-preview" id="receipt-text"></div>
+        </div>
+        <div class="modal-footer flex-wrap gap-2">
+          <button class="btn btn-outline-warning" onclick="printSlip('kitchen')">Print Kitchen Copy</button>
+          <button class="btn btn-outline-secondary" onclick="printSlip('customer')">Print Customer Copy</button>
+          <button class="btn btn-primary" data-bs-dismiss="modal">Done</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+  <script src="/public/js/app.js"></script>
+  <script>
+    // ===== Why this screen is laid out the way it is ======================
+    // The owner's question every morning is "what do I have to make, and when".
+    // So the default view is NOT every order ever taken: it is every order the
+    // shop still owes (status taken|ready, any date), grouped by collection day,
+    // with everything already late pulled into one red group at the top, then
+    // Today, Tomorrow, then each later date. The lines are printed on the card
+    // because a kitchen list without "2kg chocolate, butterscotch filling" is
+    // useless. The flat, searchable record lives behind the "All orders" tab,
+    // which is where a record belongs.
+
+    let orders = [];
+    let summary = null;
+    let view = 'work';
+    let products = [];
+    let editLines = [];
+    let collectOrder = null;
+    let lastReceiptText = '';
+    let lastKitchenText = '';
+
+    const isAdmin = () => !!currentUser && currentUser.role === 'admin';
+
+    // Every interpolated value on this screen goes through this: customer names,
+    // phone numbers, notes and cake descriptions are all user-typed text.
+    function escapeHtml(v) {
+      return String(v == null ? '' : v).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+    }
+
+    // ----- Business dates -------------------------------------------------
+    // collection_date and pre_order_payments.paid_on are plain YYYY-MM-DD
+    // business dates. They must NOT go through parseDbDate(), which appends 'Z'
+    // for the UTC datetime('now') columns and would shift every cake 5.5 hours
+    // back into the previous day in Asia/Colombo. created_at IS such a column,
+    // so that one keeps formatDateTime().
+    const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+    function dateParts(s) {
+      const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(s == null ? '' : s));
+      return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
+    }
+    function formatBizDate(s) {
+      const p = dateParts(s);
+      if (!p) return '-';
+      return p[2] + ' ' + MONTHS[p[1] - 1] + ' ' + p[0];
+    }
+    function bizWeekday(s) {
+      const p = dateParts(s);
+      if (!p) return '';
+      // Built AND read in UTC, so no timezone can move it off its own day.
+      return new Date(Date.UTC(p[0], p[1] - 1, p[2])).toLocaleDateString('en-LK', { timeZone: 'UTC', weekday: 'short' });
+    }
+    function daysFromToday(s) {
+      const a = dateParts(s), b = dateParts(todayISO());
+      if (!a || !b) return null;
+      return Math.round((Date.UTC(a[0], a[1] - 1, a[2]) - Date.UTC(b[0], b[1] - 1, b[2])) / 86400000);
+    }
+    function dayLabel(s) {
+      const n = daysFromToday(s);
+      if (n === null) return formatBizDate(s);
+      if (n === 0) return 'Today · ' + formatBizDate(s);
+      if (n === 1) return 'Tomorrow · ' + formatBizDate(s);
+      if (n === -1) return 'Yesterday · ' + formatBizDate(s);
+      if (n < 0) return (-n) + ' days ago · ' + formatBizDate(s);
+      return bizWeekday(s) + ' · ' + formatBizDate(s);
+    }
+    function lateText(s) {
+      const n = daysFromToday(s);
+      if (n === null || n >= 0) return '';
+      return n === -1 ? '1 day late' : (-n) + ' days late';
+    }
+
+    const STATUS_LABEL = { taken: 'To make', ready: 'Ready', collected: 'Collected', cancelled: 'Cancelled' };
+    const STATUS_CLASS = { taken: 'bg-warning text-dark', ready: 'bg-success', collected: 'bg-secondary', cancelled: 'bg-dark' };
+    const isOpen = (o) => o.status === 'taken' || o.status === 'ready';
+
+    function statusBadge(o) {
+      return `<span class="badge ${STATUS_CLASS[o.status] || 'bg-secondary'}">${escapeHtml(STATUS_LABEL[o.status] || o.status)}</span>`;
+    }
+
+    // ===== Boot ===========================================================
+    initApp('/preorders', () => {
+      document.getElementById('f-from').value = todayISO();
+      document.getElementById('f-q').addEventListener('keydown', e => { if (e.key === 'Enter') loadOrders(); });
+      loadAll();
+    });
+
+    async function loadAll() {
+      await Promise.all([loadSummary(), loadOrders()]);
+    }
+
+    async function loadSummary() {
+      try {
+        summary = await api('/api/preorders/summary');
+      } catch {
+        summary = null;
+      }
+      renderSummary();
+    }
+
+    function tile(label, value, cls, onclick) {
+      const click = onclick ? ` onclick="${onclick}" style="cursor:pointer;"` : '';
+      return `
+        <div class="col">
+          <div class="stat-card h-100"${click}>
+            <div class="stat-value ${cls || ''}">${escapeHtml(String(value))}</div>
+            <div class="stat-label">${escapeHtml(label)}</div>
+          </div>
+        </div>`;
+    }
+
+    function renderSummary() {
+      const el = document.getElementById('summary-strip');
+      if (!summary) { el.innerHTML = ''; return; }
+      el.innerHTML = `
+        <div class="col-12">
+          <div class="row row-cols-2 row-cols-md-4 row-cols-xl-7 g-2">
+            ${tile('Overdue', summary.overdue, summary.overdue > 0 ? 'text-danger' : 'text-muted', "setView('overdue')")}
+            ${tile('To bake today', summary.to_bake_today, 'text-dark', "setView('today')")}
+            ${tile('Ready today', summary.ready_today, 'text-success', "setView('today')")}
+            ${tile('Due today', summary.due_today, 'text-dark', "setView('today')")}
+            ${tile('Upcoming', summary.upcoming, 'text-muted', "setView('work')")}
+            ${tile('Deposits held', formatCurrency(summary.deposits_held), 'text-success')}
+            ${tile('Still to collect', formatCurrency(summary.outstanding_balance), 'text-primary')}
+          </div>
+          ${summary.overdue > 0 ? `
+            <div class="alert alert-danger d-flex align-items-center justify-content-between flex-wrap gap-2 py-2 mt-2 mb-0">
+              <div><strong>${escapeHtml(String(summary.overdue))} order${summary.overdue === 1 ? '' : 's'} past the collection date</strong> and still unsettled — phone the customer.</div>
+              <button class="btn btn-sm btn-danger" onclick="setView('overdue')">Show them</button>
+            </div>` : ''}
+        </div>`;
+    }
+
+    function setView(next) {
+      view = next;
+      ['work', 'today', 'overdue', 'record'].forEach(v => {
+        const btn = document.getElementById('view-btn-' + v);
+        if (btn) btn.classList.toggle('active', v === view);
+      });
+      const filters = document.getElementById('record-filters');
+      filters.classList.toggle('d-none', view !== 'record');
+      filters.classList.toggle('d-flex', view === 'record');
+      loadOrders();
+    }
+
+    function buildQuery() {
+      const p = new URLSearchParams();
+      if (view === 'work') {
+        p.set('status', 'open');
+        p.set('sort', 'due');
+      } else if (view === 'today') {
+        p.set('date', 'today');
+        p.set('status', 'all');
+        p.set('sort', 'due');
+      } else if (view === 'overdue') {
+        p.set('overdue', '1');
+        p.set('sort', 'due');
+      } else {
+        const from = document.getElementById('f-from').value;
+        const to = document.getElementById('f-to').value;
+        const status = document.getElementById('f-status').value;
+        const q = document.getElementById('f-q').value.trim();
+        if (from) p.set('from', from);
+        if (to) p.set('to', to);
+        if (status) p.set('status', status);
+        if (q) p.set('q', q);
+        p.set('sort', 'recent');
+      }
+      p.set('limit', '500');
+      return p;
+    }
+
+    async function loadOrders() {
+      const area = document.getElementById('orders-area');
+      try {
+        orders = await api(`/api/preorders?${buildQuery()}`);
+      } catch (err) {
+        orders = [];
+        area.innerHTML = `<div class="alert alert-danger">Could not load pre-orders: ${escapeHtml((err && err.message) || 'unknown error')}</div>`;
+        return;
+      }
+      renderOrders();
+    }
+
+    function renderOrders() {
+      const area = document.getElementById('orders-area');
+      if (!orders.length) {
+        const msg = view === 'overdue' ? 'Nothing overdue — every order is either still to come or settled.'
+          : view === 'today' ? 'Nothing due today.'
+          : view === 'work' ? 'Nothing outstanding — there is no cake to make.'
+          : 'No orders match that search.';
+        area.innerHTML = `<div class="text-center text-muted py-5">${escapeHtml(msg)}</div>`;
+        return;
+      }
+      if (view === 'record') { area.innerHTML = recordTable(orders); return; }
+
+      // Group by collection day. Everything already late is pulled into one
+      // group at the top so a cake from last Friday cannot hide under a date
+      // heading nobody scrolls back to.
+      const late = orders.filter(o => o.is_overdue);
+      const rest = orders.filter(o => !o.is_overdue);
+      const byDate = new Map();
+      rest.forEach(o => {
+        const k = o.collection_date || '';
+        if (!byDate.has(k)) byDate.set(k, []);
+        byDate.get(k).push(o);
+      });
+      let html = '';
+      if (late.length) {
+        html += groupHeader('Overdue — ' + late.length, true);
+        html += late.map(orderCard).join('');
+      }
+      [...byDate.entries()]
+        .sort((a, b) => String(a[0]).localeCompare(String(b[0])))
+        .forEach(([date, list]) => {
+          html += groupHeader(dayLabel(date) + ' — ' + list.length, false);
+          html += list.map(orderCard).join('');
+        });
+      area.innerHTML = html;
+    }
+
+    function groupHeader(text, danger) {
+      return `<div class="po-group${danger ? ' danger' : ''}"><span>${escapeHtml(text)}</span><span class="line"></span></div>`;
+    }
+
+    function linesHtml(items) {
+      if (!items || !items.length) return '<li class="text-danger">No lines on this order</li>';
+      return items.map(i => `
+        <li>
+          <span class="qty">${escapeHtml(String(i.quantity))}&times;</span>
+          <span class="${i.product_id ? '' : 'custom'}">${escapeHtml(i.description)}</span>
+          ${i.product_id ? '' : '<span class="badge bg-light text-secondary border">custom</span>'}
+          <span class="text-muted">@ ${escapeHtml(formatCurrency(i.unit_price))} = ${escapeHtml(formatCurrency(i.quantity * i.unit_price))}</span>
+        </li>`).join('');
+    }
+
+    function orderCard(o) {
+      const cls = o.is_overdue ? 's-overdue'
+        : o.status === 'ready' ? 's-ready'
+        : o.status === 'collected' ? 's-done'
+        : o.status === 'cancelled' ? 's-cancelled' : '';
+      const when = `${escapeHtml(dayLabel(o.collection_date))}${o.collection_time ? ' · ' + escapeHtml(o.collection_time) : ''}`;
+      const paidBit = o.amount_paid > 0
+        ? 'paid ' + escapeHtml(formatCurrency(o.amount_paid))
+        : '<span class="text-danger">no deposit</span>';
+      // A collected order's `balance` is total minus the DEPOSIT rows only: the
+      // rest was settled by the bill, not left owing. Showing it as a balance
+      // would read as money the customer still owes, which is wrong.
+      const moneyTail = o.status === 'collected'
+        ? '<span class="text-success">settled by bill</span>'
+        : o.status === 'cancelled'
+          ? '<span class="text-muted">not collected</span>'
+          : `balance <strong class="${o.balance > 0 ? 'text-danger' : 'text-success'}">${escapeHtml(formatCurrency(o.balance))}</strong>`;
+      return `
+        <div class="po-card ${cls}">
+          <div class="d-flex justify-content-between align-items-start gap-3 flex-wrap">
+            <div>
+              <div class="fw-bold">
+                ${escapeHtml(o.customer_name || 'Unknown customer')}
+                ${o.customer_phone ? `<span class="text-muted fw-normal ms-1">${escapeHtml(o.customer_phone)}</span>` : ''}
+              </div>
+              <div class="small text-muted">#${escapeHtml(String(o.id))} · ${when}</div>
+            </div>
+            <div class="text-end">
+              ${statusBadge(o)}
+              ${o.is_overdue ? `<span class="badge bg-danger ms-1">${escapeHtml(lateText(o.collection_date))}</span>` : ''}
+              <div class="po-money mt-1">
+                <strong>${escapeHtml(formatCurrency(o.total))}</strong> · ${paidBit} · ${moneyTail}
+              </div>
+            </div>
+          </div>
+          <ul class="po-lines">${linesHtml(o.items)}</ul>
+          ${o.notes ? `<div class="po-note">${escapeHtml(o.notes)}</div>` : ''}
+          <div class="d-flex flex-wrap gap-2 mt-2">
+            ${isOpen(o) ? `
+              ${o.status === 'taken'
+                ? `<button class="btn btn-sm btn-success" onclick="setStatus(${o.id}, 'ready', this)">Mark ready</button>`
+                : `<button class="btn btn-sm btn-outline-secondary" onclick="setStatus(${o.id}, 'taken', this)">Back to to-make</button>`}
+              <button class="btn btn-sm btn-primary" onclick="openCollect(${o.id})">Collect${o.balance > 0 ? ' · ' + escapeHtml(formatCurrency(o.balance)) : ''}</button>
+              <button class="btn btn-sm btn-outline-success" onclick="openPayment(${o.id})">Take payment</button>
+              <button class="btn btn-sm btn-outline-secondary" onclick="openEdit(${o.id})">Edit</button>
+              ${isAdmin() ? `<button class="btn btn-sm btn-outline-danger" onclick="cancelOrder(${o.id}, this)">Cancel</button>` : ''}
+            ` : `
+              <span class="po-readonly align-self-center">
+                ${o.status === 'collected'
+                  ? 'Collected and billed — closed, nothing further to do' + (o.bill_id ? ' (bill #' + escapeHtml(String(o.bill_id)) + ')' : '') + '.'
+                  : 'Cancelled — closed, nothing further to do.'}
+              </span>
+              ${o.status === 'collected' && o.bill_id ? `<button class="btn btn-sm btn-outline-secondary" onclick="viewBillReceipt(${o.bill_id})">Receipt</button>` : ''}
+            `}
+            <button class="btn btn-sm btn-link" onclick="openDetail(${o.id})">Details</button>
+          </div>
+        </div>`;
+    }
+
+    function recordTable(list) {
+      const rows = list.map(o => `
+        <tr class="${o.is_overdue ? 'table-danger' : ''}">
+          <td>#${escapeHtml(String(o.id))}</td>
+          <td>${escapeHtml(formatBizDate(o.collection_date))}${o.collection_time ? `<br><small class="text-muted">${escapeHtml(o.collection_time)}</small>` : ''}</td>
+          <td>${escapeHtml(o.customer_name || '-')}<br><small class="text-muted">${escapeHtml(o.customer_phone || '')}</small></td>
+          <td><small>${(o.items || []).map(i => escapeHtml(i.quantity + '× ' + i.description)).join('<br>') || '-'}</small></td>
+          <td class="text-end">${escapeHtml(formatCurrency(o.total))}</td>
+          <td class="text-end">${escapeHtml(formatCurrency(o.amount_paid))}</td>
+          <td class="text-end ${o.balance > 0 && isOpen(o) ? 'text-danger fw-bold' : 'text-muted'}">${
+            o.status === 'collected' ? 'settled' : o.status === 'cancelled' ? '-' : escapeHtml(formatCurrency(o.balance))
+          }</td>
+          <td>${statusBadge(o)}${o.is_overdue ? '<br><span class="badge bg-danger mt-1">overdue</span>' : ''}</td>
+          <td>${escapeHtml(o.taken_by || '-')}</td>
+          <td><button class="btn btn-sm btn-outline-primary" onclick="openDetail(${o.id})">Open</button></td>
+        </tr>`).join('');
+      return `
+        <div class="table-container">
+          <table class="table table-hover mb-0 align-middle">
+            <thead><tr>
+              <th>Order</th><th>Collection</th><th>Customer</th><th>Lines</th>
+              <th class="text-end">Total</th><th class="text-end">Paid</th><th class="text-end">Balance</th>
+              <th>Status</th><th>Taken by</th><th></th>
+            </tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>`;
+    }
+
+    // ===== Detail =========================================================
+    async function openDetail(id) {
+      const body = document.getElementById('detail-body');
+      document.getElementById('detail-title').textContent = `Pre-order #${id}`;
+      body.innerHTML = '<div class="text-center text-muted py-4">Loading...</div>';
+      new bootstrap.Modal(document.getElementById('detailModal')).show();
+      try {
+        renderDetail(await api(`/api/preorders/${id}`));
+      } catch (err) {
+        body.innerHTML = `<div class="alert alert-danger">${escapeHtml((err && err.message) || 'Could not load this order')}</div>`;
+      }
+    }
+
+    function renderDetail(o) {
+      const payments = (o.payments || []).map(p => `
+        <tr>
+          <td>${escapeHtml(formatBizDate(p.paid_on))}</td>
+          <td>${escapeHtml(String(p.payment_method || '').toUpperCase())}</td>
+          <td>${escapeHtml(p.taken_by || '-')}</td>
+          <td class="text-end">${escapeHtml(formatCurrency(p.amount))}</td>
+          <td class="text-end">${isAdmin() && o.status !== 'collected'
+            ? `<button class="btn btn-sm btn-outline-danger" onclick="deletePayment(${o.id}, ${p.id}, this)">Delete</button>`
+            : ''}</td>
+        </tr>`).join('') || '<tr><td colspan="5" class="text-center text-muted">No payment taken yet</td></tr>';
+
+      document.getElementById('detail-body').innerHTML = `
+        <div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-3">
+          <div>
+            <div class="fs-5 fw-bold">${escapeHtml(o.customer_name || 'Unknown customer')}</div>
+            <div>${escapeHtml(o.customer_phone || 'no phone on file')}</div>
+            <div class="text-muted small">Taken by ${escapeHtml(o.taken_by || '-')} on ${escapeHtml(formatDateTime(o.created_at))}</div>
+          </div>
+          <div class="text-end">
+            ${statusBadge(o)}
+            ${o.collection_date < todayISO() && isOpen(o) ? '<span class="badge bg-danger ms-1">overdue</span>' : ''}
+            <div class="mt-1"><strong>Collection:</strong> ${escapeHtml(dayLabel(o.collection_date))}${o.collection_time ? ' · ' + escapeHtml(o.collection_time) : ''}</div>
+          </div>
+        </div>
+        <table class="table table-sm">
+          <thead><tr><th>Line</th><th class="text-end">Qty</th><th class="text-end">Unit</th><th class="text-end">Total</th></tr></thead>
+          <tbody>
+            ${(o.items || []).map(i => `
+              <tr>
+                <td>${escapeHtml(i.description)} ${i.product_id ? '' : '<span class="badge bg-light text-secondary border">custom</span>'}</td>
+                <td class="text-end">${escapeHtml(String(i.quantity))}</td>
+                <td class="text-end">${escapeHtml(formatCurrency(i.unit_price))}</td>
+                <td class="text-end">${escapeHtml(formatCurrency(i.quantity * i.unit_price))}</td>
+              </tr>`).join('') || '<tr><td colspan="4" class="text-muted">No lines</td></tr>'}
+          </tbody>
+          <tfoot>
+            <tr class="fw-bold"><td colspan="3" class="text-end">Order total</td><td class="text-end">${escapeHtml(formatCurrency(o.total))}</td></tr>
+            <tr><td colspan="3" class="text-end">Paid in advance</td><td class="text-end">${escapeHtml(formatCurrency(o.amount_paid))}</td></tr>
+            ${o.status === 'collected'
+              ? `<tr class="fw-bold text-success"><td colspan="3" class="text-end">Settled</td><td class="text-end">on the bill</td></tr>`
+              : `<tr class="fw-bold ${o.balance > 0 ? 'text-danger' : 'text-success'}"><td colspan="3" class="text-end">${o.status === 'cancelled' ? 'Was outstanding' : 'Balance'}</td><td class="text-end">${escapeHtml(formatCurrency(o.balance))}</td></tr>`}
+          </tfoot>
+        </table>
+        ${o.notes ? `<div class="po-note mb-3">${escapeHtml(o.notes)}</div>` : ''}
+        <h6>Payments taken before collection</h6>
+        <table class="table table-sm">
+          <thead><tr><th>Paid on</th><th>Method</th><th>Taken by</th><th class="text-end">Amount</th><th></th></tr></thead>
+          <tbody>${payments}</tbody>
+        </table>
+        ${o.bill ? `
+          <div class="alert alert-secondary py-2">
+            Billed as token #${escapeHtml(String(o.bill.token_number).padStart(3, '0'))} on ${escapeHtml(formatDateTime(o.bill.created_at))} ·
+            ${escapeHtml(formatCurrency(o.bill.total))} · ${escapeHtml(String(o.bill.payment_method || '').toUpperCase())}
+            <button class="btn btn-sm btn-outline-secondary ms-2" onclick="viewBillReceipt(${o.bill.id}, ${o.bill.token_number})">Receipt</button>
+          </div>` : ''}
+        ${isOpen(o) ? '' : `<div class="po-readonly">This order is ${escapeHtml(STATUS_LABEL[o.status] || o.status)}: it is read-only and cannot be edited, paid or collected.</div>`}`;
+    }
+
+    // ===== Ready / back to to-make =======================================
+    async function setStatus(id, status, btn) {
+      await withBusy(btn, async () => {
+        await api(`/api/preorders/${id}/status`, { method: 'POST', body: { status } });
+        showToast(status === 'ready' ? 'Marked ready for collection' : 'Moved back to to-make');
+        await loadAll();
+      }, 'Saving...');
+    }
+
+    // ===== Cancel (admin) ================================================
+    async function cancelOrder(id, btn) {
+      // prompt/confirm stay OUTSIDE the guard: neither writes anything, and
+      // backing out of either must not leave the button disabled.
+      const reason = prompt('Why is this order being cancelled? (optional)');
+      if (reason === null) return;
+      if (!confirm('Cancel this pre-order?\nAny deposit already taken stays on the books and has to be paid back as a cash expense.')) return;
+      await withBusy(btn, async () => {
+        const res = await api(`/api/preorders/${id}/cancel`, { method: 'POST', body: { reason: reason.trim() } });
+        showToast(res.refund_due > 0
+          ? `Cancelled — ${formatCurrency(res.refund_due)} of deposit is refundable`
+          : 'Order cancelled');
+        await loadAll();
+      }, 'Cancelling...');
+    }
+
+    async function deletePayment(orderId, paymentId, btn) {
+      if (!confirm('Delete this payment?\nIt will disappear from the deposits on record.')) return;
+      await withBusy(btn, async () => {
+        const o = await api(`/api/preorders/${orderId}/payments/${paymentId}`, { method: 'DELETE' });
+        showToast('Payment deleted');
+        renderDetail(o);
+        await loadAll();
+      }, 'Deleting...');
+    }
+
+    // ===== Take a payment ================================================
+    function openPayment(id) {
+      const o = orders.find(x => x.id === id);
+      if (!o) { showToast('Refresh the list and try again', 'error'); return; }
+      document.getElementById('pay-id').value = String(id);
+      document.getElementById('pay-order-line').innerHTML = `
+        <strong>${escapeHtml(o.customer_name || 'Customer')}</strong> ·
+        order ${escapeHtml(formatCurrency(o.total))} ·
+        paid ${escapeHtml(formatCurrency(o.amount_paid))} ·
+        <strong>balance ${escapeHtml(formatCurrency(o.balance))}</strong>`;
+      const amount = document.getElementById('pay-amount');
+      amount.value = o.balance > 0 ? o.balance.toFixed(2) : '';
+      amount.max = o.balance;
+      document.getElementById('pay-method').value = 'cash';
+      document.getElementById('pay-date').value = todayISO();
+      new bootstrap.Modal(document.getElementById('paymentModal')).show();
+    }
+
+    async function submitPayment(btn) {
+      const id = parseInt(document.getElementById('pay-id').value, 10);
+      const amount = parseFloat(document.getElementById('pay-amount').value);
+      if (!Number.isFinite(amount) || amount <= 0) { showToast('Enter an amount', 'error'); return; }
+      const body = {
+        amount,
+        payment_method: document.getElementById('pay-method').value,
+        paid_on: document.getElementById('pay-date').value || todayISO(),
+      };
+      await withBusy(btn, async () => {
+        await api(`/api/preorders/${id}/payments`, { method: 'POST', body });
+        showToast(`${formatCurrency(amount)} recorded`);
+        bootstrap.Modal.getInstance(document.getElementById('paymentModal')).hide();
+        await loadAll();
+      }, 'Saving...');
+    }
+
+    // ===== Collect ========================================================
+    function taxRate() {
+      const r = parseFloat(appSettings.tax_rate);
+      return Number.isFinite(r) && r > 0 ? r : 0;
+    }
+
+    async function openCollect(id) {
+      try {
+        collectOrder = await api(`/api/preorders/${id}`);
+      } catch (err) {
+        showToast((err && err.message) || 'Could not load the order', 'error');
+        return;
+      }
+      if (!isOpen(collectOrder)) {
+        showToast(`This order is ${STATUS_LABEL[collectOrder.status] || collectOrder.status} and cannot be collected`, 'error');
+        await loadAll();
+        return;
+      }
+      document.getElementById('collect-title').textContent =
+        `Collect #${collectOrder.id} — ${collectOrder.customer_name || 'Customer'}`;
+      document.getElementById('collect-body').innerHTML = `
+        <div class="mb-2">
+          <strong>${escapeHtml(collectOrder.customer_name || 'Customer')}</strong>
+          ${collectOrder.customer_phone ? `<span class="text-muted ms-1">${escapeHtml(collectOrder.customer_phone)}</span>` : ''}
+          · ${escapeHtml(dayLabel(collectOrder.collection_date))}
+        </div>
+        <ul class="po-lines">${linesHtml(collectOrder.items)}</ul>`;
+      document.getElementById('collect-discount').value = '0';
+      document.getElementById('collect-method').value = 'cash';
+      document.getElementById('collect-cash').value = '';
+      recalcCollect();
+      new bootstrap.Modal(document.getElementById('collectModal')).show();
+    }
+
+    // A preview of the same arithmetic the server does. The server is the
+    // authority; this only has to make the cashier charge the right amount.
+    function recalcCollect() {
+      if (!collectOrder) return;
+      const discount = Math.max(0, parseFloat(document.getElementById('collect-discount').value) || 0);
+      const method = document.getElementById('collect-method').value;
+      const rate = taxRate();
+      const taxable = Math.max(0, collectOrder.total - discount);
+      const tax = Math.round(taxable * (rate / 100) * 100) / 100;
+      const billTotal = Math.round((taxable + tax) * 100) / 100;
+      const deposit = collectOrder.amount_paid || 0;
+      const toCollect = Math.round((billTotal - deposit) * 100) / 100;
+
+      document.getElementById('collect-cash-wrap').style.display = method === 'cash' ? '' : 'none';
+      const cashRaw = document.getElementById('collect-cash').value;
+      const cash = cashRaw === '' ? NaN : parseFloat(cashRaw);
+      const change = (method === 'cash' && Number.isFinite(cash)) ? Math.round((cash - toCollect) * 100) / 100 : null;
+
+      document.getElementById('collect-summary').innerHTML = `
+        <div class="row g-2">
+          <div class="col-md-6">
+            <table class="table table-sm mb-0">
+              <tr><td>Order total</td><td class="text-end">${escapeHtml(formatCurrency(collectOrder.total))}</td></tr>
+              ${discount > 0 ? `<tr><td>Discount</td><td class="text-end">-${escapeHtml(formatCurrency(discount))}</td></tr>` : ''}
+              ${rate > 0 ? `<tr><td>Tax (${escapeHtml(String(rate))}%)</td><td class="text-end">${escapeHtml(formatCurrency(tax))}</td></tr>` : ''}
+              <tr class="fw-bold"><td>Bill total</td><td class="text-end">${escapeHtml(formatCurrency(billTotal))}</td></tr>
+              <tr class="text-success"><td>Paid in advance</td><td class="text-end">-${escapeHtml(formatCurrency(deposit))}</td></tr>
+            </table>
+          </div>
+          <div class="col-md-6">
+            <div class="alert ${toCollect > 0 ? 'alert-primary' : 'alert-success'} mb-0 text-center">
+              <div class="text-uppercase small fw-bold">Charge now</div>
+              <div class="display-6 fw-bold">${escapeHtml(formatCurrency(toCollect))}</div>
+              ${deposit > 0 ? `<div class="small">not ${escapeHtml(formatCurrency(billTotal))} — ${escapeHtml(formatCurrency(deposit))} is already paid</div>` : ''}
+              ${change === null ? '' : (change < 0
+                ? `<div class="mt-2 text-danger fw-bold">${escapeHtml(formatCurrency(-change))} short</div>`
+                : `<div class="mt-2">Change due <strong>${escapeHtml(formatCurrency(change))}</strong></div>`)}
+            </div>
+          </div>
+        </div>`;
+    }
+
+    async function submitCollect(btn) {
+      if (!collectOrder) return;
+      const id = collectOrder.id;
+      const method = document.getElementById('collect-method').value;
+      const discount = Math.max(0, parseFloat(document.getElementById('collect-discount').value) || 0);
+      const cashRaw = document.getElementById('collect-cash').value;
+      const body = { payment_method: method, discount };
+      if (method === 'cash' && cashRaw !== '' && Number.isFinite(parseFloat(cashRaw))) {
+        body.cash_received = parseFloat(cashRaw);
+      }
+      await withBusy(btn, async () => {
+        let res;
+        try {
+          res = await api(`/api/preorders/${id}/collect`, { method: 'POST', body });
+        } catch (err) {
+          // 409: it has already been collected. The bill exists, so say so and
+          // refresh rather than inviting a second attempt.
+          if (err && err.data && err.data.already_collected) {
+            showToast(err.message, 'error');
+            bootstrap.Modal.getInstance(document.getElementById('collectModal')).hide();
+            await loadAll();
+            return;
+          }
+          throw err;
+        }
+        bootstrap.Modal.getInstance(document.getElementById('collectModal')).hide();
+        const changeBit = (res.change_due === null || res.change_due === undefined)
+          ? '' : ` · change ${formatCurrency(res.change_due)}`;
+        showReceipt({
+          token: res.bill ? res.bill.token_number : null,
+          headline: `Charged ${formatCurrency(res.cash_to_collect)}${changeBit}`,
+          receipt: res.receipt_text || '',
+          kitchen: res.kitchen_text || '',
+        });
+        showToast(res.replayed ? 'Already billed earlier — showing that bill' : 'Collected and billed');
+        await loadAll();
+      }, 'Billing...');
+    }
+
+    // ===== Receipt ========================================================
+    function showReceipt(o) {
+      document.getElementById('receipt-token').textContent =
+        o.token == null ? 'Receipt' : `Token #${String(o.token).padStart(3, '0')}`;
+      document.getElementById('receipt-headline').textContent = o.headline || '';
+      document.getElementById('receipt-text').textContent = o.receipt || '';
+      lastReceiptText = o.receipt || '';
+      lastKitchenText = o.kitchen || '';
+      new bootstrap.Modal(document.getElementById('receiptModal')).show();
+    }
+
+    // /api/pos/bills/:id/receipt returns only { text, kitchen_text }, so the
+    // token is passed in where the caller already knows it.
+    async function viewBillReceipt(billId, token) {
+      try {
+        const res = await api(`/api/pos/bills/${billId}/receipt`);
+        showReceipt({ token: token == null ? null : token, headline: '', receipt: res.text || '', kitchen: res.kitchen_text || '' });
+      } catch (err) {
+        showToast((err && err.message) || 'Could not load the receipt', 'error');
+      }
+    }
+
+    // Same slip pattern as the till (views/pos.html): a 58mm window, logo on the
+    // customer copy only.
+    async function printSlip(which) {
+      const text = which === 'kitchen' ? lastKitchenText : lastReceiptText;
+      if (!text) { showToast(`No ${which} copy available`, 'warning'); return; }
+      await openAndPrint(text, which !== 'kitchen');
+    }
+
+    async function openAndPrint(text, withLogo) {
+      const w = window.open('', '_blank', 'width=350,height=700');
+      const logoUrl = window.location.origin + '/public/img/kuki_logo.png';
+      const logoHtml = withLogo ? `<img src="${logoUrl}" alt="KUKI">` : '';
+      w.document.write(`
+        <html><head><title></title><style>
+          @page { size: 58mm auto; margin: 0; }
+          html, body { margin: 0; padding: 0; width: 58mm; font-family: 'Consolas', 'Courier New', monospace; }
+          .slip { padding: 0 0 2mm 0; width: 58mm; box-sizing: border-box; text-align: center; }
+          .slip img { display: block; margin: 0 auto 2px; max-width: 45mm; max-height: 22mm; }
+          .slip pre { font-family: inherit; font-size: 13px; font-weight: 600; line-height: 1.15; margin: 0; padding: 0 1mm; white-space: pre-wrap; text-align: left; }
+        </style></head><body>
+          <div class="slip">${logoHtml}<pre>${escapeHtml(text)}</pre></div>
+        </body></html>
+      `);
+      w.document.close();
+      const imgs = Array.from(w.document.images);
+      await Promise.all(imgs.map(img => img.complete ? null : new Promise(r => { img.onload = img.onerror = r; })));
+      w.addEventListener('afterprint', () => setTimeout(() => { try { w.close(); } catch {} }, 200));
+      w.print();
+    }
+
+    // ===== Edit ===========================================================
+    async function loadProducts() {
+      if (products.length) return;
+      try {
+        products = await api('/api/products');
+      } catch {
+        products = [];
+      }
+      document.getElementById('edit-product').innerHTML =
+        '<option value="">Pick a menu item...</option>' +
+        products.map(p => `<option value="${escapeHtml(String(p.id))}">${escapeHtml(p.name)} — ${escapeHtml(formatCurrency(p.discount_price == null ? p.selling_price : p.discount_price))}</option>`).join('');
+    }
+
+    async function openEdit(id) {
+      let o;
+      try {
+        o = await api(`/api/preorders/${id}`);
+      } catch (err) {
+        showToast((err && err.message) || 'Could not load the order', 'error');
+        return;
+      }
+      if (!isOpen(o)) {
+        showToast(`This order is ${STATUS_LABEL[o.status] || o.status} and can no longer be changed`, 'error');
+        await loadAll();
+        return;
+      }
+      await loadProducts();
+      document.getElementById('edit-id').value = String(o.id);
+      document.getElementById('edit-title').textContent = `Edit pre-order #${o.id} — ${o.customer_name || ''}`;
+      document.getElementById('edit-date').value = o.collection_date || '';
+      document.getElementById('edit-time').value = o.collection_time || '';
+      document.getElementById('edit-notes').value = o.notes || '';
+      editLines = (o.items || []).map(i => ({
+        product_id: i.product_id || null,
+        description: i.description || '',
+        quantity: i.quantity,
+        unit_price: i.unit_price,
+      }));
+      renderEditLines();
+      new bootstrap.Modal(document.getElementById('editModal')).show();
+    }
+
+    function renderEditLines() {
+      const el = document.getElementById('edit-lines');
+      if (!editLines.length) {
+        el.innerHTML = '<div class="text-danger small">An order needs at least one line.</div>';
+      } else {
+        // The inputs write straight into editLines and the rows are NOT
+        // re-rendered on keystroke, so typing never loses the caret.
+        el.innerHTML = editLines.map((l, i) => `
+          <div class="edit-line-row">
+            <span class="badge ${l.product_id ? 'bg-secondary' : 'bg-primary'}" style="width:70px;">${l.product_id ? 'menu' : 'custom'}</span>
+            <input type="text" class="form-control" value="${escapeHtml(l.description)}" maxlength="500"
+                   placeholder="What the customer ordered" oninput="onLineChange(${i}, 'description', this.value)">
+            <input type="number" class="form-control" style="width:90px;" min="1" step="1" value="${escapeHtml(String(l.quantity))}"
+                   title="Quantity" oninput="onLineChange(${i}, 'quantity', this.value)">
+            <input type="number" class="form-control" style="width:120px;" min="0" step="0.01" value="${escapeHtml(String(l.unit_price))}"
+                   title="Unit price" oninput="onLineChange(${i}, 'unit_price', this.value)">
+            <button class="btn btn-outline-danger" title="Remove line" onclick="removeLine(${i})">&times;</button>
+          </div>`).join('');
+      }
+      updateEditTotal();
+    }
+
+    function updateEditTotal() {
+      const total = editLines.reduce((s, l) => s + (Number(l.quantity) || 0) * (Number(l.unit_price) || 0), 0);
+      document.getElementById('edit-total').textContent = formatCurrency(Math.round(total * 100) / 100);
+    }
+
+    function onLineChange(i, field, value) {
+      const l = editLines[i];
+      if (!l) return;
+      if (field === 'quantity') l.quantity = parseInt(value, 10);
+      else if (field === 'unit_price') l.unit_price = parseFloat(value);
+      else l.description = value;
+      updateEditTotal();
+    }
+
+    function addProductLine() {
+      const sel = document.getElementById('edit-product');
+      const id = parseInt(sel.value, 10);
+      if (!Number.isFinite(id)) { showToast('Pick a menu item first', 'error'); return; }
+      const p = products.find(x => x.id === id);
+      if (!p) { showToast('That item is no longer on the list', 'error'); return; }
+      editLines.push({
+        product_id: p.id,
+        description: p.name,
+        quantity: 1,
+        unit_price: p.discount_price == null ? p.selling_price : p.discount_price,
+      });
+      sel.value = '';
+      renderEditLines();
+    }
+
+    function addCustomLine() {
+      editLines.push({ product_id: null, description: '', quantity: 1, unit_price: 0 });
+      renderEditLines();
+    }
+
+    function removeLine(i) {
+      editLines.splice(i, 1);
+      renderEditLines();
+    }
+
+    async function submitEdit(btn) {
+      const id = parseInt(document.getElementById('edit-id').value, 10);
+      const date = document.getElementById('edit-date').value;
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) { showToast('Pick a collection date', 'error'); return; }
+      if (!editLines.length) { showToast('An order needs at least one line', 'error'); return; }
+      for (let i = 0; i < editLines.length; i++) {
+        const l = editLines[i];
+        if (!Number.isInteger(l.quantity) || l.quantity < 1) { showToast(`Line ${i + 1}: quantity must be a whole number of 1 or more`, 'error'); return; }
+        if (!Number.isFinite(l.unit_price) || l.unit_price < 0) { showToast(`Line ${i + 1}: enter a price`, 'error'); return; }
+        if (!l.product_id && !String(l.description).trim()) { showToast(`Line ${i + 1}: a custom line needs a description`, 'error'); return; }
+      }
+      const body = {
+        collection_date: date,
+        collection_time: document.getElementById('edit-time').value.trim(),
+        notes: document.getElementById('edit-notes').value,
+        // items is a FULL replace on the server, which is why the editor always
+        // holds every line of the order.
+        items: editLines.map(l => ({
+          product_id: l.product_id,
+          description: String(l.description).trim(),
+          quantity: l.quantity,
+          unit_price: l.unit_price,
+        })),
+      };
+      await withBusy(btn, async () => {
+        await api(`/api/preorders/${id}`, { method: 'PUT', body });
+        showToast('Order updated');
+        bootstrap.Modal.getInstance(document.getElementById('editModal')).hide();
+        await loadAll();
+      }, 'Saving...');
+    }
+  </script>
+</body>
+</html>

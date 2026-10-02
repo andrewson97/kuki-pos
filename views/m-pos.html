@@ -47,6 +47,32 @@
     .cust-row .cust-new { flex: 0 0 auto; width: auto; padding: 0 14px; font-size: 0.85rem; white-space: nowrap; }
     .sum-row { display: flex; justify-content: space-between; padding: 4px 0; font-size: 0.9rem; }
     .sum-row.total { font-weight: 700; font-size: 1.05rem; padding: 8px 0; border-top: 1.5px solid var(--line); margin-top: 6px; }
+
+    /* ===== Pre-order =====
+       The sheet sits BELOW the cart sheet (100) and below the new-customer sheet
+       (110) on purpose: the customer picker lives in the cart sheet, so opening
+       it over this one lets the cashier choose a customer and come back to a
+       half-typed cake order without losing a keystroke. */
+    #po-sheet { z-index: 95; }
+    .po-entry { background: white; padding: 10px 12px; border-bottom: 1px solid var(--line); display: flex; gap: 8px; align-items: center; }
+    .po-entry .po-btn { flex: 1; min-width: 0; border-color: var(--pink); color: var(--pink); font-size: 0.88rem; }
+    .po-entry .po-due { flex: 0 0 auto; text-decoration: none; font-weight: 700; }
+    /* One line of the order. Stacked, so a long cake description has the full
+       360px width and the two number fields still sit side by side under it. */
+    .po-line { border-bottom: 1px solid var(--line); padding: 10px 0; }
+    .po-line .po-line-top { display: flex; gap: 8px; align-items: flex-start; }
+    .po-line .po-line-top > div { flex: 1; min-width: 0; }
+    .po-line .po-name { font-weight: 600; font-size: 0.9rem; }
+    .po-line .po-from { font-size: 0.72rem; color: var(--ink-soft); }
+    .po-line input { width: 100%; padding: 8px 10px; border: 1.5px solid var(--line); border-radius: 8px; background: white; }
+    .po-line .po-nums { display: flex; gap: 8px; align-items: center; margin-top: 6px; }
+    .po-line .po-nums label { font-size: 0.7rem; color: var(--ink-soft); text-transform: uppercase; letter-spacing: 0.06em; }
+    .po-line .po-qty { width: 62px; text-align: right; }
+    .po-line .po-price { flex: 1; min-width: 0; text-align: right; }
+    .po-line .po-ltotal { font-weight: 700; font-size: 0.88rem; white-space: nowrap; min-width: 62px; text-align: right; }
+    .po-rm { color: var(--red); background: transparent; border: none; font-size: 1.3rem; padding: 0 4px; }
+    .po-warn { background: #fef3c7; color: #92400e; border-radius: 10px; padding: 10px 12px; font-size: 0.82rem; margin-bottom: 14px; }
+    .po-ok { background: #dcfce7; color: #166534; border-radius: 10px; padding: 10px 12px; font-size: 0.85rem; margin-bottom: 14px; display: flex; gap: 8px; align-items: center; justify-content: space-between; }
   </style>
 </head>
 <body>
@@ -63,6 +89,18 @@
     <input type="text" id="prod-search" placeholder="Search products…">
   </div>
   <div class="cat-strip" id="cat-strip"></div>
+
+  <!-- Pre-order: an order taken now for a future day. It lives here, above the
+       grid and outside the cart sheet, because the commonest pre-order is a
+       birthday cake with NOTHING rung up - the cart sheet will not even open on
+       an empty cart, so an entry point in there alone would be unreachable. The
+       cart sheet has its own button for the other case (converting what is
+       already rung up). The badge is pre-order work already due. -->
+  <div class="po-entry">
+    <button class="btn btn-outline btn-sm po-btn" id="open-preorder" onclick="openPreorder()">&#128197; Pre-order &mdash; collect later</button>
+    <a class="badge warning po-due" id="preorder-due" href="/preorders" style="display:none;"></a>
+  </div>
+
   <div class="product-grid" id="product-grid"></div>
 
   <!-- ===== Use stock: ingredients & packing items =====
@@ -121,10 +159,16 @@
         <input type="hidden" id="cust-id">
       </div>
 
+      <!-- The other way into the pre-order sheet: turn what is already rung up
+           into an order for a future day. Converting releases this cart's stock
+           holds, because a pre-order reserves nothing. -->
+      <button class="btn btn-outline" id="cart-preorder" onclick="openPreorder()"
+              style="margin-top:14px;border-color:var(--pink);color:var(--pink);font-size:0.9rem;">&#128197; Make this a pre-order (collect later)</button>
+
       <!-- Pre-payment slip. Dashed outline keeps it clearly apart from the solid
            payment buttons below: it takes no money and completes no sale. -->
       <button class="btn btn-outline" id="print-proforma" onclick="printProforma(this)" disabled
-              style="margin-top:14px;border-style:dashed;font-size:0.9rem;">Print bill (before payment)</button>
+              style="margin-top:8px;border-style:dashed;font-size:0.9rem;">Print bill (before payment)</button>
 
       <div class="btn-row" style="margin-top:8px;">
         <button class="btn btn-success" id="pay-cash" onclick="openCashPay()">Cash</button>
@@ -191,6 +235,57 @@
         <button class="btn btn-primary" onclick="printSlip('customer')">Customer copy</button>
       </div>
       <button class="btn btn-success" style="margin-top:8px;" onclick="closeSheet('receipt-sheet')">Done</button>
+    </div>
+  </div>
+
+  <!-- Pre-order sheet: the whole order taken in one pass, with the customer
+       standing there - lines, collection date and time, notes and the deposit.
+       There is deliberately no customer search in here: the cart sheet already
+       has one (with its + New button), and this sheet sits UNDER it so the
+       cashier can open it, pick a customer and come straight back. -->
+  <div class="sheet" id="po-sheet" onclick="if(event.target===this)closePreorder()">
+    <div class="sheet-inner">
+      <div class="sheet-handle"></div>
+      <h3>Pre-order &mdash; collect later</h3>
+      <div id="po-customer"></div>
+      <div class="field"><label>Collection date</label><input type="date" id="po-date"></div>
+      <div class="field"><label>Time (optional)</label><input type="text" id="po-time" placeholder="e.g. 4 PM, after 2.30" maxlength="50"></div>
+      <label style="display:block;font-size:0.78rem;color:var(--ink-soft);margin:14px 0 2px;text-transform:uppercase;letter-spacing:0.06em;">What they ordered</label>
+      <div id="po-lines"></div>
+      <button class="btn btn-primary btn-sm" style="margin-top:10px;" onclick="poAddCustomLine()">+ Add a custom item (cake)</button>
+      <div class="sum-row total"><span>Order total</span><span id="po-total">-</span></div>
+      <div class="field" style="margin-top:14px;"><label>Notes (optional)</label><textarea id="po-notes" rows="2" placeholder="Writing on the cake, flavour, allergies, who collects it"></textarea></div>
+      <!-- A deposit is taken in the same breath as the order, because that is how
+           it happens at the counter. Optional: plenty of orders are settled in
+           full at collection. -->
+      <div style="background:#f9fafb;border:1px solid var(--line);border-radius:10px;padding:12px;">
+        <div style="font-weight:700;font-size:0.9rem;margin-bottom:10px;">Deposit (optional)</div>
+        <div class="field" style="margin-bottom:10px;"><label>Amount taken now</label><input type="number" id="po-deposit" min="0" step="0.01" inputmode="decimal" placeholder="0.00" oninput="poRenderTotals()"></div>
+        <div class="field" style="margin-bottom:10px;"><label>Paid by</label><select id="po-deposit-method"><option value="cash">Cash</option><option value="card">Card</option><option value="upi">UPI</option></select></div>
+        <div class="sum-row"><span>Balance due on collection</span><strong id="po-balance">-</strong></div>
+      </div>
+      <!-- Validation errors (ours, and the server's own 400 wording) land here
+           inside the still-open sheet, so a half-typed cake order is never
+           thrown away by a mistake in one field. -->
+      <div id="po-error" style="display:none;background:#fee2e2;color:#991b1b;border-radius:8px;padding:8px 10px;font-size:0.82rem;margin-top:12px;"></div>
+      <div class="btn-row" style="margin-top:14px;">
+        <button class="btn btn-outline" onclick="closePreorder()">Cancel</button>
+        <button class="btn btn-success" id="po-save" onclick="savePreorder(this)">Save pre-order</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Pre-order saved: the three things the cashier has to say out loud - the
+       order number, the day it is for, and what is still to pay. -->
+  <div class="sheet" id="po-done-sheet" onclick="if(event.target===this)closeSheet('po-done-sheet')">
+    <div class="sheet-inner">
+      <div class="sheet-handle"></div>
+      <h3 style="text-align:center;">Pre-order taken</h3>
+      <div id="po-done-body"></div>
+      <div class="btn-row" style="margin-top:14px;">
+        <a class="btn btn-outline" href="/preorders" style="text-align:center;text-decoration:none;">Open pre-orders</a>
+        <button class="btn btn-success" onclick="closeSheet('po-done-sheet')">Done</button>
+      </div>
     </div>
   </div>
 
@@ -289,6 +384,9 @@
       // Say which carts this till is holding, then keep saying it.
       reportClaims();
       startClaimHeartbeat();
+      // ...and how much pre-order work is already due, for the badge beside the
+      // Pre-order button. Fire-and-forget: it is a badge, not part of selling.
+      loadPreorderSummary();
     }
 
     async function checkShift() {
@@ -1100,6 +1198,10 @@
     // rejects, but the claim still goes out if it somehow does.
     function refreshParkedAndClaims() {
       loadParked().then(reportClaims, reportClaims);
+      // The same beat re-reads the pre-order badge: a till left open overnight
+      // must not keep showing yesterday's "due today". It swallows its own
+      // failures, so it can never disturb the claim report.
+      loadPreorderSummary();
     }
 
     function startClaimHeartbeat() {
@@ -1132,6 +1234,11 @@
       $('cust-selected').textContent = '✓ ' + name + ' (tap × to clear)';
       $('cust-selected').onclick = clearCust;
       persistCart(); // not a totals change, so recalc() never sees it
+      // The pre-order sheet reads this same box. When it is open underneath, the
+      // cart sheet was opened only to pick a customer - so close it again and
+      // hand the cashier straight back to the half-typed order.
+      poRenderCustomer();
+      if ($('po-sheet') && $('po-sheet').classList.contains('open')) closeSheet('cart-sheet');
     }
     // The selected customer's name as the sheet shows it, minus the decoration
     // pickCust() adds. Read by parkCurrent() and by persistCart().
@@ -1142,6 +1249,7 @@
       $('cust-id').value = ''; $('cust-search').value = '';
       $('cust-selected').style.display = 'none'; $('cust-selected').textContent = '';
       persistCart();
+      poRenderCustomer();
     }
 
     // Quick-add a customer without leaving the till. Same fields as /m/customers.
@@ -1492,6 +1600,371 @@
         const remaining = qtyText(fresh ? fresh.quantity : (Number(it.quantity) || 0) - qty);
         toast(`Used ${qtyText(qty)} ${unit} of ${it.name} — ${remaining} ${unit} left`.replace(/ +/g, ' '));
       }, 'Recording…');
+    }
+
+    // ===== Pre-orders: an order taken today, collected on a future date =====
+    // A cake shop's real work starts days before the sale: "a 2kg chocolate cake
+    // for Saturday, and 50 fish buns with it". The cashier is already holding
+    // this phone when the customer asks, so the order is taken HERE; the
+    // pre-orders screen is for working through the book afterwards.
+    //
+    // Two rules this sheet exists to honour:
+    //
+    //   * A PRE-ORDER HOLDS NO STOCK, by design - a cake due next Saturday must
+    //     not lock today's shelf. So when the lines come out of the cart, the
+    //     cart's holds have to be GIVEN BACK on success, and that goes through
+    //     clearCart() - the same path the Clear button uses - so this file keeps
+    //     exactly one release path and cannot grow a second, subtly wrong one.
+    //   * THE CUSTOMER IS MANDATORY and must already exist (the server refuses a
+    //     walk-in pre-order): if the cake is late, somebody has to be phoned.
+    //     The cart sheet already has a customer search with a + New button, so
+    //     this sheet never grows a second one - it opens that one over itself
+    //     and the half-typed order is still here underneath.
+    //
+    // poLines is the order being built: { product_id|null, description, quantity,
+    // unit_price, from_cart }. A line WITH a product_id is a catalogue line (its
+    // price is editable, because bulk is negotiated at this counter); one WITHOUT
+    // is the custom cake, where the description IS the specification.
+    let poLines = [];
+
+    function poShowError(msg) {
+      const el = $('po-error');
+      el.textContent = msg; // server wording included, so textContent - never innerHTML
+      el.style.display = 'block';
+      el.scrollIntoView({ block: 'nearest' });
+    }
+
+    function poHideError() {
+      const el = $('po-error');
+      el.textContent = '';
+      el.style.display = 'none';
+    }
+
+    // The cart is the usual starting point: "50 fish buns" is already rung up by
+    // the time the customer says "...for Saturday". An EMPTY cart is just as
+    // normal - a birthday cake is pure free text and nothing needs ringing up
+    // first - so that case opens with one blank custom line ready to type into.
+    function poSeedLines() {
+      poLines = cart.map(i => ({
+        product_id: i.product_id,
+        description: i.product_name,
+        quantity: i.quantity,
+        unit_price: i.unit_price,
+        from_cart: true,
+      }));
+      if (!poLines.length) poLines.push(poBlankLine());
+    }
+
+    // unit_price starts EMPTY, not 0: a custom line has no catalogue price to
+    // fall back on, and a silent zero would book a free cake.
+    function poBlankLine() {
+      return { product_id: null, description: '', quantity: 1, unit_price: '', from_cart: false };
+    }
+
+    function poAddCustomLine() {
+      poLines.push(poBlankLine());
+      poRenderLines();
+      const idx = poLines.length - 1;
+      setTimeout(() => { const el = $(`po-desc-${idx}`); if (el) el.focus(); }, 60);
+    }
+
+    function poRemoveLine(idx) {
+      poLines.splice(idx, 1);
+      poRenderLines();
+    }
+
+    // Keystrokes update the model only, and only the figures are re-rendered -
+    // re-drawing the list on every keypress would take the focus out of the
+    // field being typed into and close the phone's keyboard.
+    function poSetLine(idx, field, value) {
+      if (!poLines[idx]) return;
+      poLines[idx][field] = value;
+      poRenderTotals();
+    }
+
+    function poLineTotal(l) {
+      return (parseFloat(l.quantity) || 0) * (parseFloat(l.unit_price) || 0);
+    }
+
+    function poRenderLines() {
+      if (!poLines.length) {
+        $('po-lines').innerHTML = '<div class="empty" style="padding:16px 8px;">Nothing on this order yet. Tap <strong>+ Add a custom item</strong> to describe the cake, or ring the items up in the cart first.</div>';
+        poRenderTotals();
+        return;
+      }
+      $('po-lines').innerHTML = poLines.map((l, i) => `
+        <div class="po-line">
+          <div class="po-line-top">
+            <div>${l.product_id
+              ? `<div class="po-name">${escapeHtml(l.description)}</div><div class="po-from">From the cart &middot; catalogue item</div>`
+              : `<input type="text" id="po-desc-${i}" value="${escapeHtml(l.description)}" maxlength="500"
+                        placeholder="e.g. 2kg chocolate cake, &quot;Happy Birthday Amaal&quot;"
+                        oninput="poSetLine(${i}, 'description', this.value)">`}</div>
+            <button class="po-rm" onclick="poRemoveLine(${i})">&times;</button>
+          </div>
+          <div class="po-nums">
+            <label for="po-qty-${i}">Qty</label>
+            <input type="number" class="po-qty" id="po-qty-${i}" min="1" step="1" inputmode="numeric"
+                   value="${escapeHtml(String(l.quantity))}" oninput="poSetLine(${i}, 'quantity', this.value)">
+            <label for="po-price-${i}">Price</label>
+            <input type="number" class="po-price" id="po-price-${i}" min="0" step="0.01" inputmode="decimal"
+                   value="${escapeHtml(String(l.unit_price))}" placeholder="0.00" oninput="poSetLine(${i}, 'unit_price', this.value)">
+            <span class="po-ltotal" id="po-line-total-${i}">-</span>
+          </div>
+        </div>`).join('');
+      poRenderTotals();
+    }
+
+    function poRenderTotals() {
+      poLines.forEach((l, i) => {
+        const cell = $(`po-line-total-${i}`);
+        if (cell) cell.textContent = fmt(poLineTotal(l));
+      });
+      const total = poLines.reduce((sum, l) => sum + poLineTotal(l), 0);
+      $('po-total').textContent = fmt(total);
+      const deposit = parseFloat($('po-deposit').value) || 0;
+      $('po-balance').textContent = fmt(Math.max(0, total - deposit));
+    }
+
+    // The customer, as the cart sheet's box currently has it. Re-rendered from
+    // pickCust()/clearCust() too, so this row can never disagree with the box it
+    // reads.
+    function poRenderCustomer() {
+      const el = $('po-customer');
+      if (!el) return;
+      const id = $('cust-id').value;
+      const name = selectedCustName();
+      if (id) {
+        el.innerHTML = `<div class="po-ok">
+            <span><strong>${escapeHtml(name)}</strong> is collecting this order.</span>
+            <button class="btn btn-outline btn-sm" style="width:auto;flex:0 0 auto;" onclick="poPointAtCustomer('search')">Change</button>
+          </div>`;
+        return;
+      }
+      el.innerHTML = `<div class="po-warn">
+          <div style="font-weight:700;margin-bottom:4px;">&#9888;&#65039; This order needs a customer.</div>
+          <div style="margin-bottom:8px;">A pre-order is a promise for a future day, so the shop keeps a name and a
+            number against it &mdash; if the cake is late, somebody has to be phoned. Use the customer box in the
+            cart sheet; what you have typed here stays put.</div>
+          <div class="btn-row">
+            <button class="btn btn-outline btn-sm" onclick="poPointAtCustomer('search')">Find customer</button>
+            <button class="btn btn-primary btn-sm" onclick="poPointAtCustomer('new')">+ New customer</button>
+          </div>
+        </div>`;
+    }
+
+    // Hand the cashier over to the EXISTING customer box - the cart sheet's
+    // search, or its + New sheet. Both stack ABOVE this sheet (cart 100, new
+    // customer 110, this one 95), so nothing here is closed and nothing typed is
+    // lost; pickCust() closes the cart sheet again once a customer is chosen.
+    function poPointAtCustomer(mode) {
+      if (mode === 'new') {
+        openNewCust(); // the + New button's own path, not a second one
+        return;
+      }
+      openSheet('cart-sheet');
+      setTimeout(() => { const i = $('cust-search'); if (i) i.focus(); }, 200);
+      toast('Search the customer by name or phone, or tap + New. Your order is kept.');
+    }
+
+    function openPreorder() {
+      poHideError();
+      // Only a FRESH open re-seeds. While the sheet is open the cart sheet can be
+      // opened over it to pick a customer, and coming back must find the same
+      // half-typed order.
+      const already = $('po-sheet').classList.contains('open');
+      closeSheet('cart-sheet');
+      if (!already) {
+        poSeedLines();
+        // No default collection date on purpose: a guessed day silently books
+        // the cake for the wrong one, and this is the field the whole order
+        // hangs on.
+        $('po-date').value = '';
+        $('po-time').value = '';
+        $('po-notes').value = '';
+        $('po-deposit').value = '';
+        $('po-deposit-method').value = 'cash';
+      }
+      poRenderCustomer();
+      poRenderLines();
+      openSheet('po-sheet');
+    }
+
+    // Cancelled (or saved): the next open starts fresh.
+    function closePreorder() {
+      poLines = [];
+      poHideError();
+      closeSheet('po-sheet');
+    }
+
+    // ===== Saving the order =====
+    // withBusy() is the double-submit guard (one POST per five taps); the confirm
+    // is taken BEFORE it, because a dialog inside the guard would hold the button
+    // locked while the cashier reads it.
+    async function savePreorder(btn) {
+      poHideError();
+      // A sale is mid-flight on this cart: converting it now would clear the
+      // cart and release the holds under a bill that is still being written.
+      if (checkoutInProgress) {
+        poShowError('Finishing the current sale - try again in a moment.');
+        return;
+      }
+
+      const customerId = parseInt($('cust-id').value || '0', 10);
+      if (!customerId) {
+        poRenderCustomer();
+        poShowError('Choose the customer first - a pre-order cannot be taken for a walk-in. Tap Find customer or + New above.');
+        return;
+      }
+
+      const collectionDate = $('po-date').value;
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(collectionDate)) {
+        poShowError('Pick the day the customer is collecting this order.');
+        $('po-date').focus();
+        return;
+      }
+
+      // Validated to the same rules as the server, so the common mistakes are
+      // caught with the line named rather than as a round-trip 400.
+      const items = [];
+      for (let i = 0; i < poLines.length; i++) {
+        const l = poLines[i];
+        const at = `Line ${i + 1}`;
+        const description = String(l.description == null ? '' : l.description).trim();
+        const quantity = parseFloat(l.quantity);
+        const price = (l.unit_price === '' || l.unit_price === null || l.unit_price === undefined)
+          ? NaN : parseFloat(l.unit_price);
+        if (!Number.isFinite(quantity) || !Number.isInteger(quantity) || quantity < 1) {
+          poShowError(`${at}: the quantity must be a whole number of 1 or more.`);
+          return;
+        }
+        if (!Number.isFinite(price) || price < 0) {
+          poShowError(l.product_id
+            ? `${at}: ${description || 'that item'} needs a price of 0 or more.`
+            : `${at}: agree a price for "${description || 'the custom item'}" - a custom line has no catalogue price to fall back on.`);
+          return;
+        }
+        if (l.product_id) {
+          items.push({ product_id: l.product_id, description, quantity, unit_price: price });
+        } else {
+          if (!description) {
+            poShowError(`${at}: say what the customer ordered, e.g. 2kg chocolate cake, "Happy Birthday Amaal".`);
+            return;
+          }
+          items.push({ description, quantity, unit_price: price });
+        }
+      }
+      if (!items.length) {
+        poShowError('Add at least one line: + Add a custom item for a cake, or ring the items up in the cart.');
+        return;
+      }
+
+      const total = items.reduce((sum, l) => sum + l.quantity * l.unit_price, 0);
+      let deposit = null;
+      const depositAmount = parseFloat($('po-deposit').value);
+      if (Number.isFinite(depositAmount) && depositAmount > 0) {
+        if (depositAmount > total + 0.005) {
+          poShowError(`The deposit (${fmt(depositAmount)}) is more than the order total (${fmt(total)}).`);
+          return;
+        }
+        const method = $('po-deposit-method').value || 'cash';
+        // A cash deposit is cash into the drawer, so the server applies the same
+        // shift rule it applies to a sale. Say so here rather than losing the
+        // whole order to a 400: the order itself needs no open shift.
+        if (method === 'cash' && shiftBlocked) {
+          poShowError('A cash deposit cannot be recorded while the cash drawer is closed. Open the shift on the Cash screen, take the deposit by card/UPI, or save the order without a deposit.');
+          return;
+        }
+        deposit = { amount: depositAmount, payment_method: method, paid_on: todayISO() };
+      }
+
+      // Does this order carry the cart? Only if a cart-seeded line actually
+      // survived: a cashier who deleted them all is taking a different order,
+      // and the cart they left behind is still a sale they mean to ring up.
+      const convertsCart = cart.length > 0 && poLines.some(l => l.from_cart && l.product_id);
+      if (convertsCart) {
+        const units = cart.reduce((sum, i) => sum + i.quantity, 0);
+        const ok = confirm(
+          `Take this as a pre-order for ${collectionDate}?\n\n` +
+          `The cart (${units} item${units === 1 ? '' : 's'}) will be cleared and the stock it is holding goes ` +
+          `back on the shelf. A pre-order holds no stock on purpose, so next week's order never locks today's shelf.`
+        );
+        if (!ok) return;
+      }
+
+      const body = {
+        customer_id: customerId,
+        collection_date: collectionDate,
+        collection_time: $('po-time').value.trim(),
+        notes: $('po-notes').value.trim(),
+        items,
+      };
+      if (deposit) body.deposit = deposit;
+
+      const order = await withBusy(btn, async () => {
+        try {
+          return await api('/api/preorders', { method: 'POST', body });
+        } catch (err) {
+          // A 400 carries the server's own cashier-readable wording ("Line 2: a
+          // custom line needs an agreed price."). Show exactly that and leave
+          // the sheet, and everything typed into it, alone.
+          poShowError((err && err.message) || 'Could not save this pre-order.');
+          return null;
+        }
+      }, 'Saving…');
+      if (!order || !order.id) return;
+
+      poLines = [];
+      closeSheet('po-sheet');
+      closeSheet('cart-sheet');
+
+      if (convertsCart) {
+        // THE release path - the Clear button's own. It gives this cart's holds
+        // back, clears the saved cart, moves the till onto a fresh cart id and
+        // re-reads availability, all in the order that is already proven here.
+        // Nothing about a pre-order may hold stock, so nothing else will do.
+        clearCart();
+      } else {
+        // Nothing to release; just leave the till ready for the next customer.
+        clearCust();
+      }
+      poShowDone(order);
+      loadPreorderSummary();
+    }
+
+    function poShowDone(order) {
+      const total = Number(order.total || 0);
+      const paid = Number(order.amount_paid || 0);
+      const balance = Number(order.balance != null ? order.balance : total - paid);
+      $('po-done-body').innerHTML = `
+        <div style="text-align:center;margin-bottom:12px;"><span class="badge success" style="font-size:0.95rem;padding:6px 14px;">Pre-order #${order.id}</span></div>
+        <div class="sum-row"><span>Customer</span><strong>${escapeHtml(order.customer_name || '')}</strong></div>
+        <div class="sum-row"><span>Collect on</span><strong>${escapeHtml(formatDate(order.collection_date))}${order.collection_time ? ' · ' + escapeHtml(order.collection_time) : ''}</strong></div>
+        <div class="sum-row"><span>Order total</span><span>${fmt(total)}</span></div>
+        <div class="sum-row"><span>Deposit taken</span><span>${fmt(paid)}</span></div>
+        <div class="sum-row total"><span>Balance due on collection</span><span>${fmt(balance)}</span></div>
+        <div class="list-meta" style="margin-top:10px;">No stock is held for this order &mdash; it is baked or picked on the day. Ring it up from the Pre-orders screen when the customer comes in.</div>`;
+      openSheet('po-done-sheet');
+      toast(`Pre-order #${order.id} taken for ${order.collection_date}`);
+    }
+
+    // The badge beside the Pre-order button: work already due, so a cashier can
+    // see there is something to do without leaving the till. Silent on failure -
+    // a till that cannot read a badge must still be able to sell.
+    async function loadPreorderSummary() {
+      const el = $('preorder-due');
+      if (!el) return;
+      try {
+        const s = await api('/api/preorders/summary');
+        const due = Number(s.due_today || 0);
+        const overdue = Number(s.overdue || 0);
+        if (!due && !overdue) { el.style.display = 'none'; el.textContent = ''; return; }
+        const parts = [];
+        if (due) parts.push(`${due} due today`);
+        if (overdue) parts.push(`${overdue} overdue`);
+        el.textContent = parts.join(' \u00b7 ');
+        el.style.display = 'inline-block';
+      } catch {}
     }
 
     load();

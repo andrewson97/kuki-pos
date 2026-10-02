@@ -1,0 +1,743 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="theme-color" content="#e83e8c">
+  <title>KUKI · Pre-orders</title>
+  <link rel="icon" href="/public/img/kuki_logo.png">
+  <link rel="stylesheet" href="/public/css/mobile.css">
+  <style>
+    .po-sec {
+      background: white; padding: 10px 14px 6px; font-weight: 700; color: var(--ink-soft);
+      text-transform: uppercase; letter-spacing: 0.1em; font-size: 0.72rem;
+      border-top: 8px solid var(--bg);
+    }
+    .po-sec.first { border-top: none; }
+    .po-sec.late { color: var(--red); }
+    .po-item { border-left: 4px solid var(--line); }
+    .po-item.ready { border-left-color: var(--green); }
+    .po-item.late { border-left-color: var(--red); background: #fff6f6; }
+    .po-item.closed { border-left-color: var(--line); background: #fafafa; }
+    .po-lines { margin: 6px 0 0; font-size: 0.82rem; color: var(--ink); }
+    .po-lines div { padding: 1px 0; }
+    .po-lines .custom { color: var(--indigo); }
+    .po-note {
+      background: #fffbe6; border: 1px solid #ffe69c; border-radius: 6px;
+      padding: 5px 7px; font-size: 0.78rem; margin-top: 6px; white-space: pre-wrap;
+    }
+    .charge-box {
+      background: var(--green-soft); border: 1.5px solid var(--green); border-radius: 10px;
+      padding: 12px; text-align: center; margin: 12px 0;
+    }
+    .charge-box .lbl { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--ink-soft); font-weight: 700; }
+    .charge-box .amt { font-size: 1.8rem; font-weight: 800; color: var(--ink); }
+    .charge-box .sub { font-size: 0.78rem; color: var(--ink-soft); }
+    .kv { display: flex; justify-content: space-between; font-size: 0.85rem; padding: 3px 0; }
+    .slip {
+      font-family: monospace; font-size: 0.72rem; white-space: pre-wrap;
+      background: #fafafa; border: 1px solid var(--line); border-radius: 8px; padding: 8px; max-height: 45vh; overflow: auto;
+    }
+    .ed-line { border: 1px solid var(--line); border-radius: 8px; padding: 8px; margin-bottom: 8px; }
+    .ed-line .row2 { display: flex; gap: 8px; }
+    .ed-line .row2 .field { flex: 1; margin-bottom: 0; }
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    <a href="/m" class="back">‹</a>
+    <h1>Pre-orders</h1>
+    <a href="/preorders" class="right">Desktop</a>
+  </div>
+
+  <!-- What has to be made, and what is already late -->
+  <div id="summary-bar" class="container" style="padding-top:10px;"></div>
+
+  <div class="filters">
+    <select id="filter-view" onchange="loadOrders()">
+      <option value="work">To make (all outstanding)</option>
+      <option value="today">Today</option>
+      <option value="overdue">Overdue only</option>
+      <option value="record">All orders (recent first)</option>
+    </select>
+    <input type="text" id="filter-q" placeholder="Customer / phone / cake">
+  </div>
+
+  <div id="po-list"><div class="empty">Loading…</div></div>
+
+  <!-- Order detail -->
+  <div class="sheet" id="detail-sheet" onclick="if(event.target===this)closeSheet('detail-sheet')">
+    <div class="sheet-inner">
+      <div class="sheet-handle"></div>
+      <div id="detail-body"></div>
+    </div>
+  </div>
+
+  <!-- Take a payment -->
+  <div class="sheet" id="pay-sheet" onclick="if(event.target===this)closeSheet('pay-sheet')">
+    <div class="sheet-inner">
+      <div class="sheet-handle"></div>
+      <h3>Take a payment</h3>
+      <input type="hidden" id="py-id">
+      <div id="py-info" style="font-size:0.85rem;color:var(--ink-soft);margin-bottom:10px;"></div>
+      <div class="field"><label>Amount (Rs.)</label><input type="number" id="py-amount" min="0" step="0.01" inputmode="decimal"></div>
+      <div class="field"><label>Method</label>
+        <select id="py-method"><option value="cash">Cash</option><option value="card">Card</option><option value="upi">UPI</option></select>
+      </div>
+      <div class="field"><label>Paid on</label><input type="date" id="py-date"></div>
+      <div class="btn-row">
+        <button class="btn btn-outline" onclick="closeSheet('pay-sheet')">Cancel</button>
+        <button class="btn btn-success" onclick="submitPayment(this)">Record</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Collect -->
+  <div class="sheet" id="collect-sheet" onclick="if(event.target===this)closeSheet('collect-sheet')">
+    <div class="sheet-inner">
+      <div class="sheet-handle"></div>
+      <h3 id="cl-title">Collect</h3>
+      <div id="cl-body"></div>
+      <div class="field"><label>Discount (Rs.)</label><input type="number" id="cl-discount" min="0" step="0.01" value="0" inputmode="decimal" oninput="recalcCollect()"></div>
+      <div class="field"><label>Payment method</label>
+        <select id="cl-method" onchange="recalcCollect()"><option value="cash">Cash</option><option value="card">Card</option><option value="upi">UPI</option></select>
+      </div>
+      <div class="field" id="cl-cash-wrap"><label>Cash received (Rs.)</label><input type="number" id="cl-cash" min="0" step="0.01" inputmode="decimal" placeholder="optional" oninput="recalcCollect()"></div>
+      <div id="cl-summary"></div>
+      <div class="btn-row">
+        <button class="btn btn-outline" onclick="closeSheet('collect-sheet')">Cancel</button>
+        <button class="btn btn-success" onclick="submitCollect(this)">Collect &amp; bill</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Edit -->
+  <div class="sheet" id="edit-sheet" onclick="if(event.target===this)closeSheet('edit-sheet')">
+    <div class="sheet-inner">
+      <div class="sheet-handle"></div>
+      <h3 id="ed-title">Edit order</h3>
+      <input type="hidden" id="ed-id">
+      <div class="field"><label>Collection date</label><input type="date" id="ed-date"></div>
+      <div class="field"><label>Time (free text)</label><input type="text" id="ed-time" maxlength="50" placeholder="e.g. 4 pm"></div>
+      <label style="font-size:0.78rem;font-weight:600;color:var(--ink-soft);text-transform:uppercase;letter-spacing:0.05em;">Lines (saving replaces all)</label>
+      <div id="ed-lines" style="margin-top:6px;"></div>
+      <div class="field"><label>Add a menu item</label><select id="ed-product" onchange="addProductLine(this.value)"></select></div>
+      <button class="btn btn-outline btn-sm" style="margin-bottom:10px;" onclick="addCustomLine()">+ Custom cake line</button>
+      <div class="kv" style="font-weight:700;"><span>Order total</span><span id="ed-total">—</span></div>
+      <div class="field"><label>Notes</label><textarea id="ed-notes" rows="2" maxlength="2000"></textarea></div>
+      <div class="btn-row">
+        <button class="btn btn-outline" onclick="closeSheet('edit-sheet')">Cancel</button>
+        <button class="btn btn-primary" onclick="submitEdit(this)">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Receipt -->
+  <div class="sheet" id="receipt-sheet" onclick="if(event.target===this)closeSheet('receipt-sheet')">
+    <div class="sheet-inner">
+      <div class="sheet-handle"></div>
+      <h3 id="rc-title">Receipt</h3>
+      <div id="rc-headline" style="font-weight:700;margin-bottom:8px;"></div>
+      <div class="slip" id="rc-text"></div>
+      <div class="btn-row" style="margin-top:12px;">
+        <button class="btn btn-outline" onclick="printSlip('kitchen')">Kitchen copy</button>
+        <button class="btn btn-primary" onclick="printSlip('customer')">Print</button>
+      </div>
+      <button class="btn btn-outline" style="margin-top:8px;" onclick="closeSheet('receipt-sheet')">Done</button>
+    </div>
+  </div>
+
+  <script src="/public/js/mobile.js"></script>
+  <script>
+    // The phone is the kitchen's screen: the default list is every order the shop
+    // still owes, grouped by collection day with everything late at the top, and
+    // each card carries its lines because the cake specification IS the order.
+    let orders = [];
+    let summary = null;
+    let detailOrder = null;
+    let collectOrder = null;
+    let products = [];
+    let editLines = [];
+    let lastReceiptText = '';
+    let lastKitchenText = '';
+
+    const isAdmin = () => !!currentUser && currentUser.role === 'admin';
+    const isOpenOrder = (o) => o.status === 'taken' || o.status === 'ready';
+    const STATUS_LABEL = { taken: 'To make', ready: 'Ready', collected: 'Collected', cancelled: 'Cancelled' };
+    const STATUS_BADGE = { taken: 'warning', ready: 'success', collected: 'muted', cancelled: 'muted' };
+
+    // ----- Business dates -------------------------------------------------
+    // collection_date and paid_on are plain YYYY-MM-DD business dates: formatted
+    // from their own parts, never through parseDbDate() (which appends 'Z' for
+    // the UTC datetime('now') columns and would drag every cake back a day).
+    const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    function dateParts(s) {
+      const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(s == null ? '' : s));
+      return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
+    }
+    function formatBizDate(s) {
+      const p = dateParts(s);
+      return p ? p[2] + ' ' + MONTHS[p[1] - 1] : '-';
+    }
+    function daysFromToday(s) {
+      const a = dateParts(s), b = dateParts(todayISO());
+      if (!a || !b) return null;
+      return Math.round((Date.UTC(a[0], a[1] - 1, a[2]) - Date.UTC(b[0], b[1] - 1, b[2])) / 86400000);
+    }
+    function bizWeekday(s) {
+      const p = dateParts(s);
+      if (!p) return '';
+      return new Date(Date.UTC(p[0], p[1] - 1, p[2])).toLocaleDateString('en-LK', { timeZone: 'UTC', weekday: 'short' });
+    }
+    function dayLabel(s) {
+      const n = daysFromToday(s);
+      if (n === null) return formatBizDate(s);
+      if (n === 0) return 'Today · ' + formatBizDate(s);
+      if (n === 1) return 'Tomorrow · ' + formatBizDate(s);
+      if (n === -1) return 'Yesterday · ' + formatBizDate(s);
+      if (n < 0) return (-n) + ' days ago · ' + formatBizDate(s);
+      return bizWeekday(s) + ' · ' + formatBizDate(s);
+    }
+    function lateText(s) {
+      const n = daysFromToday(s);
+      if (n === null || n >= 0) return '';
+      return n === -1 ? '1 day late' : (-n) + ' days late';
+    }
+
+    // ===== Boot ===========================================================
+    async function load() {
+      await bootMobile();
+      $('py-date').value = todayISO();
+      $('filter-q').addEventListener('input', renderOrders);
+      await Promise.all([loadSummary(), loadOrders()]);
+    }
+
+    async function loadSummary() {
+      try {
+        summary = await api('/api/preorders/summary');
+      } catch {
+        summary = null;
+      }
+      renderSummary();
+    }
+
+    function renderSummary() {
+      if (!summary) { $('summary-bar').innerHTML = ''; return; }
+      $('summary-bar').innerHTML = `
+        ${summary.overdue > 0 ? `
+          <div style="background:#fee2e2;color:#991b1b;border-radius:10px;padding:10px 12px;font-size:0.85rem;font-weight:600;margin-bottom:10px;"
+               onclick="setView('overdue')">
+            ${escapeHtml(String(summary.overdue))} order${summary.overdue === 1 ? '' : 's'} overdue — tap to see
+          </div>` : ''}
+        <div class="stat-grid" style="margin-top:0;">
+          <div class="stat-tile" onclick="setView('today')"><div class="label">To bake today</div><div class="val">${escapeHtml(String(summary.to_bake_today))}</div></div>
+          <div class="stat-tile" onclick="setView('today')"><div class="label">Ready today</div><div class="val green">${escapeHtml(String(summary.ready_today))}</div></div>
+          <div class="stat-tile"><div class="label">Deposits held</div><div class="val" style="font-size:1.05rem;">${escapeHtml(fmt(summary.deposits_held))}</div></div>
+          <div class="stat-tile"><div class="label">Still to collect</div><div class="val" style="font-size:1.05rem;">${escapeHtml(fmt(summary.outstanding_balance))}</div></div>
+        </div>`;
+    }
+
+    function setView(v) {
+      $('filter-view').value = v;
+      loadOrders();
+    }
+
+    async function loadOrders() {
+      const view = $('filter-view').value;
+      const p = new URLSearchParams();
+      if (view === 'work') { p.set('status', 'open'); p.set('sort', 'due'); }
+      else if (view === 'today') { p.set('date', 'today'); p.set('status', 'all'); p.set('sort', 'due'); }
+      else if (view === 'overdue') { p.set('overdue', '1'); p.set('sort', 'due'); }
+      else { p.set('status', 'all'); p.set('sort', 'recent'); }
+      p.set('limit', '300');
+      try {
+        orders = await api(`/api/preorders?${p}`);
+      } catch (err) {
+        orders = [];
+        $('po-list').innerHTML = `<div class="empty">${escapeHtml(err.message || 'Could not load')}</div>`;
+        return;
+      }
+      renderOrders();
+    }
+
+    function matches(o, q) {
+      if (!q) return true;
+      const hay = [o.customer_name, o.customer_phone, o.notes]
+        .concat((o.items || []).map(i => i.description))
+        .join(' ')
+        .toLowerCase();
+      return hay.includes(q);
+    }
+
+    function renderOrders() {
+      const q = $('filter-q').value.trim().toLowerCase();
+      const list = orders.filter(o => matches(o, q));
+      if (!list.length) { $('po-list').innerHTML = '<div class="empty">Nothing here</div>'; return; }
+
+      const late = list.filter(o => o.is_overdue);
+      const rest = list.filter(o => !o.is_overdue);
+      const byDate = new Map();
+      rest.forEach(o => {
+        const k = o.collection_date || '';
+        if (!byDate.has(k)) byDate.set(k, []);
+        byDate.get(k).push(o);
+      });
+
+      let html = '';
+      let first = true;
+      if (late.length) {
+        html += `<div class="po-sec late first">Overdue · ${late.length}</div>` + late.map(card).join('');
+        first = false;
+      }
+      [...byDate.entries()]
+        .sort((a, b) => String(a[0]).localeCompare(String(b[0])))
+        .forEach(([date, group]) => {
+          html += `<div class="po-sec${first ? ' first' : ''}">${escapeHtml(dayLabel(date))} · ${group.length}</div>`;
+          html += group.map(card).join('');
+          first = false;
+        });
+      $('po-list').innerHTML = html;
+    }
+
+    // A collected order's `balance` is total minus the DEPOSIT rows only — the
+    // rest was settled by the bill, not left owing — so it must never be shown
+    // as money the customer still owes.
+    function moneyTail(o) {
+      if (o.status === 'collected') return 'settled by bill';
+      if (o.status === 'cancelled') return 'not collected';
+      return 'balance ' + escapeHtml(fmt(o.balance));
+    }
+    function moneyColor(o) {
+      if (o.status === 'collected') return 'var(--green)';
+      if (o.status === 'cancelled') return 'var(--ink-soft)';
+      return o.balance > 0 ? 'var(--red)' : 'var(--green)';
+    }
+
+    function card(o) {
+      const cls = o.is_overdue ? 'late' : o.status === 'ready' ? 'ready' : isOpenOrder(o) ? '' : 'closed';
+      const lines = (o.items || []).map(i => `
+        <div><strong>${escapeHtml(String(i.quantity))}×</strong>
+          <span class="${i.product_id ? '' : 'custom'}">${escapeHtml(i.description)}</span>
+        </div>`).join('') || '<div style="color:var(--red);">No lines</div>';
+      return `
+        <div class="list-item po-item ${cls}" onclick="openDetail(${o.id})">
+          <div class="list-head">
+            <span class="list-title">${escapeHtml(o.customer_name || 'Unknown')}</span>
+            <span class="list-amount">${escapeHtml(fmt(o.total))}</span>
+          </div>
+          <div class="list-head" style="margin-top:3px;">
+            <span class="list-meta">#${escapeHtml(String(o.id))} · ${escapeHtml(dayLabel(o.collection_date))}${o.collection_time ? ' · ' + escapeHtml(o.collection_time) : ''}</span>
+            <span class="badge ${STATUS_BADGE[o.status] || 'muted'}">${escapeHtml(STATUS_LABEL[o.status] || o.status)}</span>
+          </div>
+          <div class="po-lines">${lines}</div>
+          <div class="list-head" style="margin-top:6px;">
+            <span class="list-meta">${o.amount_paid > 0 ? 'paid ' + escapeHtml(fmt(o.amount_paid)) : 'no deposit'}</span>
+            <span class="list-meta" style="font-weight:700;color:${moneyColor(o)};">${moneyTail(o)}</span>
+          </div>
+          ${o.is_overdue ? `<div class="list-meta" style="color:var(--red);font-weight:700;margin-top:4px;">${escapeHtml(lateText(o.collection_date))}</div>` : ''}
+        </div>`;
+    }
+
+    // ===== Detail sheet ===================================================
+    async function openDetail(id) {
+      $('detail-body').innerHTML = '<div class="empty">Loading…</div>';
+      openSheet('detail-sheet');
+      try {
+        detailOrder = await api(`/api/preorders/${id}`);
+      } catch (err) {
+        $('detail-body').innerHTML = `<div class="empty">${escapeHtml(err.message || 'Could not load')}</div>`;
+        return;
+      }
+      renderDetail();
+    }
+
+    function renderDetail() {
+      const o = detailOrder;
+      if (!o) return;
+      const items = (o.items || []).map(i => `
+        <div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--line);font-size:0.88rem;">
+          <span class="${i.product_id ? '' : 'custom'}">${escapeHtml(i.description)}
+            <span style="color:var(--ink-soft);">× ${escapeHtml(String(i.quantity))}</span></span>
+          <span>${escapeHtml(fmt(i.quantity * i.unit_price))}</span>
+        </div>`).join('');
+      const payments = (o.payments || []).map(p => `
+        <div class="kv">
+          <span style="color:var(--ink-soft);">${escapeHtml(formatBizDate(p.paid_on))} · ${escapeHtml(String(p.payment_method || '').toUpperCase())}</span>
+          <span>${escapeHtml(fmt(p.amount))}
+            ${isAdmin() && o.status !== 'collected'
+              ? `<button class="btn btn-danger btn-sm" style="width:auto;display:inline-block;margin-left:6px;" onclick="deletePayment(${p.id}, this)">✕</button>`
+              : ''}</span>
+        </div>`).join('') || '<div class="kv"><span style="color:var(--ink-soft);">No payment taken yet</span></div>';
+
+      $('detail-body').innerHTML = `
+        <h3>#${escapeHtml(String(o.id))} · ${escapeHtml(o.customer_name || 'Unknown')}</h3>
+        <div style="font-size:0.85rem;margin-bottom:10px;">
+          <div>${escapeHtml(o.customer_phone || 'no phone on file')}</div>
+          <div><strong>Collect:</strong> ${escapeHtml(dayLabel(o.collection_date))}${o.collection_time ? ' · ' + escapeHtml(o.collection_time) : ''}</div>
+          <div style="color:var(--ink-soft);">Taken by ${escapeHtml(o.taken_by || '-')} on ${escapeHtml(formatDateTime(o.created_at))}</div>
+          <div style="margin-top:6px;">
+            <span class="badge ${STATUS_BADGE[o.status] || 'muted'}">${escapeHtml(STATUS_LABEL[o.status] || o.status)}</span>
+            ${isOpenOrder(o) && o.collection_date < todayISO() ? '<span class="badge danger">overdue</span>' : ''}
+          </div>
+        </div>
+        <div>${items}</div>
+        <div class="kv" style="font-weight:700;margin-top:8px;"><span>Order total</span><span>${escapeHtml(fmt(o.total))}</span></div>
+        <div class="kv"><span>Paid in advance</span><span>${escapeHtml(fmt(o.amount_paid))}</span></div>
+        ${o.status === 'collected'
+          ? `<div class="kv" style="font-weight:700;color:var(--green);"><span>Settled</span><span>on the bill</span></div>`
+          : `<div class="kv" style="font-weight:700;color:${moneyColor(o)};"><span>${o.status === 'cancelled' ? 'Was outstanding' : 'Balance'}</span><span>${escapeHtml(fmt(o.balance))}</span></div>`}
+        ${o.notes ? `<div class="po-note">${escapeHtml(o.notes)}</div>` : ''}
+        <div style="margin-top:12px;font-size:0.78rem;font-weight:700;color:var(--ink-soft);text-transform:uppercase;letter-spacing:0.06em;">Payments</div>
+        ${payments}
+        ${o.bill ? `<div style="margin-top:10px;font-size:0.82rem;color:var(--ink-soft);">
+            Billed as token #${escapeHtml(String(o.bill.token_number).padStart(3, '0'))} · ${escapeHtml(fmt(o.bill.total))}
+          </div>
+          <button class="btn btn-outline" style="margin-top:8px;" onclick="viewBillReceipt(${o.bill.id}, ${o.bill.token_number})">Show receipt</button>` : ''}
+        ${isOpenOrder(o) ? `
+          <div class="btn-row" style="margin-top:14px;">
+            ${o.status === 'taken'
+              ? `<button class="btn btn-success" onclick="setStatus('ready', this)">Mark ready</button>`
+              : `<button class="btn btn-outline" onclick="setStatus('taken', this)">Back to to-make</button>`}
+            <button class="btn btn-primary" onclick="openCollect()">Collect</button>
+          </div>
+          <div class="btn-row" style="margin-top:8px;">
+            <button class="btn btn-outline" onclick="openPayment()">Take payment</button>
+            <button class="btn btn-outline" onclick="openEdit()">Edit</button>
+          </div>
+          ${isAdmin() ? `<button class="btn btn-danger" style="margin-top:8px;" onclick="cancelOrder(this)">Cancel this order</button>` : ''}
+        ` : `
+          <div style="margin-top:14px;font-size:0.82rem;color:var(--ink-soft);">
+            ${o.status === 'collected'
+              ? 'Collected and billed — this order is closed and read-only.'
+              : 'Cancelled — this order is closed and read-only.'}
+          </div>`}
+        <button class="btn btn-outline" style="margin-top:10px;" onclick="closeSheet('detail-sheet')">Close</button>`;
+    }
+
+    async function refreshAll() {
+      await Promise.all([loadSummary(), loadOrders()]);
+    }
+
+    // ===== Ready / back ===================================================
+    async function setStatus(status, btn) {
+      if (!detailOrder) return;
+      const id = detailOrder.id;
+      await withBusy(btn, async () => {
+        detailOrder = await api(`/api/preorders/${id}/status`, { method: 'POST', body: { status } });
+        toast(status === 'ready' ? 'Marked ready' : 'Back to to-make');
+        renderDetail();
+        await refreshAll();
+      }, 'Saving…');
+    }
+
+    // ===== Cancel (admin) =================================================
+    async function cancelOrder(btn) {
+      if (!detailOrder) return;
+      const id = detailOrder.id;
+      // confirm stays OUTSIDE the guard: it writes nothing, and backing out must
+      // not leave the button disabled.
+      if (!confirm('Cancel this pre-order? Any deposit already taken has to be refunded as a cash expense.')) return;
+      await withBusy(btn, async () => {
+        const res = await api(`/api/preorders/${id}/cancel`, { method: 'POST', body: {} });
+        toast(res.refund_due > 0 ? `Cancelled — ${fmt(res.refund_due)} refundable` : 'Cancelled');
+        closeSheet('detail-sheet');
+        await refreshAll();
+      }, 'Cancelling…');
+    }
+
+    async function deletePayment(paymentId, btn) {
+      if (!detailOrder) return;
+      const id = detailOrder.id;
+      if (!confirm('Delete this payment from the record?')) return;
+      await withBusy(btn, async () => {
+        detailOrder = await api(`/api/preorders/${id}/payments/${paymentId}`, { method: 'DELETE' });
+        toast('Payment deleted');
+        renderDetail();
+        await refreshAll();
+      }, '…');
+    }
+
+    // ===== Take a payment =================================================
+    function openPayment() {
+      const o = detailOrder;
+      if (!o) return;
+      $('py-id').value = String(o.id);
+      $('py-info').innerHTML = `${escapeHtml(o.customer_name || 'Customer')} · order ${escapeHtml(fmt(o.total))} · balance <strong>${escapeHtml(fmt(o.balance))}</strong>`;
+      $('py-amount').value = o.balance > 0 ? o.balance.toFixed(2) : '';
+      $('py-method').value = 'cash';
+      $('py-date').value = todayISO();
+      openSheet('pay-sheet');
+    }
+
+    async function submitPayment(btn) {
+      const id = parseInt($('py-id').value, 10);
+      const amount = parseFloat($('py-amount').value);
+      if (!Number.isFinite(amount) || amount <= 0) { toast('Enter an amount', 'error'); return; }
+      await withBusy(btn, async () => {
+        await api(`/api/preorders/${id}/payments`, {
+          method: 'POST',
+          body: { amount, payment_method: $('py-method').value, paid_on: $('py-date').value || todayISO() },
+        });
+        toast(`${fmt(amount)} recorded`);
+        closeSheet('pay-sheet');
+        detailOrder = await api(`/api/preorders/${id}`);
+        renderDetail();
+        await refreshAll();
+      }, 'Saving…');
+    }
+
+    // ===== Collect ========================================================
+    function taxRate() {
+      const r = parseFloat(appSettings.tax_rate);
+      return Number.isFinite(r) && r > 0 ? r : 0;
+    }
+
+    function openCollect() {
+      if (!detailOrder) return;
+      collectOrder = detailOrder;
+      $('cl-title').textContent = `Collect #${collectOrder.id}`;
+      $('cl-body').innerHTML = `
+        <div style="font-size:0.85rem;margin-bottom:10px;">
+          <strong>${escapeHtml(collectOrder.customer_name || 'Customer')}</strong>
+          ${collectOrder.customer_phone ? ' · ' + escapeHtml(collectOrder.customer_phone) : ''}
+        </div>`;
+      $('cl-discount').value = '0';
+      $('cl-method').value = 'cash';
+      $('cl-cash').value = '';
+      recalcCollect();
+      openSheet('collect-sheet');
+    }
+
+    // Mirrors the server's arithmetic so the cashier charges the right amount.
+    // The server stays the authority.
+    function recalcCollect() {
+      if (!collectOrder) return;
+      const discount = Math.max(0, parseFloat($('cl-discount').value) || 0);
+      const method = $('cl-method').value;
+      const rate = taxRate();
+      const taxable = Math.max(0, collectOrder.total - discount);
+      const tax = Math.round(taxable * (rate / 100) * 100) / 100;
+      const billTotal = Math.round((taxable + tax) * 100) / 100;
+      const deposit = collectOrder.amount_paid || 0;
+      const toCollect = Math.round((billTotal - deposit) * 100) / 100;
+
+      $('cl-cash-wrap').style.display = method === 'cash' ? '' : 'none';
+      const cashRaw = $('cl-cash').value;
+      const cash = cashRaw === '' ? NaN : parseFloat(cashRaw);
+      const change = (method === 'cash' && Number.isFinite(cash)) ? Math.round((cash - toCollect) * 100) / 100 : null;
+
+      $('cl-summary').innerHTML = `
+        <div class="charge-box">
+          <div class="lbl">Charge now</div>
+          <div class="amt">${escapeHtml(fmt(toCollect))}</div>
+          ${deposit > 0 ? `<div class="sub">not ${escapeHtml(fmt(billTotal))} — ${escapeHtml(fmt(deposit))} already paid</div>` : ''}
+          ${change === null ? '' : (change < 0
+            ? `<div class="sub" style="color:var(--red);font-weight:700;">${escapeHtml(fmt(-change))} short</div>`
+            : `<div class="sub">Change due <strong>${escapeHtml(fmt(change))}</strong></div>`)}
+        </div>
+        <div class="kv"><span>Order total</span><span>${escapeHtml(fmt(collectOrder.total))}</span></div>
+        ${discount > 0 ? `<div class="kv"><span>Discount</span><span>-${escapeHtml(fmt(discount))}</span></div>` : ''}
+        ${rate > 0 ? `<div class="kv"><span>Tax (${escapeHtml(String(rate))}%)</span><span>${escapeHtml(fmt(tax))}</span></div>` : ''}
+        <div class="kv" style="font-weight:700;"><span>Bill total</span><span>${escapeHtml(fmt(billTotal))}</span></div>
+        <div class="kv" style="color:var(--green);"><span>Paid in advance</span><span>-${escapeHtml(fmt(deposit))}</span></div>`;
+    }
+
+    async function submitCollect(btn) {
+      if (!collectOrder) return;
+      const id = collectOrder.id;
+      const method = $('cl-method').value;
+      const body = { payment_method: method, discount: Math.max(0, parseFloat($('cl-discount').value) || 0) };
+      const cashRaw = $('cl-cash').value;
+      if (method === 'cash' && cashRaw !== '' && Number.isFinite(parseFloat(cashRaw))) {
+        body.cash_received = parseFloat(cashRaw);
+      }
+      await withBusy(btn, async () => {
+        let res;
+        try {
+          res = await api(`/api/preorders/${id}/collect`, { method: 'POST', body });
+        } catch (err) {
+          // 409: already collected. The bill exists — say so, don't invite a retry.
+          if (err && err.data && err.data.already_collected) {
+            toast(err.message, 'error');
+            closeSheet('collect-sheet');
+            closeSheet('detail-sheet');
+            await refreshAll();
+            return;
+          }
+          throw err;
+        }
+        closeSheet('collect-sheet');
+        closeSheet('detail-sheet');
+        const changeBit = (res.change_due === null || res.change_due === undefined) ? '' : ` · change ${fmt(res.change_due)}`;
+        showReceipt(res.bill ? res.bill.token_number : null, `Charged ${fmt(res.cash_to_collect)}${changeBit}`, res.receipt_text || '', res.kitchen_text || '');
+        toast(res.replayed ? 'Already billed earlier' : 'Collected and billed');
+        await refreshAll();
+      }, 'Billing…');
+    }
+
+    // ===== Receipt ========================================================
+    function showReceipt(token, headline, receipt, kitchen) {
+      $('rc-title').textContent = token == null ? 'Receipt' : `Token #${String(token).padStart(3, '0')}`;
+      $('rc-headline').textContent = headline || '';
+      $('rc-text').textContent = receipt || '';
+      lastReceiptText = receipt || '';
+      lastKitchenText = kitchen || '';
+      openSheet('receipt-sheet');
+    }
+
+    // /api/pos/bills/:id/receipt returns only { text, kitchen_text }, so the
+    // token is passed in where the caller already knows it.
+    async function viewBillReceipt(billId, token) {
+      try {
+        const res = await api(`/api/pos/bills/${billId}/receipt`);
+        showReceipt(token == null ? null : token, '', res.text || '', res.kitchen_text || '');
+      } catch (err) {
+        toast(err.message || 'Could not load the receipt', 'error');
+      }
+    }
+
+    // Same 58mm slip window the rest of the mobile UI prints with.
+    function printSlip(which) {
+      const text = which === 'kitchen' ? lastKitchenText : lastReceiptText;
+      if (!text) { toast(`No ${which} copy available`, 'error'); return; }
+      const w = window.open('', '_blank', 'width=350,height=700');
+      const logoUrl = window.location.origin + '/public/img/kuki_logo.png';
+      const logo = which === 'kitchen' ? '' : `<img src="${logoUrl}">`;
+      w.document.write(`<html><head><style>@page{size:58mm auto;margin:0;}body{font-family:monospace;width:58mm;margin:0;}.slip{width:58mm;padding:0 0 2mm;text-align:center;}.slip img{max-width:45mm;max-height:22mm;display:block;margin:0 auto 2px;}pre{font-size:13px;font-weight:600;white-space:pre-wrap;text-align:left;padding:0 1mm;}</style></head><body><div class="slip">${logo}<pre>${escapeHtml(text)}</pre></div><script>window.addEventListener('load',()=>{window.addEventListener('afterprint',()=>setTimeout(()=>window.close(),200));window.print();});<\/script></body></html>`);
+      w.document.close();
+    }
+
+    // ===== Edit ===========================================================
+    async function loadProducts() {
+      if (products.length) return;
+      try {
+        products = await api('/api/products');
+      } catch {
+        products = [];
+      }
+      $('ed-product').innerHTML = '<option value="">Pick an item…</option>' +
+        products.map(p => `<option value="${escapeHtml(String(p.id))}">${escapeHtml(p.name)} — ${escapeHtml(fmt(p.discount_price == null ? p.selling_price : p.discount_price))}</option>`).join('');
+    }
+
+    async function openEdit() {
+      const o = detailOrder;
+      if (!o) return;
+      if (!isOpenOrder(o)) { toast('This order is closed and cannot be edited', 'error'); return; }
+      await loadProducts();
+      $('ed-id').value = String(o.id);
+      $('ed-title').textContent = `Edit #${o.id}`;
+      $('ed-date').value = o.collection_date || '';
+      $('ed-time').value = o.collection_time || '';
+      $('ed-notes').value = o.notes || '';
+      editLines = (o.items || []).map(i => ({
+        product_id: i.product_id || null,
+        description: i.description || '',
+        quantity: i.quantity,
+        unit_price: i.unit_price,
+      }));
+      renderEditLines();
+      openSheet('edit-sheet');
+    }
+
+    function renderEditLines() {
+      if (!editLines.length) {
+        $('ed-lines').innerHTML = '<div style="color:var(--red);font-size:0.82rem;">An order needs at least one line.</div>';
+      } else {
+        // Inputs write into editLines without a re-render, so the caret stays put.
+        $('ed-lines').innerHTML = editLines.map((l, i) => `
+          <div class="ed-line">
+            <div class="field" style="margin-bottom:6px;">
+              <label>${l.product_id ? 'Menu item' : 'Custom line'}</label>
+              <input type="text" value="${escapeHtml(l.description)}" maxlength="500" placeholder="What was ordered"
+                     oninput="onLineChange(${i}, 'description', this.value)">
+            </div>
+            <div class="row2">
+              <div class="field"><label>Qty</label>
+                <input type="number" min="1" step="1" inputmode="numeric" value="${escapeHtml(String(l.quantity))}"
+                       oninput="onLineChange(${i}, 'quantity', this.value)"></div>
+              <div class="field"><label>Unit price</label>
+                <input type="number" min="0" step="0.01" inputmode="decimal" value="${escapeHtml(String(l.unit_price))}"
+                       oninput="onLineChange(${i}, 'unit_price', this.value)"></div>
+            </div>
+            <button class="btn btn-danger btn-sm" style="margin-top:6px;" onclick="removeLine(${i})">Remove line</button>
+          </div>`).join('');
+      }
+      updateEditTotal();
+    }
+
+    function updateEditTotal() {
+      const total = editLines.reduce((s, l) => s + (Number(l.quantity) || 0) * (Number(l.unit_price) || 0), 0);
+      $('ed-total').textContent = fmt(Math.round(total * 100) / 100);
+    }
+
+    function onLineChange(i, field, value) {
+      const l = editLines[i];
+      if (!l) return;
+      if (field === 'quantity') l.quantity = parseInt(value, 10);
+      else if (field === 'unit_price') l.unit_price = parseFloat(value);
+      else l.description = value;
+      updateEditTotal();
+    }
+
+    function addProductLine(value) {
+      const id = parseInt(value, 10);
+      $('ed-product').value = '';
+      if (!Number.isFinite(id)) return;
+      const p = products.find(x => x.id === id);
+      if (!p) { toast('That item is no longer listed', 'error'); return; }
+      editLines.push({
+        product_id: p.id,
+        description: p.name,
+        quantity: 1,
+        unit_price: p.discount_price == null ? p.selling_price : p.discount_price,
+      });
+      renderEditLines();
+    }
+
+    function addCustomLine() {
+      editLines.push({ product_id: null, description: '', quantity: 1, unit_price: 0 });
+      renderEditLines();
+    }
+
+    function removeLine(i) {
+      editLines.splice(i, 1);
+      renderEditLines();
+    }
+
+    async function submitEdit(btn) {
+      const id = parseInt($('ed-id').value, 10);
+      const date = $('ed-date').value;
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) { toast('Pick a collection date', 'error'); return; }
+      if (!editLines.length) { toast('An order needs at least one line', 'error'); return; }
+      for (let i = 0; i < editLines.length; i++) {
+        const l = editLines[i];
+        if (!Number.isInteger(l.quantity) || l.quantity < 1) { toast(`Line ${i + 1}: quantity must be 1 or more`, 'error'); return; }
+        if (!Number.isFinite(l.unit_price) || l.unit_price < 0) { toast(`Line ${i + 1}: enter a price`, 'error'); return; }
+        if (!l.product_id && !String(l.description).trim()) { toast(`Line ${i + 1}: a custom line needs a description`, 'error'); return; }
+      }
+      // items is a FULL replace on the server, which is why the editor holds
+      // every line of the order.
+      const body = {
+        collection_date: date,
+        collection_time: $('ed-time').value.trim(),
+        notes: $('ed-notes').value,
+        items: editLines.map(l => ({
+          product_id: l.product_id,
+          description: String(l.description).trim(),
+          quantity: l.quantity,
+          unit_price: l.unit_price,
+        })),
+      };
+      await withBusy(btn, async () => {
+        detailOrder = await api(`/api/preorders/${id}`, { method: 'PUT', body });
+        toast('Order updated');
+        closeSheet('edit-sheet');
+        renderDetail();
+        await refreshAll();
+      }, 'Saving…');
+    }
+
+    load();
+  </script>
+</body>
+</html>

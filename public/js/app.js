@@ -191,6 +191,13 @@ function renderLayout(activePage) {
     { path: '/', icon: '\u{1F4CA}', label: 'Dashboard', admin: false },
     { divider: 'Sales' },
     { path: '/pos', icon: '\u{1F6D2}', label: 'POS', admin: false },
+    // Not admin: the cashier TAKES the pre-order at the counter, takes the
+    // deposit, marks it ready when it comes out of the kitchen and rings it up
+    // when the customer walks in. Hiding the book from them would mean nobody
+    // on the floor could see what is due today. The two actions that really are
+    // the owner's — cancelling an order with a deposit on it, and deleting a
+    // payment — are adminOnly in the API and hidden in the UI for everyone else.
+    { path: '/preorders', icon: '\u{1F4C5}', label: 'Pre-orders', admin: false, badge: 'preorders_due' },
     { path: '/bills', icon: '\u{1F9FE}', label: 'Bills', admin: false },
     { path: '/customers', icon: '\u{1F465}', label: 'Customers', admin: false },
     { path: '/tasks', icon: '✅', label: 'Daily Tasks', admin: false },
@@ -243,20 +250,42 @@ function renderLayout(activePage) {
   refreshSidebarBadges();
 }
 
+function setNavBadge(key, count, color) {
+  const el = document.querySelector(`[data-badge="${key}"] .nav-badge`);
+  if (!el) return;
+  if (count > 0) {
+    el.textContent = count;
+    el.style.cssText = `display:inline-block;background:${color || '#dc3545'};color:white;border-radius:10px;padding:1px 7px;font-size:0.75rem;font-weight:bold;`;
+  } else {
+    el.style.display = 'none';
+  }
+}
+
 async function refreshSidebarBadges() {
-  if (!currentUser || currentUser.role !== 'admin') return;
-  try {
-    const res = await fetch('/api/expenses/pending-count');
-    if (!res.ok) return;
-    const data = await res.json();
-    const el = document.querySelector('[data-badge="pending_expenses"] .nav-badge');
-    if (el) {
-      if (data.count > 0) {
-        el.textContent = data.count;
-        el.style.cssText = 'display:inline-block;background:#dc3545;color:white;border-radius:10px;padding:1px 7px;font-size:0.75rem;font-weight:bold;';
-      } else {
-        el.style.display = 'none';
+  if (!currentUser) return;
+
+  // Pending expenses are the owner's approval queue, so the badge is admin-only
+  // and the nav item itself is already hidden from cashiers.
+  if (currentUser.role === 'admin') {
+    try {
+      const res = await fetch('/api/expenses/pending-count');
+      if (res.ok) {
+        const data = await res.json();
+        setNavBadge('pending_expenses', data.count, '#dc3545');
       }
+    } catch {}
+  }
+
+  // Pre-orders: what is owed to a customer today, plus anything already late.
+  // Every role sees it — a cashier who cannot see that three cakes are due
+  // today is the whole problem this screen exists to fix. Red once something is
+  // overdue, amber when it is merely due.
+  try {
+    const res = await fetch('/api/preorders/summary');
+    if (res.ok) {
+      const s = await res.json();
+      const due = (Number(s.overdue) || 0) + (Number(s.due_today) || 0);
+      setNavBadge('preorders_due', due, Number(s.overdue) > 0 ? '#dc3545' : '#fd7e14');
     }
   } catch {}
 }

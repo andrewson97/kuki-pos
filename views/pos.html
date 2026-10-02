@@ -70,6 +70,19 @@
           <button class="btn btn-sm w-100 mb-2" id="print-proforma" onclick="printProforma(this)" disabled
                   title="Print the bill for the customer before taking payment"
                   style="background:white;color:#495057;border:1px dashed #adb5bd;font-weight:600;">Print Bill (before payment)</button>
+          <!-- Pre-order: the customer is ordering for a future date, so this
+               takes no payment now and reserves no stock. It sits above the
+               payment buttons because it is the alternative to taking money
+               today, and it is here rather than in a corner of the page because
+               the cashier is standing at this panel when the customer asks. The
+               badge beside it is pre-order work already due, so the till can see
+               there is something to do without leaving the sale. -->
+          <div class="d-flex gap-2 mb-2">
+            <button class="btn btn-sm flex-fill" id="open-preorder" onclick="openPreorder()"
+                    title="Take an order for a future date (a cake, a bulk order), with an optional deposit"
+                    style="background:white;color:#6f42c1;border:1px solid #6f42c1;font-weight:600;">&#128197; Pre-order (collect later)</button>
+            <a class="btn btn-sm" id="preorder-due" href="/preorders" style="display:none;background:#fff3cd;color:#664d03;border:1px solid #ffe69c;font-weight:700;white-space:nowrap;"></a>
+          </div>
           <div class="d-flex gap-2 mb-2">
             <button class="btn btn-sm flex-fill" id="pay-cash" onclick="openCashModal()" style="background:#28a745;color:white;">Cash</button>
             <button class="btn btn-sm flex-fill" id="pay-card" onclick="checkout('card', null, this)" style="background:#007bff;color:white;">Card</button>
@@ -233,6 +246,97 @@
     </div>
   </div>
 
+  <!-- Pre-order Modal: the whole order taken in one pass, with the customer
+       standing there - lines, collection date and time, notes and the deposit.
+       There is deliberately no customer search in here: the cart panel already
+       has one (with its + to add a new customer on the spot), so this dialog
+       points at that box instead of growing a second one. -->
+  <div class="modal fade" id="preorderModal" tabindex="-1">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title">Pre-order &mdash; collect later</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body">
+          <div id="po-customer-row" class="mb-3"></div>
+          <div class="row g-2 mb-3">
+            <div class="col-sm-6">
+              <label class="form-label fw-bold mb-1" for="po-date">Collection date</label>
+              <input type="date" class="form-control" id="po-date">
+            </div>
+            <div class="col-sm-6">
+              <label class="form-label mb-1" for="po-time">Time (optional)</label>
+              <input type="text" class="form-control" id="po-time" placeholder="e.g. 4 PM, after 2.30" maxlength="50">
+            </div>
+          </div>
+          <div class="d-flex justify-content-between align-items-center mb-1 flex-wrap gap-2">
+            <label class="form-label fw-bold mb-0">What they ordered</label>
+            <button class="btn btn-sm btn-primary" onclick="poAddCustomLine()">+ Add a custom item (cake)</button>
+          </div>
+          <div id="po-lines"></div>
+          <div class="d-flex justify-content-between align-items-center border-top pt-2 mt-2 fs-5 fw-bold">
+            <span>Order total</span><span id="po-total">-</span>
+          </div>
+          <div class="mt-3 mb-3">
+            <label class="form-label mb-1" for="po-notes">Notes (optional)</label>
+            <textarea class="form-control" id="po-notes" rows="2" placeholder="Writing on the cake, flavour, allergies, who will collect it"></textarea>
+          </div>
+          <!-- A deposit is taken in the same breath as the order, because that is
+               how it happens at the counter. Optional: plenty of orders are taken
+               on trust and settled in full at collection. -->
+          <div class="border rounded p-3" style="background:#f8f9fa;">
+            <div class="fw-bold mb-2">Deposit (optional)</div>
+            <div class="row g-2 align-items-end">
+              <div class="col-sm-5">
+                <label class="form-label small mb-1" for="po-deposit">Amount taken now</label>
+                <input type="number" class="form-control" id="po-deposit" min="0" step="0.01" placeholder="0.00" oninput="poRenderTotals()">
+              </div>
+              <div class="col-sm-4">
+                <label class="form-label small mb-1" for="po-deposit-method">Paid by</label>
+                <select class="form-select" id="po-deposit-method">
+                  <option value="cash">Cash</option>
+                  <option value="card">Card</option>
+                  <option value="upi">UPI</option>
+                </select>
+              </div>
+              <div class="col-sm-3 text-end">
+                <div class="small text-muted">Balance due</div>
+                <div class="fw-bold" id="po-balance">-</div>
+              </div>
+            </div>
+          </div>
+          <!-- Validation errors (ours, and the server's own 400 wording) land
+               here inside the still-open dialog, so a half-typed cake order is
+               never thrown away by a mistake in one field. -->
+          <div class="alert alert-danger mt-3 mb-0 py-2 px-3 small" id="po-error" style="display:none;"></div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button class="btn btn-success" id="po-save" onclick="savePreorder(this)">Save pre-order</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Pre-order saved: the three things the cashier has to say out loud - the
+       order number, the day it is for, and what is still to pay. -->
+  <div class="modal fade" id="preorderDoneModal" tabindex="-1">
+    <div class="modal-dialog">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title">Pre-order taken</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body" id="po-done-body"></div>
+        <div class="modal-footer">
+          <a class="btn btn-outline-primary" href="/preorders">Open pre-orders</a>
+          <button class="btn btn-primary" data-bs-dismiss="modal">Done</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
   <script src="/public/js/app.js"></script>
   <script>
@@ -311,6 +415,9 @@
       // Say which carts this till is holding, then keep saying it.
       reportClaims();
       startClaimHeartbeat();
+      // ...and how much pre-order work is already due, for the badge beside the
+      // Pre-order button. Fire-and-forget: it is a badge, not part of selling.
+      loadPreorderSummary();
     }
 
     async function checkShiftState() {
@@ -424,6 +531,16 @@
       selectedEl.style.cssText = 'display:flex!important;';
       document.getElementById('customer-selected-name').textContent = name;
       persistCart(); // not a totals change, so updateCartTotals() never sees it
+      // The pre-order dialog reads this same box and may be waiting on it: it
+      // has to hide itself for the cashier to reach this search, so coming back
+      // is automatic once a customer is picked here (or added with +).
+      poRenderCustomer();
+      if (poPickingCustomer) {
+        poPickingCustomer = false;
+        // Let the customer modal finish hiding before another one shows, or
+        // Bootstrap leaves a dead backdrop over the page.
+        setTimeout(openPreorder, 350);
+      }
     }
 
     function clearCustomer() {
@@ -431,6 +548,7 @@
       document.getElementById('customer-search').value = '';
       document.getElementById('customer-selected').style.cssText = 'display:none!important;';
       persistCart();
+      poRenderCustomer();
     }
 
     // Quick-add a customer without leaving the till. Same fields as /customers.
@@ -1301,6 +1419,10 @@
     // rejects, but the claim still goes out if it somehow does.
     function refreshParkedAndClaims() {
       loadParked().then(reportClaims, reportClaims);
+      // The same beat re-reads the pre-order badge: a till left open overnight
+      // must not keep showing yesterday's "due today". It swallows its own
+      // failures, so it can never disturb the claim report.
+      loadPreorderSummary();
     }
 
     function startClaimHeartbeat() {
@@ -1768,6 +1890,427 @@
         const remaining = qtyText(fresh ? fresh.quantity : (Number(it.quantity) || 0) - qty);
         showToast(`Used ${qtyText(qty)} ${unit} of ${it.name} — ${remaining} ${unit} left`.replace(/ +/g, ' '));
       }, 'Recording...');
+    }
+
+    // ===== Pre-orders: an order taken today, collected on a future date =====
+    // A cake shop's real work starts days before the sale: "a 2kg chocolate cake
+    // for Saturday, and 50 fish buns with it". The cashier is already standing
+    // here when the customer asks, so the order is taken HERE; the pre-orders
+    // screen is for working through the book afterwards.
+    //
+    // Two rules this dialog exists to honour:
+    //
+    //   * A PRE-ORDER HOLDS NO STOCK, by design - a cake due next Saturday must
+    //     not lock today's shelf. So when the lines come out of the cart, the
+    //     cart's holds have to be GIVEN BACK on success, and that goes through
+    //     clearCart() - the same path the Clear button uses - so this file keeps
+    //     exactly one release path and cannot grow a second, subtly wrong one.
+    //   * THE CUSTOMER IS MANDATORY and must already exist (the server refuses a
+    //     walk-in pre-order): if the cake is late, somebody has to be phoned.
+    //     The cart panel already has a customer search with a + to add one on
+    //     the spot, so this dialog never grows a second one - it points at that
+    //     box and keeps the half-typed order while the cashier uses it.
+    //
+    // poLines is the order being built: { product_id|null, description, quantity,
+    // unit_price, from_cart }. A line WITH a product_id is a catalogue line (its
+    // price is editable, because bulk is negotiated at this counter); one WITHOUT
+    // is the custom cake, where the description IS the specification.
+    let poLines = [];
+    // The scalar fields, kept across the one detour this dialog has to make: the
+    // customer box is behind the modal backdrop, so picking a customer means
+    // hiding the modal, and coming back must not cost the cashier a retype.
+    // null means "the next open starts fresh".
+    let poDraft = null;
+    let poPickingCustomer = false;
+
+    function poShowError(msg) {
+      const el = document.getElementById('po-error');
+      el.textContent = msg; // server wording included, so textContent - never innerHTML
+      el.style.display = 'block';
+      el.scrollIntoView({ block: 'nearest' });
+    }
+
+    function poHideError() {
+      const el = document.getElementById('po-error');
+      el.textContent = '';
+      el.style.display = 'none';
+    }
+
+    // The cart is the usual starting point: "50 fish buns" is already rung up by
+    // the time the customer says "...for Saturday". An EMPTY cart is just as
+    // normal - a birthday cake is pure free text and nothing needs ringing up
+    // first - so that case opens with one blank custom line ready to type into.
+    function poSeedLines() {
+      poLines = cart.map(i => ({
+        product_id: i.product_id,
+        description: i.product_name,
+        quantity: i.quantity,
+        unit_price: i.unit_price,
+        from_cart: true,
+      }));
+      if (!poLines.length) poLines.push(poBlankLine());
+    }
+
+    // unit_price starts EMPTY, not 0: a custom line has no catalogue price to
+    // fall back on, and a silent zero would book a free cake.
+    function poBlankLine() {
+      return { product_id: null, description: '', quantity: 1, unit_price: '', from_cart: false };
+    }
+
+    function poAddCustomLine() {
+      poLines.push(poBlankLine());
+      poRenderLines();
+      const idx = poLines.length - 1;
+      setTimeout(() => { const el = document.getElementById(`po-desc-${idx}`); if (el) el.focus(); }, 60);
+    }
+
+    function poRemoveLine(idx) {
+      poLines.splice(idx, 1);
+      poRenderLines();
+    }
+
+    // Keystrokes update the model only, and only the figures are re-rendered -
+    // re-drawing the table on every keypress would take the focus out of the
+    // field being typed into.
+    function poSetLine(idx, field, value) {
+      if (!poLines[idx]) return;
+      poLines[idx][field] = value;
+      poRenderTotals();
+    }
+
+    function poLineTotal(l) {
+      return (parseFloat(l.quantity) || 0) * (parseFloat(l.unit_price) || 0);
+    }
+
+    function poOrderTotal() {
+      return poLines.reduce((sum, l) => sum + poLineTotal(l), 0);
+    }
+
+    function poRenderLines() {
+      const wrap = document.getElementById('po-lines');
+      if (!poLines.length) {
+        wrap.innerHTML = `<div class="text-center text-muted border rounded py-3">
+          Nothing on this order yet. Press <strong>+ Add a custom item</strong> to describe the cake,
+          or ring the items up in the cart first and they will be listed here.</div>`;
+        poRenderTotals();
+        return;
+      }
+      wrap.innerHTML = `
+        <table class="table table-sm align-middle mb-0">
+          <thead>
+            <tr>
+              <th>Item</th>
+              <th class="text-end" style="width:80px;">Qty</th>
+              <th class="text-end" style="width:120px;">Unit price</th>
+              <th class="text-end" style="width:110px;">Line total</th>
+              <th style="width:38px;"></th>
+            </tr>
+          </thead>
+          <tbody>
+            ${poLines.map((l, i) => `
+            <tr>
+              <td>${l.product_id
+                ? `<div class="fw-bold">${escapeHtml(l.description)}</div>
+                   <div class="small text-muted">From the cart &middot; catalogue item</div>`
+                : `<input type="text" class="form-control form-control-sm" id="po-desc-${i}"
+                          value="${escapeHtml(l.description)}" maxlength="500"
+                          placeholder="e.g. 2kg chocolate cake, butterscotch filling, &quot;Happy Birthday Amaal&quot;"
+                          oninput="poSetLine(${i}, 'description', this.value)">`}</td>
+              <td><input type="number" class="form-control form-control-sm text-end" min="1" step="1"
+                         value="${escapeHtml(String(l.quantity))}"
+                         oninput="poSetLine(${i}, 'quantity', this.value)"></td>
+              <td><input type="number" class="form-control form-control-sm text-end" min="0" step="0.01"
+                         value="${escapeHtml(String(l.unit_price))}" placeholder="0.00"
+                         oninput="poSetLine(${i}, 'unit_price', this.value)"></td>
+              <td class="text-end fw-bold" id="po-line-total-${i}">-</td>
+              <td class="text-end"><button class="btn btn-sm text-danger" title="Remove this line"
+                      onclick="poRemoveLine(${i})" style="padding:2px 6px;">&times;</button></td>
+            </tr>`).join('')}
+          </tbody>
+        </table>`;
+      poRenderTotals();
+    }
+
+    function poRenderTotals() {
+      poLines.forEach((l, i) => {
+        const cell = document.getElementById(`po-line-total-${i}`);
+        if (cell) cell.textContent = formatCurrency(poLineTotal(l));
+      });
+      const total = poOrderTotal();
+      document.getElementById('po-total').textContent = formatCurrency(total);
+      const deposit = parseFloat(document.getElementById('po-deposit').value) || 0;
+      document.getElementById('po-balance').textContent = formatCurrency(Math.max(0, total - deposit));
+    }
+
+    // The customer, as the cart panel's box currently has it. Re-rendered from
+    // selectCustomer()/clearCustomer() too, so this row can never disagree with
+    // the box it reads.
+    function poRenderCustomer() {
+      const el = document.getElementById('po-customer-row');
+      if (!el) return;
+      const id = document.getElementById('customer-id').value;
+      const name = document.getElementById('customer-selected-name').textContent || '';
+      if (id) {
+        el.innerHTML = `
+          <div class="alert alert-success py-2 px-3 mb-0 d-flex justify-content-between align-items-center gap-2">
+            <span><strong>${escapeHtml(name)}</strong> is collecting this order.</span>
+            <button class="btn btn-sm btn-outline-secondary" onclick="poPointAtCustomer('search')">Change</button>
+          </div>`;
+        return;
+      }
+      el.innerHTML = `
+        <div class="alert alert-warning py-2 px-3 mb-0">
+          <div class="fw-bold mb-1">&#9888;&#65039; This order needs a customer.</div>
+          <div class="small mb-2">A pre-order is a promise for a future day, so the shop keeps a name and a
+            number against it &mdash; if the cake is late, somebody has to be phoned. Use the customer box in
+            the cart panel (the search, or <strong>+</strong> for a new customer); what you have typed here is kept.</div>
+          <button class="btn btn-sm btn-warning" onclick="poPointAtCustomer('search')">Find the customer</button>
+          <button class="btn btn-sm btn-outline-dark" onclick="poPointAtCustomer('new')">+ Add a new customer</button>
+        </div>`;
+    }
+
+    // Hand the cashier over to the EXISTING customer box - the search, or the +
+    // button's new-customer modal. The modal backdrop covers the cart panel, so
+    // this dialog has to step aside; the draft is snapshotted first and
+    // selectCustomer() brings the dialog straight back.
+    function poPointAtCustomer(mode) {
+      poDraft = {
+        date: document.getElementById('po-date').value,
+        time: document.getElementById('po-time').value,
+        notes: document.getElementById('po-notes').value,
+        deposit: document.getElementById('po-deposit').value,
+        method: document.getElementById('po-deposit-method').value,
+      };
+      poPickingCustomer = true;
+      const inst = bootstrap.Modal.getInstance(document.getElementById('preorderModal'));
+      if (inst) inst.hide();
+      if (mode === 'new') {
+        setTimeout(openNewCustomer, 350); // the + button's own path, not a second one
+      } else {
+        setTimeout(() => {
+          const input = document.getElementById('customer-search');
+          if (input) { input.scrollIntoView({ block: 'nearest' }); input.focus(); }
+          showToast('Search the customer by name or phone in the cart panel, or press + to add them. Your order is kept.');
+        }, 350);
+      }
+    }
+
+    function openPreorder() {
+      poPickingCustomer = false;
+      poHideError();
+      if (poDraft) {
+        // Coming back from the customer box: the lines are still in poLines.
+        document.getElementById('po-date').value = poDraft.date || '';
+        document.getElementById('po-time').value = poDraft.time || '';
+        document.getElementById('po-notes').value = poDraft.notes || '';
+        document.getElementById('po-deposit').value = poDraft.deposit || '';
+        document.getElementById('po-deposit-method').value = poDraft.method || 'cash';
+      } else {
+        poSeedLines();
+        // No default collection date on purpose: a guessed day silently books
+        // the cake for the wrong one, and this is the field the whole order
+        // hangs on.
+        document.getElementById('po-date').value = '';
+        document.getElementById('po-time').value = '';
+        document.getElementById('po-notes').value = '';
+        document.getElementById('po-deposit').value = '';
+        document.getElementById('po-deposit-method').value = 'cash';
+      }
+      poDraft = null;
+      poRenderCustomer();
+      poRenderLines();
+      new bootstrap.Modal(document.getElementById('preorderModal')).show();
+      setTimeout(() => document.getElementById('po-date').focus(), 250);
+    }
+
+    // Cancelled or saved: the next open starts fresh. The one exception is the
+    // detour to the customer box, which hides this modal on purpose and has to
+    // come back to the same half-typed order.
+    document.getElementById('preorderModal').addEventListener('hidden.bs.modal', () => {
+      if (!poPickingCustomer) { poDraft = null; poLines = []; }
+    });
+
+    // ===== Saving the order =====
+    // withBusy() is the double-submit guard (one POST per five clicks); the
+    // confirm is taken BEFORE it, because a dialog inside the guard would hold
+    // the button locked while the cashier reads it.
+    async function savePreorder(btn) {
+      poHideError();
+      // A sale is mid-flight on this cart: converting it now would clear the
+      // cart and release the holds under a bill that is still being written.
+      if (checkoutInProgress) {
+        poShowError('Finishing the current sale - try again in a moment.');
+        return;
+      }
+
+      const customerId = parseInt(document.getElementById('customer-id').value || '0', 10);
+      if (!customerId) {
+        poRenderCustomer();
+        poShowError('Choose the customer first - a pre-order cannot be taken for a walk-in. Use the customer box in the cart panel.');
+        return;
+      }
+
+      const collectionDate = document.getElementById('po-date').value;
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(collectionDate)) {
+        poShowError('Pick the day the customer is collecting this order.');
+        document.getElementById('po-date').focus();
+        return;
+      }
+
+      // Validated to the same rules as the server, so the common mistakes are
+      // caught with the field named rather than as a round-trip 400.
+      const items = [];
+      for (let i = 0; i < poLines.length; i++) {
+        const l = poLines[i];
+        const at = `Line ${i + 1}`;
+        const description = String(l.description == null ? '' : l.description).trim();
+        const quantity = parseFloat(l.quantity);
+        const price = (l.unit_price === '' || l.unit_price === null || l.unit_price === undefined)
+          ? NaN : parseFloat(l.unit_price);
+        if (!Number.isFinite(quantity) || !Number.isInteger(quantity) || quantity < 1) {
+          poShowError(`${at}: the quantity must be a whole number of 1 or more.`);
+          return;
+        }
+        if (!Number.isFinite(price) || price < 0) {
+          poShowError(l.product_id
+            ? `${at}: ${description || 'that item'} needs a price of 0 or more.`
+            : `${at}: agree a price for "${description || 'the custom item'}" - a custom line has no catalogue price to fall back on.`);
+          return;
+        }
+        if (l.product_id) {
+          items.push({ product_id: l.product_id, description, quantity, unit_price: price });
+        } else {
+          if (!description) {
+            poShowError(`${at}: say what the customer ordered, e.g. 2kg chocolate cake, "Happy Birthday Amaal".`);
+            return;
+          }
+          items.push({ description, quantity, unit_price: price });
+        }
+      }
+      if (!items.length) {
+        poShowError('Add at least one line: + Add a custom item for a cake, or ring the items up in the cart.');
+        return;
+      }
+
+      const total = items.reduce((sum, l) => sum + l.quantity * l.unit_price, 0);
+      let deposit = null;
+      const depositAmount = parseFloat(document.getElementById('po-deposit').value);
+      if (Number.isFinite(depositAmount) && depositAmount > 0) {
+        if (depositAmount > total + 0.005) {
+          poShowError(`The deposit (${formatCurrency(depositAmount)}) is more than the order total (${formatCurrency(total)}).`);
+          return;
+        }
+        const method = document.getElementById('po-deposit-method').value || 'cash';
+        // A cash deposit is cash into the drawer, so the server applies the same
+        // shift rule it applies to a sale. Say so here rather than losing the
+        // whole order to a 400: the order itself needs no open shift.
+        if (method === 'cash' && shiftBlocked) {
+          poShowError('A cash deposit cannot be recorded while the cash drawer is closed. Open the shift on the Cash screen, take the deposit by card/UPI, or save the order without a deposit.');
+          return;
+        }
+        deposit = { amount: depositAmount, payment_method: method, paid_on: todayISO() };
+      }
+
+      // Does this order carry the cart? Only if a cart-seeded line actually
+      // survived: a cashier who deleted them all is taking a different order,
+      // and the cart they left behind is still a sale they mean to ring up.
+      const convertsCart = cart.length > 0 && poLines.some(l => l.from_cart && l.product_id);
+      if (convertsCart) {
+        const units = cart.reduce((sum, i) => sum + i.quantity, 0);
+        const ok = confirm(
+          `Take this as a pre-order for ${collectionDate}?\n\n` +
+          `The cart (${units} item${units === 1 ? '' : 's'}) will be cleared and the stock it is holding goes ` +
+          `back on the shelf. A pre-order holds no stock on purpose, so next week's order never locks today's shelf.`
+        );
+        if (!ok) return;
+      }
+
+      const body = {
+        customer_id: customerId,
+        collection_date: collectionDate,
+        collection_time: document.getElementById('po-time').value.trim(),
+        notes: document.getElementById('po-notes').value.trim(),
+        items,
+      };
+      if (deposit) body.deposit = deposit;
+
+      const order = await withBusy(btn, async () => {
+        try {
+          return await api('/api/preorders', { method: 'POST', body });
+        } catch (err) {
+          // A 400 carries the server's own cashier-readable wording ("Line 2: a
+          // custom line needs an agreed price."). Show exactly that and leave
+          // the dialog, and everything typed into it, alone.
+          poShowError((err && err.message) || 'Could not save this pre-order.');
+          return null;
+        }
+      }, 'Saving...');
+      if (!order || !order.id) return;
+
+      poLines = [];
+      poDraft = null;
+      const inst = bootstrap.Modal.getInstance(document.getElementById('preorderModal'));
+      if (inst) inst.hide();
+
+      if (convertsCart) {
+        // THE release path - the Clear button's own. It gives this cart's holds
+        // back, clears the saved cart, moves the till onto a fresh cart id and
+        // re-reads availability, all in the order that is already proven here.
+        // Nothing about a pre-order may hold stock, so nothing else will do.
+        clearCart();
+      } else {
+        // Nothing to release; just leave the till ready for the next customer.
+        clearCustomer();
+      }
+      // Let this modal finish hiding before the confirmation one shows, or
+      // Bootstrap leaves a dead backdrop over the till.
+      setTimeout(() => poShowDone(order), 350);
+      loadPreorderSummary();
+    }
+
+    function poShowDone(order) {
+      const total = Number(order.total || 0);
+      const paid = Number(order.amount_paid || 0);
+      const balance = Number(order.balance != null ? order.balance : total - paid);
+      document.getElementById('po-done-body').innerHTML = `
+        <div class="text-center mb-3">
+          <span class="badge bg-success fs-5">Pre-order #${order.id}</span>
+        </div>
+        <table class="table table-sm mb-0">
+          <tbody>
+            <tr><th style="width:45%;">Customer</th><td>${escapeHtml(order.customer_name || '')}${order.customer_phone ? ' &middot; ' + escapeHtml(order.customer_phone) : ''}</td></tr>
+            <tr><th>Collect on</th><td class="fw-bold">${escapeHtml(formatDate(order.collection_date))}${order.collection_time ? ' &middot; ' + escapeHtml(order.collection_time) : ''}</td></tr>
+            <tr><th>Order total</th><td>${formatCurrency(total)}</td></tr>
+            <tr><th>Deposit taken</th><td>${formatCurrency(paid)}</td></tr>
+            <tr><th>Balance due on collection</th><td class="fw-bold fs-5">${formatCurrency(balance)}</td></tr>
+          </tbody>
+        </table>
+        <ul class="small text-muted mt-3 mb-0">
+          <li>No stock is held for this order - it is baked or picked on the day.</li>
+          <li>Ring it up from the Pre-orders screen when the customer comes in.</li>
+        </ul>`;
+      new bootstrap.Modal(document.getElementById('preorderDoneModal')).show();
+      showToast(`Pre-order #${order.id} taken for ${order.collection_date} - ${formatCurrency(balance)} still to pay.`);
+    }
+
+    // The badge beside the Pre-order button: work already due, so a cashier can
+    // see there is something to do without leaving the till. Silent on failure -
+    // a till that cannot read a badge must still be able to sell.
+    async function loadPreorderSummary() {
+      const el = document.getElementById('preorder-due');
+      if (!el) return;
+      try {
+        const s = await api('/api/preorders/summary');
+        const due = Number(s.due_today || 0);
+        const overdue = Number(s.overdue || 0);
+        if (!due && !overdue) { el.style.display = 'none'; el.textContent = ''; return; }
+        const parts = [];
+        if (due) parts.push(`${due} due today`);
+        if (overdue) parts.push(`${overdue} overdue`);
+        el.textContent = parts.join(' \u00b7 ');
+        el.title = `${s.to_bake_today || 0} still to bake today, ${s.ready_today || 0} ready to hand over, ${s.upcoming || 0} upcoming. Open the pre-orders screen.`;
+        el.style.display = 'inline-block';
+      } catch {}
     }
 
     // Keyboard shortcuts
