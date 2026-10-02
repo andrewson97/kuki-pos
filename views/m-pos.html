@@ -65,6 +65,29 @@
   <div class="cat-strip" id="cat-strip"></div>
   <div class="product-grid" id="product-grid"></div>
 
+  <!-- ===== Use stock: ingredients & packing items =====
+       The last section on the till, under the product grid and clearly fenced
+       off from it: this records what was taken out of the store room and has
+       nothing to do with the cart, its holds or the bill. Collapsed on load, and
+       the list is only fetched the first time it is opened — a cashier reaches
+       for this a few times a shift, so it must not push the products off the
+       screen or cost a request on every till load. Same titled-section shape as
+       the Held Stock / Tracked Products sections on /m/stock. -->
+  <div id="us-section">
+    <div style="background:white;padding:12px 14px 4px;border-top:8px solid var(--bg);display:flex;align-items:center;justify-content:space-between;gap:8px;">
+      <span style="font-weight:700;color:var(--ink-soft);text-transform:uppercase;letter-spacing:0.1em;font-size:0.72rem;">Use Stock</span>
+      <button class="btn btn-outline btn-sm" id="us-toggle" style="width:auto;flex:0 0 auto;" onclick="toggleUseStock()">Show</button>
+    </div>
+    <div id="us-blurb" style="background:white;padding:2px 14px 10px;font-size:0.76rem;color:var(--ink-soft);border-bottom:1px solid var(--line);">Ingredients &amp; packing items taken from the store room. Not part of the sale.</div>
+    <div id="us-body" style="display:none;">
+      <div style="padding:8px 14px;background:white;border-bottom:1px solid var(--line);display:flex;gap:8px;">
+        <input type="text" id="us-search" placeholder="Filter by name&hellip;" oninput="renderUseStock()" style="flex:1;min-width:0;padding:8px 10px;border:1px solid var(--line);border-radius:8px;">
+        <button class="btn btn-outline btn-sm" id="us-refresh" style="width:auto;flex:0 0 auto;" onclick="loadUseStock(this)">Refresh</button>
+      </div>
+      <div id="us-list" style="max-height:46vh;overflow-y:auto;"><div class="empty">Loading&hellip;</div></div>
+    </div>
+  </div>
+
   <div class="cart-bar empty" id="cart-bar" onclick="openCart()">
     <div><span class="count" id="cart-count">0</span>View cart</div>
     <div class="total" id="cart-total">${currency}0.00</div>
@@ -168,6 +191,26 @@
         <button class="btn btn-primary" onclick="printSlip('customer')">Customer copy</button>
       </div>
       <button class="btn btn-success" style="margin-top:8px;" onclick="closeSheet('receipt-sheet')">Done</button>
+    </div>
+  </div>
+
+  <!-- Use stock sheet (confirm one item's usage) -->
+  <div class="sheet" id="us-sheet" onclick="if(event.target===this)closeSheet('us-sheet')">
+    <div class="sheet-inner">
+      <div class="sheet-handle"></div>
+      <h3 id="us-title">Record stock used</h3>
+      <input type="hidden" id="us-id">
+      <div id="us-onhand" style="font-size:0.8rem;color:var(--ink-soft);margin:-8px 0 14px;"></div>
+      <div class="field"><label>Quantity to use (<span id="us-unit">units</span>)</label><input type="number" id="us-qty" min="0" step="0.001" inputmode="decimal" value="1"></div>
+      <div class="field"><label>Note (optional)</label><input type="text" id="us-note" placeholder="e.g. 2 kg for the birthday cake"></div>
+      <!-- An overdraw comes back as a 400 carrying the server's own wording. It
+           lands here, inside the still-open sheet, so the quantity can be fixed
+           without retyping the note. -->
+      <div id="us-error" style="display:none;background:#fee2e2;color:#991b1b;border-radius:8px;padding:8px 10px;font-size:0.82rem;margin-bottom:12px;"></div>
+      <div class="btn-row">
+        <button class="btn btn-outline" onclick="closeSheet('us-sheet')">Cancel</button>
+        <button class="btn btn-success" id="us-confirm" onclick="confirmUseStock(this)">Confirm use</button>
+      </div>
     </div>
   </div>
 
@@ -935,6 +978,171 @@
       const logoHtml = (which === 'kitchen' || which === 'proforma') ? '' : `<img src="${logoUrl}" alt="KUKI">`;
       w.document.write(`<html><head><style>@page{size:58mm auto;margin:0;}body{font-family:'Consolas',monospace;width:58mm;margin:0;}.slip{width:58mm;padding:0 0 2mm;text-align:center;}.slip img{max-width:45mm;max-height:22mm;display:block;margin:0 auto 2px;}pre{font-size:13px;font-weight:600;white-space:pre-wrap;text-align:left;padding:0 1mm;margin:0;}</style></head><body><div class="slip">${logoHtml}<pre>${text}</pre></div><script>window.addEventListener('load',()=>{const imgs=Array.from(document.images);Promise.all(imgs.map(i=>i.complete?null:new Promise(r=>{i.onload=i.onerror=r;}))).then(()=>{window.addEventListener('afterprint',()=>setTimeout(()=>window.close(),200));window.print();});});<\/script></body></html>`);
       w.document.close();
+    }
+
+    // ===== Use stock: ingredients & packing items =====
+    // Completely independent of the sale. It reads /api/stock/items and posts
+    // /api/stock/usage and never looks at `cart`, the cart id, the holds or
+    // checkoutInProgress — recording that flour was used must not disturb a bill
+    // in progress. Stock items are the store room (flour, boxes); PRODUCTS are a
+    // separate inventory and nothing here touches them.
+    //
+    // Only two categories belong here. "Finished Products" stock items are goods
+    // to sell, not things to consume, so they must never be usable from the till.
+    // Matched on the category NAME as the API returns it, case- and
+    // spacing-insensitive, so a shop that ADDS categories simply sees them
+    // excluded; if a shop has RENAMED both of these away, the panel says so
+    // rather than guessing and offering everything.
+    const USE_STOCK_CATEGORIES = ['ingredients', 'packing items'];
+    const normStockCat = (v) => String(v == null ? '' : v).trim().toLowerCase().replace(/\s+/g, ' ');
+    let useStockItems = [];
+    // Did the two categories turn up at all? Only changes the empty-state wording.
+    let useStockCategoriesExist = true;
+    let useStockLoaded = false;
+
+    // Quantities are stored as REALs, so 3 - 0.1 prints as 2.9000000000000004.
+    // Round to the 3 decimals the stock screens already use and drop the zeros.
+    function qtyText(n) {
+      return String(Math.round((Number(n) || 0) * 1000) / 1000);
+    }
+
+    function toggleUseStock() {
+      const body = $('us-body');
+      const opening = body.style.display === 'none';
+      body.style.display = opening ? 'block' : 'none';
+      $('us-toggle').textContent = opening ? 'Hide' : 'Show';
+      // Lazy: a cashier who never opens this costs the till no extra request.
+      if (opening && !useStockLoaded) loadUseStock();
+    }
+
+    async function loadUseStock(btn) {
+      const run = async () => {
+        const [items, cats] = await Promise.all([
+          api('/api/stock/items'),
+          // Used only to tell "nothing in stock yet" apart from "those categories
+          // don't exist here". Never fatal to the panel.
+          api('/api/stock/categories').catch(() => null),
+        ]);
+        useStockItems = (Array.isArray(items) ? items : [])
+          .filter(it => USE_STOCK_CATEGORIES.includes(normStockCat(it && it.category_name)));
+        useStockCategoriesExist = !Array.isArray(cats)
+          || cats.some(c => USE_STOCK_CATEGORIES.includes(normStockCat(c && c.name)));
+        useStockLoaded = true;
+        renderUseStock();
+      };
+      // With a button (Refresh) withBusy owns the guard and the error toast;
+      // without one this is a background refresh, so a failure stays inside the
+      // section instead of popping a toast over the till.
+      if (btn) { await withBusy(btn, run, 'Loading…'); return; }
+      try {
+        await run();
+      } catch (err) {
+        $('us-list').innerHTML = `<div class="empty" style="color:var(--red);">Could not load stock: ${escapeHtml((err && err.message) || 'unknown error')}</div>`;
+      }
+    }
+
+    function renderUseStock() {
+      if (!useStockLoaded) return;
+      const q = $('us-search').value.trim().toLowerCase();
+      const rows = useStockItems.filter(it => !q || String(it.name || '').toLowerCase().includes(q));
+
+      if (!useStockItems.length) {
+        $('us-list').innerHTML = useStockCategoriesExist
+          ? '<div class="empty">No ingredients or packing items in stock yet.</div>'
+          : '<div class="empty">No “Ingredients” or “Packing Items” stock category exists. Ask an admin to set them up on the Stock page.</div>';
+        return;
+      }
+      if (!rows.length) { $('us-list').innerHTML = '<div class="empty">No item matches that name.</div>'; return; }
+
+      $('us-list').innerHTML = rows.map(it => {
+        const qty = Number(it.quantity) || 0;
+        const out = qty <= 0;
+        const low = !out && Number(it.reorder_level) > 0 && qty <= Number(it.reorder_level);
+        const tag = out ? ' <span class="badge muted">OUT</span>' : (low ? ' <span class="badge warning">LOW</span>' : '');
+        // Nothing left cannot be used: the row stays visible (the cashier needs
+        // to see that it is finished) but the Use button is dead, so the sheet
+        // never opens on an item the server would only refuse.
+        const action = out
+          ? '<button class="btn btn-outline btn-sm" style="width:auto;flex:0 0 auto;" disabled>Use</button>'
+          : `<button class="btn btn-success btn-sm" style="width:auto;flex:0 0 auto;" onclick="openUseStock(${Number(it.id)})">Use</button>`;
+        return `<div class="list-item">
+          <div class="list-head">
+            <span class="list-title">${escapeHtml(it.name)}${tag}</span>
+            <span class="list-amount"${out ? ' style="color:var(--ink-soft);"' : ''}>${escapeHtml(qtyText(qty))} ${escapeHtml(it.unit || '')}</span>
+          </div>
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:6px;">
+            <span class="list-meta">${escapeHtml(it.category_name || '-')}</span>
+            ${action}
+          </div>
+        </div>`;
+      }).join('');
+    }
+
+    function showUseStockError(msg) {
+      const el = $('us-error');
+      el.textContent = msg; // server wording, so textContent — never innerHTML
+      el.style.display = 'block';
+    }
+
+    function hideUseStockError() {
+      const el = $('us-error');
+      el.textContent = '';
+      el.style.display = 'none';
+    }
+
+    function openUseStock(id) {
+      const it = useStockItems.find(x => Number(x.id) === Number(id));
+      if (!it) { toast('That item is no longer in the list', 'error'); loadUseStock(); return; }
+      // Belt and braces for a stale row: the button is already disabled at zero.
+      if ((Number(it.quantity) || 0) <= 0) { toast(`${it.name} has nothing left to use`, 'error'); return; }
+      $('us-id').value = it.id;
+      $('us-title').textContent = it.name;
+      $('us-onhand').textContent = `${it.category_name || 'Uncategorised'} · ${qtyText(it.quantity)} ${it.unit || ''} on hand`;
+      $('us-unit').textContent = it.unit || 'units';
+      $('us-qty').value = 1;
+      $('us-note').value = '';
+      hideUseStockError();
+      openSheet('us-sheet');
+    }
+
+    async function confirmUseStock(btn) {
+      const id = parseInt($('us-id').value, 10);
+      const it = useStockItems.find(x => Number(x.id) === id);
+      const qty = parseFloat($('us-qty').value);
+      if (!it) { showUseStockError('That item is no longer available. Close this and refresh the list.'); return; }
+      if (!(qty > 0)) { showUseStockError('Enter a quantity greater than 0.'); return; }
+      hideUseStockError();
+
+      const note = $('us-note').value.trim();
+      // This string becomes stock_transactions.reference, which is the note
+      // column on the Stock History screen. The cashier's name is already on the
+      // row; where the deduction came from is not, so say it here.
+      const purpose = note ? `Used at POS till — ${note}` : 'Used at POS till';
+      const unit = it.unit || '';
+
+      // withBusy IS the double-tap guard: it marks the button data-busy, disables
+      // it and refuses re-entry until the request settles, so five taps send
+      // exactly one POST. It also toasts anything that escapes below.
+      await withBusy(btn, async () => {
+        try {
+          await api('/api/stock/usage', {
+            method: 'POST',
+            body: { items: [{ stock_item_id: id, quantity: qty }], purpose },
+          });
+        } catch (err) {
+          // An overdraw is a 400 with the server's own message ("flour is out of
+          // stock (need 5, have 3)"). Show exactly that and leave the sheet — and
+          // everything typed into it — alone so the quantity can be fixed.
+          showUseStockError((err && err.message) || 'Could not record usage.');
+          return;
+        }
+        closeSheet('us-sheet');
+        // Refresh first, then name the figure the server now holds.
+        await loadUseStock();
+        const fresh = useStockItems.find(x => Number(x.id) === id);
+        const remaining = qtyText(fresh ? fresh.quantity : (Number(it.quantity) || 0) - qty);
+        toast(`Used ${qtyText(qty)} ${unit} of ${it.name} — ${remaining} ${unit} left`.replace(/ +/g, ' '));
+      }, 'Recording…');
     }
 
     load();
