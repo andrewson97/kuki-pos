@@ -78,6 +78,97 @@ function getPendingExpenseCountSince(since: string): number {
   return row.count;
 }
 
+/**
+ * Deposits taken on pre-orders in CASH since the shift opened.
+ *
+ * This is cash in the drawer that is NOT a sale: no bill exists for it, so
+ * getCashSalesSince() cannot see it, and before this line existed every
+ * deposit the shop took showed up at close as an unexplained cash SURPLUS.
+ *
+ * Only payment_method = 'cash' counts — a card or UPI deposit never reaches the
+ * drawer. Compared on created_at, not paid_on, for the same reason as sales and
+ * expenses above: a shift may span midnight, and what matters is "since this
+ * drawer was counted open", not "today's date".
+ */
+function getDepositsTakenSince(since: string): number {
+  const db = getDb();
+  const row = db.query(`
+    SELECT COALESCE(SUM(amount), 0) as total
+    FROM pre_order_payments
+    WHERE payment_method = 'cash' AND created_at >= ?
+  `).get(since) as { total: number };
+  return row.total;
+}
+
+/**
+ * The other half of the same term, and without it the variance would simply
+ * move to collection day instead of being fixed.
+ *
+ * When a pre-order is collected it is rung up as an ordinary bill for the FULL
+ * value of the cake (that is what keeps the day's SALES right). But the cashier
+ * only takes the BALANCE at the counter — the rest arrived days ago as a
+ * deposit, and was already counted in the drawer on that day. So for a CASH
+ * collection bill, getCashSalesSince() over-states today's drawer by exactly
+ * what had already been paid on that order, and that amount is subtracted back
+ * out here.
+ *
+ * Summed over ALL payment methods, not just cash: the over-statement being
+ * corrected is in the bill's total, whatever method the earlier deposit used. A
+ * card deposit was never added by getDepositsTakenSince(), and it is not in the
+ * drawer now either — but the cash bill counts it, so it still has to come off.
+ *
+ * Restricted to bills whose own payment_method is 'cash' and whose status is
+ * one getCashSalesSince() counts, so this only ever cancels something that was
+ * actually added.
+ *
+ * Note on the invariant it relies on: pre_order_payments holds PRE-collection
+ * payments only. Collecting writes no payment row (the bill records the money),
+ * and POST /api/preorders/:id/payments refuses an order that is already
+ * collected — so every row joined here predates its bill.
+ */
+function getDepositsAppliedSince(since: string): number {
+  const db = getDb();
+  const row = db.query(`
+    SELECT COALESCE(SUM(pop.amount), 0) as total
+    FROM pre_order_payments pop
+    JOIN pre_orders po ON po.id = pop.pre_order_id
+    JOIN bills b ON b.id = po.bill_id
+    WHERE b.payment_method = 'cash'
+      AND b.status IN ('completed', 'refunded')
+      AND b.created_at >= ?
+  `).get(since) as { total: number };
+  return row.total;
+}
+
+/**
+ * Why a cash movement must be refused right now, or null if it may proceed.
+ *
+ * The same rule POST /api/pos/bill enforces inline, exposed as a function so
+ * that the OTHER places money enters this drawer — a pre-order deposit, a
+ * pre-order collection — are governed by one rule instead of three copies of
+ * it. Returns null when enforce_cash_shift is off, so the setting keeps
+ * meaning exactly what it meant before.
+ */
+export function cashShiftBlockReason(): string | null {
+  const db = getDb();
+  const setting = db.query("SELECT value FROM settings WHERE key = 'enforce_cash_shift'").get() as
+    | { value: string }
+    | null;
+  if ((setting?.value ?? "1") !== "1") return null;
+
+  const open = getCurrentOpenShift();
+  if (!open) {
+    const everOpened = db.query("SELECT id FROM cash_counts WHERE count_type = 'open' LIMIT 1").get();
+    return everOpened
+      ? "The cash shift has been closed. Open a new shift on the Cash Drawer page to continue."
+      : "Cash drawer not opened. Record opening float on the Cash Drawer page before taking money.";
+  }
+  if (open.count_date !== todayDate()) {
+    return `A shift from ${open.count_date} is still open. Close it on the Cash Drawer page before taking today's money.`;
+  }
+  return null;
+}
+
 cash.get("/today", (c) => {
   const date = todayDate();
   const open = getCurrentOpenShift();
@@ -90,7 +181,19 @@ cash.get("/today", (c) => {
   const cash_sales = getCashSalesSince(since);
   const cash_refunds = getCashRefundsSince(since);
   const cash_expenses = getCashExpensesSince(since);
+  // Pre-order deposits: cash in the drawer that is not a sale (+), and the part
+  // of today's cash bills that was already paid as a deposit earlier (-). See
+  // the two helpers above; the close below applies exactly these figures.
+  const deposits_taken = getDepositsTakenSince(since);
+  const deposits_applied = getDepositsAppliedSince(since);
   const pending_expenses = open ? getPendingExpenseCountSince(open.created_at) : 0;
+
+  // What a close right now would expect to find in the drawer. Returned so the
+  // close screen can show the running figure and its parts without having to
+  // re-derive the formula in the browser.
+  const expected_now = open
+    ? (open.total_amount || 0) + cash_sales - cash_refunds - cash_expenses + deposits_taken - deposits_applied
+    : 0;
 
   // Surface whether the open shift is from a prior day (cashier must close it
   // before starting fresh today).
@@ -106,6 +209,9 @@ cash.get("/today", (c) => {
     cash_sales,
     cash_refunds,
     cash_expenses,
+    deposits_taken,
+    deposits_applied,
+    expected_now,
     pending_expenses,
   });
 });
@@ -152,7 +258,22 @@ cash.post("/close", async (c) => {
   const cashSales = getCashSalesSince(since);
   const cashRefunds = getCashRefundsSince(since);
   const cashExpenses = getCashExpensesSince(since);
-  const expected = opening + cashSales - cashRefunds - cashExpenses;
+  // Pre-order deposits. Two parts of one term, both needed:
+  //   + depositsTaken   cash handed over for a future cake. Real money in the
+  //                     drawer with no bill behind it, so without this it
+  //                     looked like a surplus.
+  //   - depositsApplied the share of today's CASH collection bills that was
+  //                     already paid before today. cashSales counts those bills
+  //                     at their full value (which is what keeps the day's
+  //                     SALES honest), but only the balance came over the
+  //                     counter today — so without this the variance would just
+  //                     have moved to collection day.
+  // Nothing else in this formula changes, and neither part is derived from the
+  // other: a deposit taken and collected in the same shift nets to the bill
+  // total, which is exactly what the drawer received.
+  const depositsTaken = getDepositsTakenSince(since);
+  const depositsApplied = getDepositsAppliedSince(since);
+  const expected = opening + cashSales - cashRefunds - cashExpenses + depositsTaken - depositsApplied;
   const counted = computeTotal(body);
   const variance = counted - expected;
 
@@ -165,7 +286,23 @@ cash.post("/close", async (c) => {
     body.notes_500 || 0, body.notes_1000 || 0, body.notes_2000 || 0, body.notes_5000 || 0,
     counted, expected, variance, body.notes || null
   );
-  return c.json({ success: true, total_amount: counted, expected_amount: expected, variance });
+  // The breakdown comes back so the close screen can show WHY expected is what
+  // it is. expected_amount / variance keep their existing meaning and are the
+  // only figures stored on the cash_counts row.
+  return c.json({
+    success: true,
+    total_amount: counted,
+    expected_amount: expected,
+    variance,
+    breakdown: {
+      opening,
+      cash_sales: cashSales,
+      cash_refunds: cashRefunds,
+      cash_expenses: cashExpenses,
+      deposits_taken: depositsTaken,
+      deposits_applied: depositsApplied,
+    },
+  });
 });
 
 cash.get("/history", (c) => {

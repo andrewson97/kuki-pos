@@ -13,6 +13,7 @@ import productRoutes from "./routes/products";
 import stockRoutes from "./routes/stock";
 import recipeRoutes from "./routes/recipes";
 import customerRoutes from "./routes/customers";
+import preorderRoutes from "./routes/preorders";
 import expenseRoutes from "./routes/expenses";
 import incomeRoutes from "./routes/income";
 import reportRoutes from "./routes/reports";
@@ -77,6 +78,7 @@ app.route("/api/products", productRoutes);
 app.route("/api/stock", stockRoutes);
 app.route("/api/recipes", recipeRoutes);
 app.route("/api/customers", customerRoutes);
+app.route("/api/preorders", preorderRoutes);
 app.route("/api/expenses", expenseRoutes);
 app.route("/api/income", incomeRoutes);
 app.route("/api/reports", reportRoutes);
@@ -138,6 +140,25 @@ for (const page of pages) {
   app.get(page.path, async (c) => {
     const content = await Bun.file(page.file).text();
     return c.html(content);
+  });
+}
+
+// The pre-orders screen. Separate from the list above because the view is being
+// built alongside this API: until views/preorders.html lands, Bun.file().text()
+// would throw and the page would answer with the generic 500 from app.onError,
+// which says nothing useful. Check first and say what is actually missing. The
+// route is registered now so the screen works the moment the file appears.
+const PREORDER_PAGES: Record<string, string> = {
+  "/preorders": "views/preorders.html",
+  "/m/preorders": "views/m-preorders.html",
+};
+for (const [path, file] of Object.entries(PREORDER_PAGES)) {
+  app.get(path, async (c) => {
+    const f = Bun.file(file);
+    if (!(await f.exists())) {
+      return c.html(`<h1>Pre-orders screen not installed</h1><p>Expected <code>${file}</code>. The API is live at <code>/api/preorders</code>.</p>`, 404);
+    }
+    return c.html(await f.text());
   });
 }
 

@@ -283,6 +283,133 @@ export function runMigrations(): void {
       notes TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
+
+    -- --- Pre-orders -------------------------------------------------------
+    -- A customer orders ahead: a custom birthday cake described in words,
+    -- and/or bulk savoury items off the product list, for collection on a
+    -- future date, usually leaving a deposit.
+    --
+    -- A pre-order RESERVES NO STOCK, on purpose. A cake due next Saturday must
+    -- not lock today's shelf, so there is deliberately no row written to
+    -- stock_reservations here and no link to one. Stock moves exactly once, at
+    -- collection, when the order is rung up as an ordinary bill -- see the
+    -- collect route in src/routes/preorders.ts.
+    --
+    -- customer_id is NOT NULL and a real foreign key: there are no walk-in
+    -- pre-orders. Somebody has to be phoned if the cake is late, so the order
+    -- must point at a customer row that already exists.
+    --
+    -- collection_date is a BUSINESS date ('YYYY-MM-DD', the same convention as
+    -- bills.bill_date / todayDate()), never a timestamp: the production list is
+    -- "what leaves the shop today". collection_time is free text and nullable
+    -- because "morning" or "after 4" is what customers actually say.
+    --
+    -- total is a STORED CACHE of SUM(quantity * unit_price) over
+    -- pre_order_items, rewritten by the server every time the lines change and
+    -- never taken from a client. It exists so the listing can show money
+    -- without aggregating the children for every row; pre_order_items stays the
+    -- source of truth, and nothing reads the cached total to decide what to charge.
+    --
+    -- bill_id is NULL until collection, then points at the one bill that sold
+    -- this order. That link is what makes the pair idempotent: see the UNIQUE
+    -- index below, and the bills(cart_id) guard that backs it.
+    CREATE TABLE IF NOT EXISTS pre_orders (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      customer_id INTEGER NOT NULL REFERENCES customers(id),
+      collection_date TEXT NOT NULL,
+      collection_time TEXT,
+      notes TEXT,
+      status TEXT NOT NULL DEFAULT 'taken' CHECK(status IN ('taken', 'ready', 'collected', 'cancelled')),
+      total REAL NOT NULL DEFAULT 0,
+      user_id INTEGER REFERENCES users(id),
+      bill_id INTEGER REFERENCES bills(id),
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    -- The production view ("what is due today / this week") is the single most
+    -- frequent read, and it filters on collection_date alone or on
+    -- collection_date + status ("still owed to a customer"), so both are
+    -- indexed. The composite is status-first because status is the equality
+    -- term and collection_date the range term.
+    CREATE INDEX IF NOT EXISTS idx_pre_orders_collection_date ON pre_orders(collection_date);
+    CREATE INDEX IF NOT EXISTS idx_pre_orders_status_date ON pre_orders(status, collection_date);
+    CREATE INDEX IF NOT EXISTS idx_pre_orders_customer ON pre_orders(customer_id);
+
+    -- One bill can settle at most one pre-order. Partial (WHERE bill_id IS NOT
+    -- NULL) because every uncollected order carries NULL and those must not
+    -- collide, and because it doubles as the "which order did this bill
+    -- settle?" lookup, which only ever searches non-NULL values. Together with
+    -- the deterministic cart_id used at collection ('preorder-<id>', which the
+    -- UNIQUE index on bills(cart_id) guards) this makes a double-tapped
+    -- Collect physically unable to produce two bills or two links.
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_pre_orders_bill ON pre_orders(bill_id) WHERE bill_id IS NOT NULL;
+
+    -- A line is EITHER a catalogue product OR a free-text custom line, and both
+    -- kinds live in one order ("one 2kg chocolate cake + 50 fish buns").
+    --
+    -- product_id nullable is the whole point. A custom cake is not in the
+    -- catalogue and must never be added to it just to be sold once: it has no
+    -- recipe, no cost price and no stock. So product_id IS NULL and description
+    -- carries the agreed specification in the customer's own words ("2kg
+    -- chocolate cake, butterscotch filling, Happy Birthday Amal"), with its own
+    -- negotiated unit_price.
+    --
+    -- description is NOT NULL for BOTH kinds: for a catalogue line it is the
+    -- product name as quoted to the customer, snapshotted here so the order
+    -- still reads correctly if the product is later renamed, discontinued or
+    -- repriced -- the same reasoning as bill_items.product_name.
+    --
+    -- unit_price is stored per line rather than read from the product at
+    -- collection because bulk is negotiated at this counter: 50 fish buns at an
+    -- agreed rate is the normal case, and the price the customer was quoted
+    -- weeks ago is the price they must be charged.
+    --
+    -- quantity is INTEGER to match bill_items.quantity, which these lines
+    -- become. Weight lives in the description ("2kg chocolate cake"), not in
+    -- the quantity: the shop sells one cake, not two kilograms of cake.
+    CREATE TABLE IF NOT EXISTS pre_order_items (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      pre_order_id INTEGER NOT NULL REFERENCES pre_orders(id) ON DELETE CASCADE,
+      product_id INTEGER REFERENCES products(id),
+      description TEXT NOT NULL,
+      quantity INTEGER NOT NULL DEFAULT 1 CHECK(quantity > 0),
+      unit_price REAL NOT NULL DEFAULT 0 CHECK(unit_price >= 0)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_pre_order_items_order ON pre_order_items(pre_order_id);
+
+    -- Deposits and later top-ups: part-payment taken BEFORE collection.
+    --
+    -- A table, not a column on pre_orders, for two reasons the shop actually
+    -- runs into. First, the close-of-day cash reconciliation needs deposits BY
+    -- DATE: a deposit is cash in the drawer that is not a sale, so the drawer
+    -- cannot be reconciled from one running "deposit_paid" figure that says
+    -- nothing about when the money arrived. Second, customers top up -- half
+    -- now, the rest on Friday, the balance on collection -- and each of those
+    -- is its own event with its own date, method and cashier.
+    --
+    -- paid_on is the BUSINESS date (todayDate()), which is what a deposits
+    -- report groups by; created_at is the wall clock, which is what a shift
+    -- that spans midnight compares against (see src/routes/cash.ts).
+    --
+    -- Rows here are ONLY pre-collection payments. The balance taken at the till
+    -- on collection day is recorded by the BILL and never duplicated here --
+    -- that is what stops the deposit being counted twice.
+    CREATE TABLE IF NOT EXISTS pre_order_payments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      pre_order_id INTEGER NOT NULL REFERENCES pre_orders(id) ON DELETE CASCADE,
+      amount REAL NOT NULL CHECK(amount > 0),
+      payment_method TEXT NOT NULL DEFAULT 'cash' CHECK(payment_method IN ('cash', 'card', 'upi')),
+      paid_on TEXT NOT NULL DEFAULT (date('now')),
+      user_id INTEGER REFERENCES users(id),
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    -- paid_on: the cash reconciliation line and any "deposits taken" report.
+    -- pre_order_id: the balance of one order, read on every order screen.
+    CREATE INDEX IF NOT EXISTS idx_pre_order_payments_paid_on ON pre_order_payments(paid_on);
+    CREATE INDEX IF NOT EXISTS idx_pre_order_payments_order ON pre_order_payments(pre_order_id);
   `);
 
   // Incremental migrations for existing databases
