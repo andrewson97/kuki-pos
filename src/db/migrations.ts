@@ -249,6 +249,37 @@ export function runMigrations(): void {
   // Added as a column, never by rebuilding the table (production data lives on
   // a fly.io volume).
   addColumn("products", "stock_updated_at", "TEXT");
+  // The till's cart id, carried onto the bill it became. This is the server's
+  // idempotency key for checkout: a cart id is minted per customer and the till
+  // rotates to a fresh one the moment a sale completes (startNewCart() in
+  // views/pos.html), so the SAME cart id arriving twice is a RESUBMISSION of one
+  // sale, never two sales. See createBill() in src/services/billing.ts.
+  //
+  // Nullable on purpose: every row that exists before this migration gets NULL,
+  // and a caller that sends no cart_id still bills normally (NULL = "no key, no
+  // dedupe"). Added as a column, never by rebuilding the table — production data
+  // lives on a fly.io volume.
+  addColumn("bills", "cart_id", "TEXT");
+  // The hard guarantee behind the replay check in createBill(): the database
+  // itself refuses a second bill for the same cart. PARTIAL (WHERE cart_id IS
+  // NOT NULL) for two reasons:
+  //   1. NULLs. Plain SQLite UNIQUE already treats NULLs as distinct, so many
+  //      NULL rows are permitted either way — but spelling the predicate out
+  //      makes that independent of that rule, and it also keeps the historical
+  //      rows (all NULL) out of the index entirely rather than indexing them.
+  //   2. It doubles as the lookup index for "has this cart already billed?",
+  //      which only ever searches non-NULL values.
+  // Wrapped, and loud if it fails: billing must not be dead on startup, but a
+  // missing guarantee must not be silent either (createBill() still checks
+  // in-transaction, which covers this single-process deployment on its own).
+  try {
+    db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_bills_cart_id ON bills(cart_id) WHERE cart_id IS NOT NULL");
+  } catch (err: any) {
+    console.error(
+      "[migration] could not create UNIQUE index idx_bills_cart_id on bills(cart_id) — duplicate-bill protection falls back to the in-transaction check only:",
+      err?.message || err
+    );
+  }
 
   // One-shot: merge product categories that differ only by casing.
   // For each lowercase key, pick the most common casing as canonical.

@@ -18,6 +18,52 @@ interface BillItem {
   original_price?: number;
 }
 
+/**
+ * What createBill() returns — identical field-for-field whether the sale was
+ * just written or an existing one is being replayed, so the caller can build the
+ * same response either way and only `replayed` tells them apart.
+ */
+export interface CreatedBill {
+  id: number;
+  token_number: number;
+  total: number;
+  bill_date: string;
+  /** true when this bill already existed and is being returned again. */
+  replayed: boolean;
+}
+
+// The lookup behind the whole idempotency scheme. Reads only the four fields a
+// caller gets back, so the replay path and the fresh path return the same shape.
+const SELECT_BILL_BY_CART = "SELECT id, token_number, total, bill_date FROM bills WHERE cart_id = ?";
+
+/**
+ * Has this cart already produced a bill? Returns that bill in the CreatedBill
+ * shape (with replayed = true), or null.
+ *
+ * ADVISORY when called outside a transaction: a caller may use it to decide
+ * whether a request is a resubmission, but it must NOT be used to decide whether
+ * to write — createBill() repeats the check inside its own transaction, which is
+ * the only place the answer cannot go stale.
+ */
+export function findBillByCartId(cartId: string | null | undefined): CreatedBill | null {
+  const id = String(cartId || "").trim();
+  if (!id) return null;
+  const row = getDb().query(SELECT_BILL_BY_CART).get(id) as any;
+  return row ? { id: row.id, token_number: row.token_number, total: row.total, bill_date: row.bill_date, replayed: true } : null;
+}
+
+/**
+ * Did this error come from the partial UNIQUE index on bills(cart_id)?
+ *
+ * SQLite words it as "UNIQUE constraint failed: bills.cart_id" for a plain
+ * index and "UNIQUE constraint failed: index 'idx_bills_cart_id'" for a partial
+ * one; both mention cart_id, and nothing else unique in this transaction does.
+ */
+function isDuplicateCartId(err: any): boolean {
+  const msg = String(err?.message || "");
+  return /UNIQUE constraint failed/i.test(msg) && /cart_id/i.test(msg);
+}
+
 interface CreateBillParams {
   items: BillItem[];
   customer_id?: number | null;
@@ -29,10 +75,14 @@ interface CreateBillParams {
   // The till's cart id, when it has one. Optional so existing callers that
   // never held stock keep working — but without it this sale is treated as
   // "not the holder", so any hold on the goods will block it.
+  //
+  // It is also this sale's IDEMPOTENCY KEY: a cart id that already has a bill
+  // replays that bill instead of writing a second one. See the gate at the top
+  // of the transaction below.
   cart_id?: string | null;
 }
 
-export function createBill(params: CreateBillParams): any {
+export function createBill(params: CreateBillParams): CreatedBill {
   const db = getDb();
   const { items, customer_id, discount, tax_rate, payment_method, user_id, amount_given, cart_id } = params;
   const cartId = String(cart_id || "").trim();
@@ -47,8 +97,8 @@ export function createBill(params: CreateBillParams): any {
   const changeGiven = amount_given != null ? Math.max(0, amount_given - total) : null;
 
   const insertBill = db.query(`
-    INSERT INTO bills (token_number, bill_date, customer_id, subtotal, discount, tax_rate, tax_amount, total, payment_method, status, user_id, amount_given, change_given)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'completed', ?, ?, ?)
+    INSERT INTO bills (token_number, bill_date, customer_id, subtotal, discount, tax_rate, tax_amount, total, payment_method, status, user_id, amount_given, change_given, cart_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'completed', ?, ?, ?, ?)
   `);
 
   const insertItem = db.query(`
@@ -56,7 +106,45 @@ export function createBill(params: CreateBillParams): any {
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
-  const transaction = db.transaction(() => {
+  const transaction = db.transaction((): CreatedBill => {
+    // --- Duplicate-bill gate (idempotency) ----------------------------------
+    // FIRST thing in the transaction, before the stock check, before the insert,
+    // before anything is deducted or released. A resubmission of a sale that is
+    // already recorded must be a pure read: it must not fail the stock check
+    // (the goods it is asking for were consumed by its own first attempt), must
+    // not burn a token, must not deduct again — and must not error, because an
+    // error reads to the cashier as "the sale failed", and they ring it up a
+    // third time. So: return the bill that already exists.
+    //
+    // Keyed on cart_id, NOT on cart contents: two customers each buying one
+    // cupcake seconds apart is ordinary trade at this counter, and refusing the
+    // second one would be a worse bug than the one this guards against.
+    if (cartId) {
+      const existing = db.query(SELECT_BILL_BY_CART).get(cartId) as any;
+      if (existing) {
+        // Defensive, and cheap: this cart is sold, so any hold standing against
+        // it is meaningless. Normally the first attempt already released them —
+        // but a hold sync that was still in flight when that sale committed can
+        // land just after it and strand stock under a cart nobody can see again.
+        releaseCartReservations(cartId);
+        // Logged under its own action, never 'created_bill': this is not a sale,
+        // and anything counting sales from the log (or the stock history, which
+        // whitelists action names) must not see one. It is recorded at all so the
+        // owner can see duplicate submissions happening instead of guessing.
+        db.query("INSERT INTO activity_log (user_id, action, details) VALUES (?, 'duplicate_bill_replayed', ?)").run(
+          user_id,
+          JSON.stringify({ bill_id: existing.id, token: existing.token_number, total: existing.total, cart_id: cartId })
+        );
+        return {
+          id: existing.id,
+          token_number: existing.token_number,
+          total: existing.total,
+          bill_date: existing.bill_date,
+          replayed: true,
+        };
+      }
+    }
+
     // Aggregate stock needs across all items — a product's own count + any
     // components (composite/BoM). Same underlying product referenced multiple
     // times in the cart or across item+component sums correctly.
@@ -78,7 +166,11 @@ export function createBill(params: CreateBillParams): any {
     const result = insertBill.run(
       token_number, bill_date, customer_id || null,
       subtotal, discount, tax_rate, tax_amount, total,
-      payment_method, user_id, amount_given ?? null, changeGiven
+      payment_method, user_id, amount_given ?? null, changeGiven,
+      // Empty string would make every keyless till collide with every other one
+      // under the UNIQUE index, so "no cart id" is stored as NULL — which the
+      // index excludes, and NULLs never collide.
+      cartId || null
     );
     const billId = Number(result.lastInsertRowid);
 
@@ -109,11 +201,27 @@ export function createBill(params: CreateBillParams): any {
       user_id, JSON.stringify({ bill_id: billId, token: token_number, total })
     );
 
-    return { id: billId, token_number, total, bill_date };
+    return { id: billId, token_number, total, bill_date, replayed: false };
   });
 
-  // BEGIN IMMEDIATE: this transaction check-then-writes against both products
-  // and stock_reservations, so it takes its write lock up front rather than
-  // trying to upgrade one half-way through.
-  return transaction.immediate();
+  // BEGIN IMMEDIATE: this transaction check-then-writes against products,
+  // stock_reservations AND bills.cart_id, so it takes its write lock up front
+  // rather than trying to upgrade one half-way through. That lock is what makes
+  // the duplicate-bill gate above race-safe: the check and the insert are one
+  // atomic unit, so two simultaneous submissions of the same cart_id cannot both
+  // see "no bill yet" — one writes, the other replays what the first wrote.
+  try {
+    return transaction.immediate();
+  } catch (err: any) {
+    // Belt and braces. If the write lost anyway — a second process, a future
+    // worker, anything the in-transaction check cannot see — the partial UNIQUE
+    // index on bills(cart_id) rejected the INSERT and rolled this transaction
+    // back whole (no token, no deduction, no release). The winning bill is on
+    // disk, so this is still a replay, not a failure.
+    if (cartId && isDuplicateCartId(err)) {
+      const existing = findBillByCartId(cartId);
+      if (existing) return existing;
+    }
+    throw err;
+  }
 }

@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { getDb } from "../db/database";
 import { getUser } from "../middleware/auth";
-import { createBill, getNextTokenNumber } from "../services/billing";
+import { createBill, findBillByCartId, getNextTokenNumber } from "../services/billing";
 import { getSettings, buildReceiptText, buildKitchenTicket, buildProformaText, queuePrint } from "../services/printer";
 import { restoreStockForBill } from "../services/stock";
 import {
@@ -31,10 +31,25 @@ pos.post("/bill", async (c) => {
   const settings = getSettings();
   const tax_rate = body.tax_rate ?? parseFloat(settings.tax_rate || "0");
 
+  // Server-side duplicate-bill protection. The client guard (withBusy + the
+  // checkoutInProgress flag) lives in one browser tab; two tabs, a reload
+  // mid-request, or a connection that retries can still post the same sale
+  // twice. The cart id is the idempotency key — see createBill().
+  //
+  // This lookup is ADVISORY ONLY: it decides nothing about writing (createBill()
+  // repeats the check inside its transaction, where it cannot go stale). It is
+  // read here for one reason: a resubmission of a sale that is ALREADY recorded
+  // writes nothing, so no policy gate below should turn it into an error. The
+  // cash-shift rule exists to stop new money being taken outside an open shift;
+  // handing back a receipt for money already banked is not that, and failing it
+  // would leave the cashier believing the sale never happened.
+  const cartId = String(body.cart_id || "").trim();
+  const knownReplay = findBillByCartId(cartId) !== null;
+
   // Enforce cash shift state. A shift is "open" when the most recent 'open'
   // record (across all dates) has no 'close' recorded after it. Shifts intentionally
   // span midnight so the cashier must explicitly close before starting fresh.
-  if (settings.enforce_cash_shift === "1") {
+  if (settings.enforce_cash_shift === "1" && !knownReplay) {
     const db = getDb();
     const today = todayDate();
     const latestOpen = db.query(
@@ -66,12 +81,19 @@ pos.post("/bill", async (c) => {
       user_id: user.id,
       amount_given: body.amount_given ?? null,
       // Threaded through so createBill() can release this cart's holds in the
-      // same transaction as the stock deduction.
-      cart_id: body.cart_id || null,
+      // same transaction as the stock deduction — and so it can recognise a
+      // resubmission of this same cart and replay its bill instead of writing a
+      // second one.
+      cart_id: cartId || null,
     });
   } catch (err: any) {
     return c.json({ error: err?.message || "Failed to create bill" }, 400);
   }
+
+  // A resubmission got its own bill back instead of a second one. Everything
+  // below still runs: the till is waiting for a receipt and must get the real
+  // one, and it is read out of the stored bill either way.
+  const isReplay = bill.replayed === true;
 
   // Generate receipt
   const db = getDb();
@@ -83,12 +105,22 @@ pos.post("/bill", async (c) => {
     customerName = cust?.name;
   }
 
+  // On a replay the slip must describe the SALE, not this request: the time the
+  // money was taken and the cashier who took it, exactly as the reprint route
+  // does. For a fresh sale both are "now" and "me", so nothing changes there.
+  const billDateText = formatDateTime(isReplay ? fullBill.created_at : new Date().toISOString());
+  let cashierName = user.full_name;
+  if (isReplay && fullBill.user_id) {
+    const orig = db.query("SELECT full_name FROM users WHERE id = ?").get(fullBill.user_id) as any;
+    if (orig?.full_name) cashierName = orig.full_name;
+  }
+
   const receiptData = {
     shopName: settings.shop_name || "My Cake Shop",
     shopAddress: settings.shop_address || "",
     shopPhone: settings.shop_phone || "",
     tokenNumber: bill.token_number,
-    billDate: formatDateTime(new Date().toISOString()),
+    billDate: billDateText,
     items: billItems.map((i: any) => ({ name: i.product_name, qty: i.quantity, price: i.unit_price, total: i.total, original_price: i.original_price })),
     subtotal: fullBill.subtotal,
     discount: fullBill.discount,
@@ -96,7 +128,7 @@ pos.post("/bill", async (c) => {
     taxAmount: fullBill.tax_amount,
     total: fullBill.total,
     paymentMethod: fullBill.payment_method,
-    cashierName: user.full_name,
+    cashierName,
     customerName,
     amountGiven: fullBill.amount_given,
     changeGiven: fullBill.change_given,
@@ -108,15 +140,30 @@ pos.post("/bill", async (c) => {
   // screen — that wait is what made them tap Pay twice.
   const receiptText = buildReceiptText(receiptData);
   const kitchenText = buildKitchenTicket(receiptData);
-  queuePrint(receiptText).then((r) => {
-    if (!r.success) console.error(`[print] bill #${bill.id} token #${bill.token_number}: ${r.error}`);
-  }).catch((err: any) => {
-    console.error(`[print] bill #${bill.id} token #${bill.token_number}: ${err?.message || err}`);
-  });
+  // A replay does NOT re-queue the device write. The sale that was actually
+  // recorded already queued its slip, and a second identical slip bearing the
+  // same token is worse than no slip: two pieces of paper for one sale is
+  // exactly the confusion this whole guard exists to prevent, and the counter
+  // reconciles by slip. The text still comes back in the response, so the till
+  // shows the receipt, and /api/pos/bills/:id/receipt reprints on demand.
+  if (!isReplay) {
+    queuePrint(receiptText).then((r) => {
+      if (!r.success) console.error(`[print] bill #${bill.id} token #${bill.token_number}: ${r.error}`);
+    }).catch((err: any) => {
+      console.error(`[print] bill #${bill.id} token #${bill.token_number}: ${err?.message || err}`);
+    });
+  } else {
+    console.warn(`[pos] duplicate submission for cart ${cartId} — replayed bill #${bill.id} token #${bill.token_number}, no second bill written`);
+  }
 
+  // Same keys, same types, fresh sale or replay — the till cannot tell them
+  // apart unless it looks at `replayed`, and nothing in views/pos.html or
+  // views/m-pos.html does: they read token_number, total, receipt_text and
+  // kitchen_text, all of which describe the one real bill.
   // print_queued, not print_success: the write hasn't happened yet, so we can't
-  // honestly report its outcome. Nothing in the UI reads it either way.
-  return c.json({ ...bill, receipt_text: receiptText, kitchen_text: kitchenText, print_queued: true });
+  // honestly report its outcome (and on a replay we did not queue one at all, so
+  // it is false — nothing in the UI reads it either way).
+  return c.json({ ...bill, receipt_text: receiptText, kitchen_text: kitchenText, print_queued: !isReplay });
 });
 
 // Pre-payment slip. The cashier prints this, hands it over, takes the money and
