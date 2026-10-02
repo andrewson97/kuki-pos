@@ -170,10 +170,15 @@
     <div class="modal-dialog">
       <div class="modal-content">
         <div class="modal-header">
-          <h5 class="modal-title">Bill Created</h5>
+          <h5 class="modal-title" id="receipt-modal-title">Bill Created</h5>
           <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
         </div>
         <div class="modal-body">
+          <!-- Shown ONLY when the server answered with replayed = true: this
+               request was a retry of a sale already on the books, so no new bill
+               was written. Hidden (and the title restored) on every normal sale
+               — checkout() sets both every time, because this modal is reused. -->
+          <div class="alert alert-warning d-none mb-3" id="receipt-replay-notice"></div>
           <div class="text-center mb-3">
             <img src="/public/img/kuki_logo.png" alt="KUKI" style="max-width:140px;max-height:100px;display:block;margin:0 auto 8px;">
             <span class="badge bg-success fs-5" id="receipt-token">Token #001</span>
@@ -1597,19 +1602,58 @@
         }).catch(err => { throw new Error('Failed to create bill: ' + err.message); }), 'Processing...');
         if (!result) return; // failed — withBusy already showed the error toast
 
-        // Bill created successfully — everything below is non-critical
+        // The server answers in one shape for both outcomes, and `replayed`
+        // is the ONLY thing that tells them apart. true means: this request was
+        // a retry of a sale that is already on the books, so NOTHING NEW WAS
+        // WRITTEN and the bill below is the earlier one. Saying "Bill created
+        // successfully" over that is how a lost sale went unnoticed at the
+        // counter, so the wording, the modal title and the toast all change.
+        // A normal sale's wording is untouched.
+        const replayed = result.replayed === true;
+        const tokenLabel = `Token #${String(result.token_number).padStart(3,'0')}`;
+
         // Show receipt
-        document.getElementById('receipt-token').textContent = `Token #${String(result.token_number).padStart(3,'0')}`;
+        document.getElementById('receipt-token').textContent = tokenLabel;
         document.getElementById('receipt-total').textContent = formatCurrency(result.total);
         document.getElementById('receipt-text').textContent = result.receipt_text;
         lastReceiptText = result.receipt_text;
         lastKitchenText = result.kitchen_text || '';
+
+        // Set BOTH branches every time — the modal is reused, so a stale notice
+        // from an earlier replay must never sit over a genuine new sale.
+        const notice = document.getElementById('receipt-replay-notice');
+        const title = document.getElementById('receipt-modal-title');
+        if (replayed) {
+          title.textContent = 'Already Recorded — No New Bill';
+          notice.innerHTML =
+            `<strong>This sale was already recorded as ${tokenLabel}.</strong><br>` +
+            `That request was a retry, so no new bill was created and the customer has not been charged again. ` +
+            `The slip below is that original bill — print it if they need a copy.`;
+          notice.classList.remove('d-none');
+        } else {
+          title.textContent = 'Bill Created';
+          notice.textContent = '';
+          notice.classList.add('d-none');
+        }
+
         new bootstrap.Modal(document.getElementById('receiptModal')).show();
-        showToast('Bill created successfully!');
+        if (replayed) {
+          showToast(
+            `Already recorded — no new bill. This sale is ${tokenLabel}, ${formatCurrency(result.total)}, saved earlier.`,
+            'warning'
+          );
+        } else {
+          showToast('Bill created successfully!');
+        }
 
         // Reset cart and refresh token. The sale released this cart's holds
         // inside its own transaction, so there is nothing to release here — just
         // move on to a fresh id, and re-read the grid now that the stock moved.
+        //
+        // A REPLAY resets too, and that matters: the sale in this cart is on the
+        // books either way, and rotating to a fresh cart id is what stops the
+        // till sitting on a stale id and posting the NEXT customer's sale under
+        // it — the exact sequence that used to swallow a real bill.
         resetCartState();
         startNewCart();
         clearPersistedCart();

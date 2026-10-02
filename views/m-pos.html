@@ -227,7 +227,12 @@
   <div class="sheet" id="receipt-sheet" onclick="if(event.target===this)closeSheet('receipt-sheet')">
     <div class="sheet-inner">
       <div class="sheet-handle"></div>
-      <h3 style="text-align:center;">Sale complete</h3>
+      <h3 style="text-align:center;" id="rec-heading">Sale complete</h3>
+      <!-- Shown ONLY when the server answered with replayed = true: this request
+           was a retry of a sale already on the books, so no new bill was
+           written. checkout() sets the heading AND this block on every sale,
+           because the sheet is reused. -->
+      <div id="rec-replay-note" style="display:none;background:#fef3c7;border:1px solid #f59e0b;border-radius:10px;padding:10px 12px;font-size:0.85rem;line-height:1.45;margin:4px 0 10px;"></div>
       <div style="text-align:center;margin:10px 0;"><span class="badge success" style="font-size:0.95rem;padding:6px 14px;" id="rec-token">Token #001</span></div>
       <div style="text-align:center;font-size:1.6rem;font-weight:700;margin-bottom:10px;" id="rec-total"></div>
       <div class="btn-row">
@@ -1371,16 +1376,50 @@
         }}), 'Processing…');
         if (!result) return; // failed — withBusy already showed the error toast
 
+        // The server answers in one shape for both outcomes, and `replayed` is
+        // the ONLY thing that tells them apart. true means: this request was a
+        // retry of a sale that is already on the books, so NOTHING NEW WAS
+        // WRITTEN and the bill shown is the earlier one. Calling that a
+        // completed sale is how a lost bill went unnoticed at the counter, so
+        // the heading and the toast change. A normal sale's wording is untouched.
+        const replayed = result.replayed === true;
+        const tokenLabel = `Token #${String(result.token_number).padStart(3,'0')}`;
+
         lastReceiptText = result.receipt_text;
         lastKitchenText = result.kitchen_text || '';
-        $('rec-token').textContent = `Token #${String(result.token_number).padStart(3,'0')}`;
+        $('rec-token').textContent = tokenLabel;
         $('rec-total').textContent = fmt(result.total);
+
+        // Set BOTH branches every time — the sheet is reused, so a stale notice
+        // must never sit over a genuine new sale.
+        const note = $('rec-replay-note');
+        if (replayed) {
+          $('rec-heading').textContent = 'Already recorded';
+          note.innerHTML =
+            `<strong>This sale was already recorded as ${tokenLabel}.</strong><br>` +
+            `That request was a retry, so no new bill was created and the customer has not been ` +
+            `charged again. The slip here is that original bill — print it if they need a copy.`;
+          note.style.display = '';
+        } else {
+          $('rec-heading').textContent = 'Sale complete';
+          note.textContent = '';
+          note.style.display = 'none';
+        }
+
         closeSheet('cash-sheet');
         closeSheet('cart-sheet');
         openSheet('receipt-sheet');
+        if (replayed) {
+          toast(`Already recorded — no new bill. This sale is ${tokenLabel}, ${fmt(result.total)}.`);
+        }
         // The sale released this cart's holds inside its own transaction, so
         // there is nothing to release here — just move on to a fresh id, and
         // re-read the grid now that the stock moved.
+        //
+        // A REPLAY resets too, and that matters: the sale in this cart is on the
+        // books either way, and rotating to a fresh cart id is what stops the
+        // till sitting on a stale id and posting the NEXT customer's sale under
+        // it — the exact sequence that used to swallow a real bill.
         resetCartState();
         startNewCart();
         clearPersistedCart();

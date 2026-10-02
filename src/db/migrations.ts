@@ -312,7 +312,7 @@ export function runMigrations(): void {
     --
     -- bill_id is NULL until collection, then points at the one bill that sold
     -- this order. That link is what makes the pair idempotent: see the UNIQUE
-    -- index below, and the bills(cart_id) guard that backs it.
+    -- index below, and the bills(cart_id, cart_fingerprint) guard that backs it.
     CREATE TABLE IF NOT EXISTS pre_orders (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       customer_id INTEGER NOT NULL REFERENCES customers(id),
@@ -341,8 +341,12 @@ export function runMigrations(): void {
     -- collide, and because it doubles as the "which order did this bill
     -- settle?" lookup, which only ever searches non-NULL values. Together with
     -- the deterministic cart_id used at collection ('preorder-<id>', which the
-    -- UNIQUE index on bills(cart_id) guards) this makes a double-tapped
-    -- Collect physically unable to produce two bills or two links.
+    -- UNIQUE index on bills(cart_id, cart_fingerprint) guards) this makes a
+    -- double-tapped Collect physically unable to produce two bills or two
+    -- links: a double tap resubmits the IDENTICAL collection, so it hashes to
+    -- the same fingerprint and replays. (A second Collect that is not identical
+    -- cannot get that far anyway: POST /:id/collect refuses an order whose
+    -- status is already 'collected' with a 409 before any bill is written.)
     CREATE UNIQUE INDEX IF NOT EXISTS idx_pre_orders_bill ON pre_orders(bill_id) WHERE bill_id IS NOT NULL;
 
     -- A line is EITHER a catalogue product OR a free-text custom line, and both
@@ -452,34 +456,70 @@ export function runMigrations(): void {
   // Added as a column, never by rebuilding the table (production data lives on
   // a fly.io volume).
   addColumn("products", "stock_updated_at", "TEXT");
-  // The till's cart id, carried onto the bill it became. This is the server's
-  // idempotency key for checkout: a cart id is minted per customer and the till
-  // rotates to a fresh one the moment a sale completes (startNewCart() in
-  // views/pos.html), so the SAME cart id arriving twice is a RESUBMISSION of one
-  // sale, never two sales. See createBill() in src/services/billing.ts.
+  // The till's cart id, carried onto the bill it became. HALF of the server's
+  // idempotency key for checkout; bills.cart_fingerprint below is the other
+  // half. A cart id is minted per customer and the till rotates to a fresh one
+  // when a sale completes (startNewCart() in views/pos.html) — but ONLY on a
+  // successful response, so a response lost to flaky wifi, a cold start or a
+  // closed tab leaves the till on the old id and the NEXT customer's sale
+  // arrives under it. The cart id alone therefore cannot mean "this is the same
+  // sale". See createBill() in src/services/billing.ts.
   //
   // Nullable on purpose: every row that exists before this migration gets NULL,
   // and a caller that sends no cart_id still bills normally (NULL = "no key, no
   // dedupe"). Added as a column, never by rebuilding the table — production data
   // lives on a fly.io volume.
   addColumn("bills", "cart_id", "TEXT");
+  // A hash of WHAT WAS SOLD: the lines (product, name, quantity, unit price,
+  // original price), the customer, the discount, the resolved tax rate, the
+  // payment method and the cash tendered. Built by saleFingerprint() in
+  // src/services/billing.ts, which is the one definition of it.
+  //
+  // This is what makes the idempotency key identify the SALE and not merely the
+  // cart. Two submissions under the same cart id replay each other only when
+  // they are the same sale; a different sale that happens to arrive under a
+  // stale cart id hashes differently and is billed normally instead of being
+  // silently swallowed (which is how real takings were lost).
+  //
+  // Nullable on purpose, and that nullability is deliberate migration safety:
+  // every bill written BEFORE this migration has a cart_id but no fingerprint,
+  // and in SQLite a NULL in an indexed column makes a row distinct from every
+  // other row, so those legacy rows can never collide with one another nor
+  // block a new bill under the same cart id. Every bill written AFTER it always
+  // carries a fingerprint whenever it carries a cart id (createBill() computes
+  // one unconditionally), so the pair-uniqueness below is fully effective going
+  // forward. Added as a column, never by rebuilding the table.
+  addColumn("bills", "cart_fingerprint", "TEXT");
   // The hard guarantee behind the replay check in createBill(): the database
-  // itself refuses a second bill for the same cart. PARTIAL (WHERE cart_id IS
-  // NOT NULL) for two reasons:
-  //   1. NULLs. Plain SQLite UNIQUE already treats NULLs as distinct, so many
-  //      NULL rows are permitted either way — but spelling the predicate out
-  //      makes that independent of that rule, and it also keeps the historical
-  //      rows (all NULL) out of the index entirely rather than indexing them.
-  //   2. It doubles as the lookup index for "has this cart already billed?",
-  //      which only ever searches non-NULL values.
+  // itself refuses a second bill for the same CART ID AND SALE CONTENTS.
+  //
+  // This replaces idx_bills_cart_id, which covered bills(cart_id) alone and so
+  // made a second bill under a reused cart id physically impossible even when
+  // it was a genuinely different sale. It is dropped first — dropping and
+  // recreating an INDEX rewrites no table data, so it is safe on the live
+  // volume — and the drop/create pair is idempotent, so restarting the server
+  // simply finds the new index already there.
+  //
+  // Still PARTIAL (WHERE cart_id IS NOT NULL) for the same two reasons as
+  // before:
+  //   1. NULLs. Bills with no cart id (legacy rows, and any caller that sends
+  //      no key) stay out of the index entirely rather than relying on
+  //      SQLite's NULLs-are-distinct rule to keep them from colliding.
+  //   2. It doubles as the lookup index for both "has this cart already billed
+  //      THIS sale?" (cart_id + cart_fingerprint) and "has this cart billed at
+  //      all?" (cart_id, a prefix of the same index) — SQLite uses it for both,
+  //      and neither query ever searches a NULL cart_id.
   // Wrapped, and loud if it fails: billing must not be dead on startup, but a
   // missing guarantee must not be silent either (createBill() still checks
   // in-transaction, which covers this single-process deployment on its own).
   try {
-    db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_bills_cart_id ON bills(cart_id) WHERE cart_id IS NOT NULL");
+    db.exec("DROP INDEX IF EXISTS idx_bills_cart_id");
+    db.exec(
+      "CREATE UNIQUE INDEX IF NOT EXISTS idx_bills_cart_sale ON bills(cart_id, cart_fingerprint) WHERE cart_id IS NOT NULL"
+    );
   } catch (err: any) {
     console.error(
-      "[migration] could not create UNIQUE index idx_bills_cart_id on bills(cart_id) — duplicate-bill protection falls back to the in-transaction check only:",
+      "[migration] could not create UNIQUE index idx_bills_cart_sale on bills(cart_id, cart_fingerprint) — duplicate-bill protection falls back to the in-transaction check only:",
       err?.message || err
     );
   }

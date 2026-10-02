@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { getDb } from "../db/database";
 import { getUser } from "../middleware/auth";
-import { createBill, findBillByCartId, getNextTokenNumber } from "../services/billing";
+import { createBill, findBillByCartId, findBillBySale, saleFingerprint, getNextTokenNumber } from "../services/billing";
 import { getSettings, buildReceiptText, buildKitchenTicket, buildProformaText, queuePrint } from "../services/printer";
 import { restoreStockForBill } from "../services/stock";
 import {
@@ -34,8 +34,26 @@ pos.post("/bill", async (c) => {
   // Server-side duplicate-bill protection. The client guard (withBusy + the
   // checkoutInProgress flag) lives in one browser tab; two tabs, a reload
   // mid-request, or a connection that retries can still post the same sale
-  // twice. The cart id is the idempotency key — see createBill().
+  // twice. The idempotency key is the cart id PAIRED WITH a fingerprint of the
+  // sale's contents — see saleFingerprint() and createBill(). The cart id alone
+  // is not enough: the till only rotates it on a successful response, so a lost
+  // response leaves the next customer's sale arriving under the old id, and
+  // keying on the id alone replayed the previous bill and swallowed that sale.
   //
+  // Fingerprinted from the RESOLVED tax rate and the same defaults createBill()
+  // applies, so this hash and the one it computes cannot disagree.
+  const cartId = String(body.cart_id || "").trim();
+  const fingerprint = cartId
+    ? saleFingerprint({
+        items: body.items,
+        customer_id: body.customer_id || null,
+        discount: body.discount || 0,
+        tax_rate,
+        payment_method: body.payment_method || "cash",
+        amount_given: body.amount_given ?? null,
+      })
+    : "";
+
   // This lookup is ADVISORY ONLY: it decides nothing about writing (createBill()
   // repeats the check inside its transaction, where it cannot go stale). It is
   // read here for one reason: a resubmission of a sale that is ALREADY recorded
@@ -43,8 +61,11 @@ pos.post("/bill", async (c) => {
   // cash-shift rule exists to stop new money being taken outside an open shift;
   // handing back a receipt for money already banked is not that, and failing it
   // would leave the cashier believing the sale never happened.
-  const cartId = String(body.cart_id || "").trim();
-  const knownReplay = findBillByCartId(cartId) !== null;
+  //
+  // Matched on the PAIR, not on the cart id: a stale cart id carrying a sale
+  // that has NOT been recorded is new money, and the shift rule must apply to
+  // it exactly as it would to any other sale.
+  const knownReplay = findBillBySale(cartId, fingerprint) !== null;
 
   // Enforce cash shift state. A shift is "open" when the most recent 'open'
   // record (across all dates) has no 'close' recorded after it. Shifts intentionally
@@ -82,8 +103,10 @@ pos.post("/bill", async (c) => {
       amount_given: body.amount_given ?? null,
       // Threaded through so createBill() can release this cart's holds in the
       // same transaction as the stock deduction — and so it can recognise a
-      // resubmission of this same cart and replay its bill instead of writing a
-      // second one.
+      // resubmission of this same SALE (this cart id plus this fingerprint) and
+      // replay its bill instead of writing a second one. createBill() derives
+      // the fingerprint itself from these very params, so there is no second
+      // definition of it to drift.
       cart_id: cartId || null,
     });
   } catch (err: any) {
@@ -167,16 +190,20 @@ pos.post("/bill", async (c) => {
       console.error(`[print] bill #${bill.id} token #${bill.token_number}: ${err?.message || err}`);
     });
   } else {
-    console.warn(`[pos] duplicate submission for cart ${cartId} — replayed bill #${bill.id} token #${bill.token_number}, no second bill written`);
+    console.warn(
+      `[pos] duplicate submission of the same sale on cart ${cartId} (fingerprint ${fingerprint.slice(0, 12)}) — replayed bill #${bill.id} token #${bill.token_number}, no second bill written`
+    );
   }
 
-  // Same keys, same types, fresh sale or replay — the till cannot tell them
-  // apart unless it looks at `replayed`, and nothing in views/pos.html or
-  // views/m-pos.html does: they read token_number, total, receipt_text and
-  // kitchen_text, all of which describe the one real bill.
+  // Same keys, same types, fresh sale or replay — what tells them apart is
+  // `replayed`, and BOTH tills now read it (checkout() in views/pos.html and
+  // views/m-pos.html). They must: a replay wrote no new bill, and telling the
+  // cashier "Bill created successfully" over an older bill's receipt is how a
+  // lost sale went unnoticed. Everything else in this payload describes the one
+  // real bill either way.
   // print_queued, not print_success: the write hasn't happened yet, so we can't
   // honestly report its outcome (and on a replay we did not queue one at all, so
-  // it is false — nothing in the UI reads it either way).
+  // it is false).
   return c.json({ ...bill, receipt_text: receiptText, kitchen_text: kitchenText, print_queued: !isReplay });
 });
 
