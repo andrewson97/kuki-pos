@@ -188,6 +188,18 @@
     // id. The id therefore has to outlive a page reload and travel with a parked
     // cart, or the hold is orphaned and only an admin can give the stock back.
     const CART_ID_KEY = 'kuki_pos_cart_id';
+    // ...and the cart CONTENTS, under a key of their own. The id above already
+    // survived a reload; the lines did not, so walking off this page (Stock,
+    // Bills, a tablet reload or sleep) left stock held under a cart nobody could
+    // see — every other till read "held in other carts" with no cart pending
+    // anywhere. A hold has to correspond to something the cashier can look at,
+    // so the cart is written through on every change and restored on load. Its
+    // own key, apart from the mobile till's, exactly as the two ids are.
+    const CART_SAVE_KEY = 'kuki_pos_cart';
+    // Nothing may write the saved cart before restorePersistedCart() has read
+    // it: an empty-cart render during page load would erase the very snapshot it
+    // is about to restore.
+    let cartStorageReady = false;
     let cartId = '';
     // The cart exactly as the server last accepted it. A rejected sync rolls the
     // server back whole, so this is the state the screen must revert to.
@@ -221,6 +233,10 @@
       setupCustomerSearch();
       await checkShiftState();
       renderHeldBadge();
+      // Needs the grid: a restored line is reconciled against it. Before
+      // rehydrateHolds(), which is now only the fallback for holds with no
+      // saved cart behind them.
+      await restorePersistedCart();
       await rehydrateHolds();
 
       document.getElementById('product-search').addEventListener('input', renderProducts);
@@ -336,12 +352,14 @@
       const selectedEl = document.getElementById('customer-selected');
       selectedEl.style.cssText = 'display:flex!important;';
       document.getElementById('customer-selected-name').textContent = name;
+      persistCart(); // not a totals change, so updateCartTotals() never sees it
     }
 
     function clearCustomer() {
       document.getElementById('customer-id').value = '';
       document.getElementById('customer-search').value = '';
       document.getElementById('customer-selected').style.cssText = 'display:none!important;';
+      persistCart();
     }
 
     // Quick-add a customer without leaving the till. Same fields as /customers.
@@ -530,6 +548,7 @@
       const hadHolds = holdsOnServer || cart.length > 0;
       resetCartState();
       startNewCart();
+      clearPersistedCart(); // the sale is over; nothing left to come back to
       if (!hadHolds) return;
       // Queue the release behind any sync still in flight for that cart: a
       // DELETE that overtakes it would be undone by the sync landing after it.
@@ -620,10 +639,12 @@
       } catch {}
     }
 
-    // A reload wipes the cart but not its holds. The id is re-adopted from
-    // localStorage, so re-ringing the items syncs under the same id (and simply
-    // replaces the hold) and Clear still releases them — but say so out loud,
-    // because the screen looks empty.
+    // The fallback, for holds with no saved cart behind them: storage was
+    // cleared, the snapshot was written by an older build, or the restore was
+    // rejected and the screen was put back to nothing held. The id is re-adopted
+    // from localStorage, so re-ringing the items syncs under the same id (and
+    // simply replaces the hold) and Clear still releases them — but say so out
+    // loud, because the screen looks empty.
     async function rehydrateHolds() {
       try {
         const data = await api(`/api/pos/reservations/cart/${encodeURIComponent(getCartId())}`);
@@ -634,6 +655,125 @@
           showToast(`This till still holds ${units} unit${units === 1 ? '' : 's'} of stock from before the reload. Ring the items up again, or press Clear to release them.`, 'warning');
         }
       } catch {}
+    }
+
+    // ===== The cart itself, persisted (same lifetime as its hold) =====
+    // Same field set parkCurrent() snapshots — lines, discount, customer — so a
+    // restored cart and a resumed one are the same sale. Storage is wrapped the
+    // way getHeld()/setHeld() are: it can throw (private mode, full quota) and a
+    // till that cannot save a cart still has to be able to sell.
+    function persistCart() {
+      if (!cartStorageReady) return;
+      try {
+        // Empty cart = no snapshot. Removing the key rather than storing [] is
+        // what makes every "cart ended" path self-clearing.
+        if (!cart.length) { localStorage.removeItem(CART_SAVE_KEY); return; }
+        localStorage.setItem(CART_SAVE_KEY, JSON.stringify({
+          cart_id: getCartId(), // which hold these lines belong to
+          items: cart.map(i => ({ ...i })),
+          discount: parseFloat(document.getElementById('discount-input').value) || 0,
+          customer_id: document.getElementById('customer-id').value || '',
+          customer_label: document.getElementById('customer-selected-name').textContent || '',
+          saved_at: new Date().toISOString(),
+        }));
+      } catch {}
+    }
+
+    function clearPersistedCart() {
+      try { localStorage.removeItem(CART_SAVE_KEY); } catch {}
+    }
+
+    function readPersistedCart() {
+      try {
+        const raw = localStorage.getItem(CART_SAVE_KEY);
+        if (!raw) return null;
+        const snap = JSON.parse(raw);
+        if (!snap || !Array.isArray(snap.items) || !snap.items.length) return null;
+        return snap;
+      } catch { return null; }
+    }
+
+    // Bring the cart back the way the cart id already comes back, so a hold is
+    // never held against a sale the cashier cannot see.
+    //
+    // Everything is reconciled against the grid first. A product deleted,
+    // discontinued or switched off while the till was away is simply not in
+    // /api/products/active any more, and a stock-take can leave fewer units than
+    // the line asks for; restoring either one only fails at payment time, so the
+    // line is dropped or trimmed here and the change is said out loud.
+    async function restorePersistedCart() {
+      const snap = readPersistedCart();
+      cartStorageReady = true; // from here on every cart change writes through
+      if (!snap) return;
+      // A snapshot from a cart this till has moved on from (parked, sold,
+      // cleared on another tab). The id in localStorage is the authority.
+      if (snap.cart_id && snap.cart_id !== getCartId()) { clearPersistedCart(); return; }
+
+      const kept = [];
+      const dropped = [];
+      const trimmed = [];
+      for (const line of snap.items) {
+        if (!line || !line.product_id) continue;
+        const qty = Math.floor(Number(line.quantity) || 0);
+        if (qty <= 0) continue;
+        const p = products.find(x => x.id === line.product_id);
+        // Not on the grid any more: deleted, discontinued or deactivated.
+        if (!p) { dropped.push(`${line.product_name || 'An item'} (no longer on sale)`); continue; }
+        if (!inStock(p)) { dropped.push(`${p.name} (out of stock)`); continue; }
+        // available_quantity already excludes THIS cart's own hold, so it is the
+        // same figure the sync below checks against.
+        const avail = p.available_quantity ?? p.stock_quantity ?? 0;
+        if (p.track_stock && qty > avail) {
+          trimmed.push(`${p.name} ${qty} → ${avail}`);
+          kept.push({ ...line, product_name: p.name, quantity: avail });
+          continue;
+        }
+        kept.push({ ...line, product_name: p.name, quantity: qty });
+      }
+
+      if (!kept.length) {
+        clearPersistedCart();
+        if (dropped.length) {
+          showToast(`The cart left on this till could not be restored — ${dropped.join(', ')}. Nothing was billed.`, 'warning');
+        }
+        return; // rehydrateHolds() speaks for any stock still held
+      }
+
+      cart = kept;
+      document.getElementById('discount-input').value = snap.discount || 0;
+      if (snap.customer_id && snap.customer_label) selectCustomer(parseInt(snap.customer_id), snap.customer_label);
+      else clearCustomer();
+      // Rebuilds the lines, the counter and the totals — and writes the
+      // reconciled cart back through updateCartTotals() → persistCart().
+      renderCart();
+
+      // Re-sync on purpose. Sync is a full replace under the same cart id, so
+      // re-sending the same lines is idempotent, and it is the only thing that
+      // heals the two states the snapshot cannot vouch for: a hold that was
+      // never taken (the last sync was lost), and a cart just trimmed above,
+      // which must stop holding the units it gave up.
+      //
+      // lastSyncedCart stays empty deliberately: if the server rejects this, its
+      // rollback leaves holds the restored lines no longer describe, so
+      // queueCartSync() puts the screen back to nothing held rather than leaving
+      // a cart that cannot be billed — and rehydrateHolds(), which runs next,
+      // then reports whatever is genuinely still held.
+      lastSyncedCart = [];
+      await queueCartSync();
+      // Rejected: queueCartSync() has already emptied the screen and said why,
+      // and rehydrateHolds() runs next to report what is still held. Claiming a
+      // restored cart here would be the phantom all over again.
+      if (!cart.length) return;
+
+      const units = cart.reduce((s, i) => s + i.quantity, 0);
+      showToast(`Cart restored: ${units} unit${units === 1 ? '' : 's'} still held for this sale.`);
+      if (dropped.length || trimmed.length) {
+        const parts = [];
+        if (dropped.length) parts.push(`removed ${dropped.join(', ')}`);
+        if (trimmed.length) parts.push(`reduced to the stock left (${trimmed.join(', ')})`);
+        showToast(`The shelf changed while this till was away: ${parts.join('; ')}. Check the cart before taking payment.`, 'warning');
+      }
+      await refreshAvailability();
     }
 
     // ===== Held carts (parked, stored in localStorage per device) =====
@@ -671,6 +811,8 @@
       // parked lines now count as another cart's and leave this grid.
       startNewCart();
       resetCartState();
+      // The sale now lives in held carts, which have storage of their own.
+      clearPersistedCart();
       showToast('Cart parked');
       refreshAvailability();
     }
@@ -772,6 +914,13 @@
       document.getElementById('cart-tax').textContent = formatCurrency(tax);
       document.getElementById('cart-total').textContent = formatCurrency(total);
       syncProformaButton();
+      // The one place every line and discount change already funnels through:
+      // renderCart() calls it on add/remove/qty (right where queueCartSync()
+      // fires), the discount input calls it on input, and resetCartState() calls
+      // it when the cart ends. Picking a customer is the only cart change that
+      // does not come through here, so selectCustomer()/clearCustomer() write
+      // through themselves.
+      persistCart();
     }
 
     // The pre-payment slip is the one cart action with no meaning on an empty
@@ -928,6 +1077,7 @@
         // move on to a fresh id, and re-read the grid now that the stock moved.
         resetCartState();
         startNewCart();
+        clearPersistedCart();
         refreshAvailability();
         try {
           const token = await api('/api/pos/token');
