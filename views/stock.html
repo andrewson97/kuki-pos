@@ -83,7 +83,7 @@
         </div>
         <div id="held-stock-note" class="px-3 pb-2 small"></div>
         <table class="table table-hover mb-0">
-          <thead><tr><th>Product</th><th>Qty Held</th><th>Cart</th><th>Cashier</th><th>Held For</th><th>Actions</th></tr></thead>
+          <thead><tr><th>Product</th><th>Qty Held</th><th>Cart</th><th>Cashier</th><th>Claimed By</th><th>Held For</th><th>Actions</th></tr></thead>
           <tbody id="held-stock-table"></tbody>
         </table>
       </div>
@@ -164,6 +164,13 @@
     // inside the same trading day, long enough not to cry wolf over a big custom
     // order still being written up. Highlight only — nothing is auto-released.
     const HOLD_STALE_HOURS = 3;
+
+    // How long a claiming till may go quiet before this screen stops reading its
+    // claim as live. It is an EMPHASIS threshold only: either side of it the row
+    // prints the same fact ("checked in 2d ago"), so a badly chosen number
+    // changes how loud a row looks and never what it asserts. Thirty minutes is
+    // about the longest a till in use goes without touching its cart.
+    const CLAIM_STALE_MINUTES = 30;
     initApp('/stock', loadStock);
 
     async function loadStock() {
@@ -564,6 +571,74 @@
       return { text: h > 0 ? `${h}h ${mins % 60}m` : `${mins}m`, hours: mins / 60 };
     }
 
+    // What, if anything, is standing behind this hold:
+    //   unsupported - the server sent no claim field at all (older build); age
+    //                 is the only evidence we have, exactly as before.
+    //   unclaimed   - the server reports no till for this cart (claim: null).
+    //   active      - a till has that cart open on screen right now.
+    //   parked      - a till is holding it as a parked order.
+    // A till shut off for the night stops checking in, and its parked cart is
+    // still a real customer's order, so a missing or long-ago check-in is
+    // reported as the fact it is. Nothing here calls a hold "stranded" - that
+    // verdict needs a human who can look at the tills.
+    function claimOf(h) {
+      if (!h || !('claim' in h)) return { kind: 'unsupported' };
+      const c = h.claim;
+      if (!c) return { kind: 'unclaimed' };
+      // Reuses heldFor() so last_seen_at goes through parseDbDate() too; a raw
+      // Date() on the SQLite string would read 5h30m out in Colombo.
+      const seen = heldFor(c.last_seen_at);
+      const unknown = seen.text === 'unknown';
+      const mins = seen.hours * 60;
+      // heldFor() stops at hours, which reads badly for a till that went quiet
+      // days ago ("checked in 48h 0m ago"), so roll days up here rather than
+      // touching the "held 2h 14m" age line that uses heldFor() directly.
+      const days = Math.floor(seen.hours / 24);
+      const gap = days >= 1
+        ? `${days}d${seen.hours % 24 >= 1 ? ' ' + Math.floor(seen.hours % 24) + 'h' : ''}`
+        : seen.text;
+      return {
+        // Anything that is not 'active' is shown as parked: the cautious
+        // reading, because a parked cart is the one it would hurt to release.
+        kind: c.state === 'active' ? 'active' : 'parked',
+        till: c.till_label || c.till_id || 'unnamed till',
+        who: c.user_name || '',
+        seenText: unknown ? 'check-in time unknown' : (mins < 1 ? 'checked in just now' : `checked in ${gap} ago`),
+        seenStale: unknown || mins >= CLAIM_STALE_MINUTES,
+      };
+    }
+
+    // One severity per row (0 calm, 1 look at this, 2 loud) so the age signal and
+    // the claim signal never shout past each other. The 3h age rule was only ever
+    // a proxy for "no till is behind this"; a live check-in is direct evidence and
+    // supersedes it, which is why a parked order claimed seconds ago stays calm
+    // however old it is. The red row now means "old AND nothing claiming it" -
+    // the same highlight, with better evidence behind it.
+    function holdSeverity(claim, age) {
+      const old = age.hours >= HOLD_STALE_HOURS;
+      if (claim.kind === 'unsupported') return old ? 2 : 0;
+      if (claim.kind === 'unclaimed') return old ? 2 : 1;
+      return claim.seenStale ? 1 : 0;
+    }
+
+    function claimCell(claim) {
+      if (claim.kind === 'unsupported') {
+        return '<small class="text-muted" title="This server does not report till claims yet.">&mdash;</small>';
+      }
+      if (claim.kind === 'unclaimed') {
+        return '<span class="badge bg-danger">No till reporting</span>'
+          + '<small class="d-block text-muted mt-1">Check the tills before releasing &mdash; a till that is switched off still holds its parked orders.</small>';
+      }
+      const badge = claim.kind === 'active'
+        ? '<span class="badge bg-success">Cart open</span>'
+        : '<span class="badge bg-info text-dark">Parked order</span>';
+      const who = claim.who
+        ? `${escapeHtml(claim.till)} &middot; ${escapeHtml(claim.who)}`
+        : escapeHtml(claim.till);
+      return `${badge}<small class="d-block text-muted mt-1">${who}</small>`
+        + `<small class="d-block ${claim.seenStale ? 'text-warning-emphasis fw-bold' : 'text-muted'}">${escapeHtml(claim.seenText)}</small>`;
+    }
+
     function renderHeldStock() {
       const tbody = document.getElementById('held-stock-table');
       const note = document.getElementById('held-stock-note');
@@ -571,26 +646,44 @@
 
       if (!stockHolds.length) {
         note.innerHTML = '';
-        tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-4">No stock is currently held &mdash; every tracked item is free to sell.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted py-4">No stock is currently held &mdash; every tracked item is free to sell.</td></tr>';
         return;
       }
 
+      const claims = stockHolds.map(h => claimOf(h));
       const stale = stockHolds.filter(h => heldFor(h.created_at).hours >= HOLD_STALE_HOURS).length;
-      note.innerHTML = stale
-        ? `<span class="text-danger fw-bold">${stale} hold${stale === 1 ? '' : 's'} older than ${HOLD_STALE_HOURS}h.</span> <span class="text-muted">A live cart is paid within minutes, so these were probably stranded by a closed tab or a flat tablet. Releasing one puts its stock back on sale.</span>`
-        : `<span class="text-muted">${stockHolds.length} live hold${stockHolds.length === 1 ? '' : 's'}. Nothing older than ${HOLD_STALE_HOURS}h.</span>`;
+      const noClaimField = claims.filter(c => c.kind === 'unsupported').length;
 
-      tbody.innerHTML = stockHolds.map(h => {
+      if (noClaimField === stockHolds.length) {
+        // Server has not shipped the claim field yet: age is all we know, so say
+        // exactly what this screen has always said.
+        note.innerHTML = stale
+          ? `<span class="text-danger fw-bold">${stale} hold${stale === 1 ? '' : 's'} older than ${HOLD_STALE_HOURS}h.</span> <span class="text-muted">A live cart is paid within minutes, so these were probably stranded by a closed tab or a flat tablet. Releasing one puts its stock back on sale.</span>`
+          : `<span class="text-muted">${stockHolds.length} live hold${stockHolds.length === 1 ? '' : 's'}. Nothing older than ${HOLD_STALE_HOURS}h.</span>`;
+      } else {
+        const unclaimed = claims.filter(c => c.kind === 'unclaimed').length;
+        const quiet = claims.filter(c => c.seenStale).length;
+        const parts = [`<span class="text-muted">${stockHolds.length} live hold${stockHolds.length === 1 ? '' : 's'}.</span>`];
+        if (unclaimed) parts.push(`<span class="text-danger fw-bold">${unclaimed} that no till is reporting.</span> <span class="text-muted">A till switched off for the night still holds its parked orders, so check the tills before releasing one &mdash; releasing a parked cart loses a real customer's order.</span>`);
+        if (quiet) parts.push(`<span class="text-warning-emphasis fw-bold">${quiet} claimed by a till that has not checked in for over ${CLAIM_STALE_MINUTES}m.</span>`);
+        if (noClaimField) parts.push(`<span class="text-muted">${noClaimField} with no claim information &mdash; age is all we know for those.</span>`);
+        if (!unclaimed && !quiet) parts.push('<span class="text-muted">Every hold has a till checking in for it.</span>');
+        note.innerHTML = parts.join(' ');
+      }
+
+      tbody.innerHTML = stockHolds.map((h, i) => {
         const age = heldFor(h.created_at);
-        const isStale = age.hours >= HOLD_STALE_HOURS;
+        const claim = claims[i];
+        const sev = holdSeverity(claim, age);
         const when = formatDateTime(h.created_at);
         const name = escapeHtml(h.product_name || `Product #${h.product_id}`);
-        return `<tr class="${isStale ? 'table-danger' : ''}">
-          <td class="fw-bold">${name} ${isStale ? '<span class="badge bg-danger">STALE</span>' : ''}</td>
+        return `<tr class="${sev === 2 ? 'table-danger' : sev === 1 ? 'table-warning' : ''}">
+          <td class="fw-bold">${name} ${sev === 2 ? '<span class="badge bg-danger">STALE</span>' : ''}</td>
           <td class="fw-bold">${h.quantity}</td>
           <td><code>${escapeHtml(h.cart_id || '-')}</code></td>
           <td>${escapeHtml(h.cashier_name || '-')}</td>
-          <td class="${isStale ? 'text-danger fw-bold' : ''}" title="${escapeHtml(when)}">held ${escapeHtml(age.text)}<br><small class="text-muted fw-normal">${escapeHtml(when)}</small></td>
+          <td>${claimCell(claim)}</td>
+          <td class="${sev === 2 ? 'text-danger fw-bold' : ''}" title="${escapeHtml(when)}">held ${escapeHtml(age.text)}<br><small class="text-muted fw-normal">${escapeHtml(when)}</small></td>
           <td>${isAdmin
             ? `<button class="btn btn-sm btn-outline-danger" onclick="releaseStockHold(${h.id}, this)">Release</button>`
             : '<small class="text-muted">Admin only</small>'}</td>

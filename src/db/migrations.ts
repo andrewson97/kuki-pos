@@ -189,6 +189,36 @@ export function runMigrations(): void {
     CREATE INDEX IF NOT EXISTS idx_stock_reservations_cart ON stock_reservations(cart_id);
     CREATE INDEX IF NOT EXISTS idx_stock_reservations_product ON stock_reservations(product_id);
 
+    -- Which till still claims which cart. Holds never expire (a cart only
+    -- exists once the customer has confirmed the order), so the admin "Held
+    -- stock" screen could see a hold but never tell these two apart:
+    --   * a PARKED cart, which legitimately keeps its hold — and because
+    --     parking rotates the till to a fresh cart id, its hold looks like
+    --     "some other cart" even on the same machine;
+    --   * a STRANDED hold, whose cart no longer exists anywhere (closed till,
+    --     cleared browser storage, or a hold predating cart persistence).
+    -- Parked carts live only in each browser's localStorage, so the server can
+    -- only learn about them if the till says so: POST /api/pos/carts/claim.
+    --
+    -- cart_id is UNIQUE: one cart is claimed by at most one till, and that is
+    -- also the lookup index the holds listing joins on. The claim is purely an
+    -- annotation on stock_reservations — it never holds stock itself, and it is
+    -- self-asserted by the till, so it must never be read as an authorisation.
+    CREATE TABLE IF NOT EXISTS cart_claims (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      cart_id TEXT NOT NULL UNIQUE,
+      till_id TEXT NOT NULL,
+      till_label TEXT NOT NULL DEFAULT '',
+      state TEXT NOT NULL CHECK(state IN ('active', 'parked')),
+      user_id INTEGER REFERENCES users(id),
+      last_seen_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    -- Claiming is a full replace per till ("these are ALL my carts"), which
+    -- deletes the till's previous rows on every heartbeat, so that DELETE needs
+    -- an index. cart_id's UNIQUE constraint already indexes the other lookup.
+    CREATE INDEX IF NOT EXISTS idx_cart_claims_till ON cart_claims(till_id);
+
     CREATE TABLE IF NOT EXISTS cash_counts (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       count_type TEXT NOT NULL CHECK(count_type IN ('open', 'close')),

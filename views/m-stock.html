@@ -95,6 +95,12 @@
     // for you. Kept in step with the same constant in views/stock.html.
     const HOLD_STALE_HOURS = 3;
 
+    // How long a claiming till may go quiet before this screen stops reading its
+    // claim as live. An EMPHASIS threshold only: either side of it the row prints
+    // the same fact ("checked in 2d ago"), so a badly chosen number changes how
+    // loud a row looks and never what it asserts. Kept in step with views/stock.html.
+    const CLAIM_STALE_MINUTES = 30;
+
     async function load() {
       await bootMobile();
       if (currentUser.role !== 'admin') { $('fab').style.display = 'none'; toast('Read-only — admin needed to edit'); }
@@ -322,6 +328,71 @@
       return { text: h > 0 ? `${h}h ${mins % 60}m` : `${mins}m`, hours: mins / 60 };
     }
 
+    // What, if anything, is standing behind this hold:
+    //   unsupported - no claim field in the response (older server); age is the
+    //                 only evidence, exactly as before.
+    //   unclaimed   - the server reports no till for this cart (claim: null).
+    //   active      - a till has that cart open on screen right now.
+    //   parked      - a till is holding it as a parked order.
+    // A till shut off for the night stops checking in, and its parked cart is
+    // still a real customer's order, so a missing or long-ago check-in is
+    // reported as the fact it is. Nothing here calls a hold "stranded".
+    function claimOf(h) {
+      if (!h || !('claim' in h)) return { kind: 'unsupported' };
+      const c = h.claim;
+      if (!c) return { kind: 'unclaimed' };
+      // Via heldFor() so last_seen_at goes through parseDbDate() too; a raw
+      // Date() on the SQLite string would read 5h30m out in Colombo.
+      const seen = heldFor(c.last_seen_at);
+      const unknown = seen.text === 'unknown';
+      const mins = seen.hours * 60;
+      // heldFor() stops at hours, which reads badly for a till that went quiet
+      // days ago ("checked in 48h 0m ago"), so roll days up here rather than
+      // touching the "held 2h 14m" age line that uses heldFor() directly.
+      const days = Math.floor(seen.hours / 24);
+      const gap = days >= 1
+        ? `${days}d${seen.hours % 24 >= 1 ? ' ' + Math.floor(seen.hours % 24) + 'h' : ''}`
+        : seen.text;
+      return {
+        // Anything that is not 'active' shows as parked: the cautious reading,
+        // because a parked cart is the one it would hurt to release.
+        kind: c.state === 'active' ? 'active' : 'parked',
+        till: c.till_label || c.till_id || 'unnamed till',
+        who: c.user_name || '',
+        seenText: unknown ? 'check-in time unknown' : (mins < 1 ? 'checked in just now' : `checked in ${gap} ago`),
+        seenStale: unknown || mins >= CLAIM_STALE_MINUTES,
+      };
+    }
+
+    // One severity per row (0 calm, 1 look at this, 2 loud) so the age signal and
+    // the claim signal never shout past each other. The 3h age rule was only ever
+    // a proxy for "no till is behind this"; a live check-in is direct evidence and
+    // supersedes it, so a parked order claimed seconds ago stays calm however old
+    // it is, and the red row now means "old AND nothing claiming it".
+    function holdSeverity(claim, age) {
+      const old = age.hours >= HOLD_STALE_HOURS;
+      if (claim.kind === 'unsupported') return old ? 2 : 0;
+      if (claim.kind === 'unclaimed') return old ? 2 : 1;
+      return claim.seenStale ? 1 : 0;
+    }
+
+    function claimLines(claim) {
+      // Older server: no claim line at all, so the card reads as it always did.
+      if (claim.kind === 'unsupported') return '';
+      if (claim.kind === 'unclaimed') {
+        return '<div class="list-meta" style="color:var(--red);font-weight:600;">No till is reporting this cart</div>'
+          + '<div class="list-meta">Check the tills before releasing — a till that is switched off still holds its parked orders.</div>';
+      }
+      const badge = claim.kind === 'active'
+        ? '<span class="badge success">Cart open</span>'
+        : '<span class="badge info">Parked order</span>';
+      const who = claim.who
+        ? `${escapeHtml(claim.till)} · ${escapeHtml(claim.who)}`
+        : escapeHtml(claim.till);
+      return `<div class="list-meta">${badge} ${who}</div>`
+        + `<div class="list-meta"${claim.seenStale ? ' style="color:var(--amber);font-weight:600;"' : ''}>${escapeHtml(claim.seenText)}</div>`;
+    }
+
     function renderHolds() {
       const note = $('holds-note');
       const list = $('holds-list');
@@ -333,22 +404,41 @@
         return;
       }
 
+      const claims = holds.map(h => claimOf(h));
       const stale = holds.filter(h => heldFor(h.created_at).hours >= HOLD_STALE_HOURS).length;
-      note.innerHTML = stale
-        ? `<b style="color:var(--red);">${stale} hold${stale === 1 ? '' : 's'} older than ${HOLD_STALE_HOURS}h.</b> A live cart is paid within minutes, so these were probably stranded by a closed tab or a flat tablet. Releasing one puts its stock back on sale.`
-        : `${holds.length} live hold${holds.length === 1 ? '' : 's'}. Nothing older than ${HOLD_STALE_HOURS}h.`;
+      const noClaimField = claims.filter(c => c.kind === 'unsupported').length;
 
-      list.innerHTML = holds.map(h => {
+      if (noClaimField === holds.length) {
+        // Server has not shipped the claim field yet: age is all we know, so say
+        // exactly what this screen has always said.
+        note.innerHTML = stale
+          ? `<b style="color:var(--red);">${stale} hold${stale === 1 ? '' : 's'} older than ${HOLD_STALE_HOURS}h.</b> A live cart is paid within minutes, so these were probably stranded by a closed tab or a flat tablet. Releasing one puts its stock back on sale.`
+          : `${holds.length} live hold${holds.length === 1 ? '' : 's'}. Nothing older than ${HOLD_STALE_HOURS}h.`;
+      } else {
+        const unclaimed = claims.filter(c => c.kind === 'unclaimed').length;
+        const quiet = claims.filter(c => c.seenStale).length;
+        const parts = [`${holds.length} live hold${holds.length === 1 ? '' : 's'}.`];
+        if (unclaimed) parts.push(`<b style="color:var(--red);">${unclaimed} that no till is reporting.</b> A till switched off for the night still holds its parked orders, so check the tills before releasing one — releasing a parked cart loses a real customer's order.`);
+        if (quiet) parts.push(`<b style="color:var(--amber);">${quiet} claimed by a till that has not checked in for over ${CLAIM_STALE_MINUTES}m.</b>`);
+        if (noClaimField) parts.push(`${noClaimField} with no claim information — age is all we know for those.`);
+        if (!unclaimed && !quiet) parts.push('Every hold has a till checking in for it.');
+        note.innerHTML = parts.join(' ');
+      }
+
+      list.innerHTML = holds.map((h, i) => {
         const age = heldFor(h.created_at);
-        const isStale = age.hours >= HOLD_STALE_HOURS;
+        const claim = claims[i];
+        const sev = holdSeverity(claim, age);
+        const tint = sev === 2 ? ' style="background:#fff5f5;"' : sev === 1 ? ' style="background:#fffbeb;"' : '';
         const name = escapeHtml(h.product_name || `Product #${h.product_id}`);
-        return `<div class="list-item"${isStale ? ' style="background:#fff5f5;"' : ''}>
+        return `<div class="list-item"${tint}>
           <div class="list-head">
-            <span class="list-title">${name}${isStale ? ' <span class="badge danger">Stale</span>' : ''}</span>
+            <span class="list-title">${name}${sev === 2 ? ' <span class="badge danger">Stale</span>' : ''}</span>
             <span class="list-amount">${h.quantity}</span>
           </div>
           <div class="list-meta" style="word-break:break-all;">cart ${escapeHtml(h.cart_id || '-')} · ${escapeHtml(h.cashier_name || '-')}</div>
-          <div class="list-meta"${isStale ? ' style="color:var(--red);font-weight:600;"' : ''}>held ${escapeHtml(age.text)} · ${escapeHtml(formatDateTime(h.created_at))}</div>
+          <div class="list-meta"${sev === 2 ? ' style="color:var(--red);font-weight:600;"' : ''}>held ${escapeHtml(age.text)} · ${escapeHtml(formatDateTime(h.created_at))}</div>
+          ${claimLines(claim)}
           ${isAdmin
             ? `<button class="btn btn-danger btn-sm" style="margin-top:8px;" onclick="releaseStockHold(${h.id}, this)">Release</button>`
             : '<div class="list-meta">Admin needed to release</div>'}

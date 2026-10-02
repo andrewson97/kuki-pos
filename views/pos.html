@@ -303,6 +303,10 @@
       await rehydrateHolds();
 
       document.getElementById('product-search').addEventListener('input', renderProducts);
+
+      // Say which carts this till is holding, then keep saying it.
+      reportClaims();
+      startClaimHeartbeat();
     }
 
     async function checkShiftState() {
@@ -653,6 +657,10 @@
       adoptCartId(newCartId());
       lastSyncedCart = [];
       holdsOnServer = false;
+      // The claim set just changed: park, clearCart() and a completed sale all
+      // move the till onto a new id through here. Fire-and-forget — the new
+      // cart does not wait on it and never hears about a failure.
+      reportClaims();
     }
 
     function releaseHoldsFor(id) {
@@ -842,7 +850,16 @@
     // ===== Held carts (parked, stored in localStorage per device) =====
     const HELD_KEY = 'kuki_held_carts';
     function getHeld() { try { return JSON.parse(localStorage.getItem(HELD_KEY) || '[]'); } catch { return []; } }
-    function setHeld(arr) { localStorage.setItem(HELD_KEY, JSON.stringify(arr)); renderHeldBadge(); }
+    // Storage can throw (private mode, quota). getHeld() already tolerates that;
+    // this did not, so a park died inside here and left the cart on screen with
+    // nothing said. Report it instead: the cart is still sellable, it just could
+    // not be put aside.
+    function setHeld(arr) {
+      let saved = true;
+      try { localStorage.setItem(HELD_KEY, JSON.stringify(arr)); } catch { saved = false; }
+      renderHeldBadge();
+      return saved;
+    }
     function renderHeldBadge() {
       const held = getHeld();
       const badge = document.getElementById('held-count');
@@ -868,7 +885,13 @@
         discount: parseFloat(document.getElementById('discount-input').value) || 0,
         created_at: new Date().toISOString(),
       });
-      setHeld(held);
+      // If storage refused the write the cart was never parked, so leave it on
+      // screen under the same id rather than clearing it into nowhere. The hold
+      // still stands, so nothing is oversold either way.
+      if (!setHeld(held)) {
+        showToast('Could not park this cart - the browser refused to save it. Finish the sale or clear it.', 'error');
+        return;
+      }
       // Parking must NOT release — holding the stock for this customer is the
       // whole point. The till just moves on to a new cart id, which is why the
       // parked lines now count as another cart's and leave this grid.
@@ -930,6 +953,7 @@
       const h = getHeld().find(x => x.id === id);
       setHeld(getHeld().filter(x => x.id !== id));
       renderHeldCards();
+      reportClaims(); // one fewer parked cart to claim
       // Discarding a parked cart is the one park-side action that does hand the
       // stock back.
       if (h && h.cart_id) releaseHoldsFor(h.cart_id).then(refreshAvailability);
@@ -949,6 +973,7 @@
         else clearCustomer();
         // Refetch held inside swap — parkCurrent may have added to it.
         setHeld(getHeld().filter(x => x.id !== id));
+        reportClaims(); // this cart is the active claim now, not a parked one
         renderCart();
         showToast('Resumed');
         // Idempotent re-assert. For a cart parked under this feature the server
@@ -961,6 +986,88 @@
         await parkCurrent();
       }
       swap();
+    }
+
+    // ===== Till claims: which carts this screen is still holding =====
+    // Cart holds never expire, and a PARKED cart keeps its hold on purpose — but
+    // a parked cart lives only in THIS browser's localStorage, so the admin
+    // "Held stock" screen cannot tell a hold somebody still means to sell from
+    // one stranded by a reload nobody ever came back to. So the till says so out
+    // loud: it posts the complete set of cart ids it is still claiming, and the
+    // server replaces whatever it held for this till_id — which makes a re-send
+    // free and every report self-healing.
+    //
+    // This is bookkeeping, not part of taking money. Nothing here touches the
+    // cart, its holds, the payment locks or the saved cart, and every call is
+    // fire-and-forget with its failure swallowed: on an older server the
+    // endpoint 404s and the till carries on exactly as it does today.
+    const TILL_ID_KEY = 'kuki_pos_till_id';
+    let tillId = '';
+
+    function newTillId() {
+      const rand = (window.crypto && crypto.randomUUID)
+        ? crypto.randomUUID().slice(0, 8)
+        : Math.random().toString(36).slice(2, 10);
+      return `till-pos-${Date.now().toString(36)}-${rand}`;
+    }
+
+    // One id per browser/screen, minted once and then kept, the way the cart id
+    // already is — and under a key of its own, so the mobile till open in the
+    // same browser stays a separate till, exactly as their cart ids are
+    // separate. Storage can throw (private mode, full quota); a till that cannot
+    // remember its id still has to sell, so it falls back to an id that lives
+    // for this session only.
+    function getTillId() {
+      if (!tillId) {
+        let stored = '';
+        try { stored = localStorage.getItem(TILL_ID_KEY) || ''; } catch {}
+        tillId = stored || newTillId();
+        try { localStorage.setItem(TILL_ID_KEY, tillId); } catch {}
+      }
+      return tillId;
+    }
+
+    // Short enough for a table cell: which screen, and who is signed in on it.
+    function tillLabel() {
+      const who = (currentUser && currentUser.full_name) ? currentUser.full_name : '';
+      return who ? `Counter · ${who}` : 'Counter till';
+    }
+
+    function reportClaims() {
+      try {
+        // Carts parked before the cart id travelled with them have no cart_id
+        // and hold nothing, so they are skipped rather than sent as blanks.
+        const parked = getHeld().filter(h => h && h.cart_id).map(h => String(h.cart_id));
+        api('/api/pos/carts/claim', {
+          method: 'POST',
+          body: {
+            till_id: getTillId(),
+            till_label: tillLabel(),
+            // The live cart id, even when the cart is empty: it is the id the
+            // next item rung up holds under, and an empty cart has no holds for
+            // the admin screen to list anyway.
+            active_cart_id: getCartId(),
+            parked_cart_ids: parked,
+          },
+        }).catch(() => {});
+      } catch {}
+    }
+
+    // A till left open all day with one parked order must not look abandoned, so
+    // the claim set is also re-sent on a timer. Five minutes keeps last_seen_at
+    // fresh enough for the admin screen to treat anything quiet for ~15 minutes
+    // (three missed beats) as stale, and costs a till twelve tiny requests an
+    // hour. Each beat sends the whole set, so a beat lost to a flaky connection
+    // heals on the next one.
+    const CLAIM_HEARTBEAT_MS = 5 * 60 * 1000;
+    function startClaimHeartbeat() {
+      setInterval(reportClaims, CLAIM_HEARTBEAT_MS);
+      // Timers do not fire while a tablet sleeps or the tab sits in the
+      // background, and the till may have been away for hours — so report again
+      // the moment the screen comes back rather than waiting out the interval.
+      document.addEventListener('visibilitychange', () => {
+        if (!document.hidden) reportClaims();
+      });
     }
 
     function updateCartTotals() {
