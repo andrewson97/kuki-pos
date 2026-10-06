@@ -6,6 +6,7 @@ import "./utils/paths"; // side effect: ensures the data directory exists before
 import { runMigrations, seedDefaults } from "./db/migrations";
 import { authMiddleware } from "./middleware/auth";
 import { getDb } from "./db/database";
+import { ensureBillReplayIndex } from "./services/billing";
 import authRoutes from "./routes/auth";
 import dashboardRoutes from "./routes/dashboard";
 import posRoutes from "./routes/pos";
@@ -25,6 +26,14 @@ import mobileRoutes from "./routes/mobile";
 
 // Initialize database
 runMigrations();
+// AFTER runMigrations(), on every boot, and never before it. The duplicate-bill
+// guard is a UNIQUE index on bills(cart_id, cart_fingerprint, created_at); the
+// migration still creates the older bills(cart_id, cart_fingerprint) one, which
+// would refuse the second bill of a genuine repeat order under a reused cart id
+// and leave the cashier unable to bill. This swaps it, idempotently, and must
+// run after every migration pass that could put the old one back. See
+// ensureBillReplayIndex() in src/services/billing.ts.
+ensureBillReplayIndex();
 seedDefaults();
 
 const app = new Hono();
@@ -41,6 +50,70 @@ app.onError((err, c) => {
     return c.json({ error: err.message || "Request failed" }, err.status);
   }
   return c.json({ error: "Something went wrong. Please try again." }, 500);
+});
+
+// ---------------------------------------------------------------------------
+// CACHING: what may be reused, and for how long
+// ---------------------------------------------------------------------------
+// Nothing used to say. Every response left here with no caching directives at
+// all, so a browser — or any proxy sitting in front of fly.io — was free to
+// apply its own heuristic and hand a till yesterday's answer. That is why the
+// stock counts and the day's totals only corrected themselves on a reload, and
+// it made the lost-sale bug worse: a cashier who cannot see that her sale
+// landed rings it up again.
+//
+// Three classes of response, three different answers:
+//
+//   /api/*  -> no-store.
+//       These are stock levels, running totals, token numbers, shift state and
+//       the bill endpoint itself. Every one of them is a fact about money or
+//       goods RIGHT NOW, and a stale one is wrong rather than merely old; there
+//       is no reuse worth having here at any age. no-store, not no-cache, on
+//       purpose: no-cache would still permit a copy to be written to disk, and
+//       these payloads carry customer names, phone numbers and takings onto a
+//       shared shop tablet. It also costs nothing — these are small reads on a
+//       LAN, and the till already re-reads them deliberately.
+//
+//   /public/*  -> public, max-age=300, must-revalidate.
+//       The logo, the two stylesheets, the shared app.js/mobile.js and the
+//       printer-driver download. These DO benefit from caching: a cashier
+//       moving between the till, Stock and Bills all day should not refetch
+//       them on every navigation. But none of them is content-hashed — they are
+//       served at a fixed path and overwritten in place by a deploy — so the
+//       cache lifetime is also the worst case for how long a till can keep
+//       running yesterday's JavaScript against today's server. Five minutes is
+//       the trade: navigations within a shift are free, and a deployed fix is
+//       shop-wide within minutes without anyone clearing a cache.
+//
+//   everything else (the HTML pages)  -> no-cache.
+//       Each page embeds the till's own logic in an inline <script>, so a stale
+//       page IS stale application code — the same hazard as stale app.js, and
+//       the reason these cannot be lumped in with the assets above. no-cache
+//       (may be stored, must be revalidated before use) rather than no-store:
+//       correctness is identical, since the page can never be used without
+//       asking the server first, and it keeps the back/forward cache working on
+//       a tablet where a cashier taps Back between screens.
+//
+// Registered FIRST, before every route including /api/auth and the static
+// handler, because Hono dispatches in registration order and a middleware
+// declared after a route never runs for it.
+//
+// The header is set in a `finally`, after the handler, so it also lands on
+// responses the prepared-header path would miss: a route that builds its own
+// Response (/api/settings/backup does), and an error answered by app.onError.
+function cacheControlFor(path: string): string {
+  if (path.startsWith("/api/")) return "no-store";
+  if (path.startsWith("/public/")) return "public, max-age=300, must-revalidate";
+  return "no-cache";
+}
+
+app.use("*", async (c, next) => {
+  const policy = cacheControlFor(c.req.path);
+  try {
+    await next();
+  } finally {
+    c.header("Cache-Control", policy);
+  }
 });
 
 // Static files

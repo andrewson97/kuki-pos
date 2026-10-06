@@ -35,10 +35,15 @@ pos.post("/bill", async (c) => {
   // checkoutInProgress flag) lives in one browser tab; two tabs, a reload
   // mid-request, or a connection that retries can still post the same sale
   // twice. The idempotency key is the cart id PAIRED WITH a fingerprint of the
-  // sale's contents — see saleFingerprint() and createBill(). The cart id alone
-  // is not enough: the till only rotates it on a successful response, so a lost
-  // response leaves the next customer's sale arriving under the old id, and
-  // keying on the id alone replayed the previous bill and swallowed that sale.
+  // sale's contents AND BOUNDED IN TIME — see saleFingerprint(), createBill()
+  // and REPLAY_WINDOW_MINUTES. None of the three is droppable:
+  //   * the cart id alone is not enough, because a lost response leaves the
+  //     next customer's sale arriving under the old id, and keying on the id
+  //     alone replayed the previous bill and swallowed that sale;
+  //   * id + fingerprint is not enough either, because the same basket is sold
+  //     again later. Untimed, a two-day-old bill matched a live sale and
+  //     swallowed it the same way. Only a match from the last few minutes is a
+  //     retry; anything older is a repeat order and gets its own bill.
   //
   // Fingerprinted from the RESOLVED tax rate and the same defaults createBill()
   // applies, so this hash and the one it computes cannot disagree.

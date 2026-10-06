@@ -88,9 +88,21 @@ export interface CreatedBill {
 // method, same tender, no customer) arriving under the SAME stale cart id are
 // indistinguishable by content, so the second still replays the first. Closing
 // that needs a key the till varies per attempt rather than per cart; content
-// hashing cannot do it. It is a far narrower window than the bug it replaces,
-// and the till now clears the cart and rotates its id on a replay too (see
-// views/pos.html), so a stale id does not persist across further sales.
+// hashing cannot do it.
+//
+// Two things since cut it down to a sliver:
+//   1. THE MATCH IS TIME-BOUNDED. Only a bill from the last few minutes can be
+//      replayed at all — see REPLAY_WINDOW_MINUTES below. The identical basket
+//      an hour later, or two days later, is a repeat order and gets its own
+//      bill. That is what the Oct 4 / Oct 6 incident needed and did not have.
+//   2. THE TILL ROTATES ITS CART ID WHEN A SALE BEGINS, not only when one ends
+//      (see addToCart()/beginSaleIfCartEmpty() in views/pos.html and
+//      views/m-pos.html). A lost response can no longer leave a stale id in
+//      place for the NEXT customer, because the next customer's first item
+//      mints a fresh one. For the residual above to bite, a sale would now
+//      have to be byte-identical AND under ten minutes old AND under a cart id
+//      that survived the rotation — which, with an empty cart holding no
+//      stock, it does not.
 const FP_VERSION = "v1";
 
 /** Length-prefixed, so a product name containing the separator cannot forge a
@@ -164,12 +176,83 @@ export function saleFingerprint(input: SaleFingerprintInput): string {
   return createHash("sha256").update(parts.join("\u001f"), "utf8").digest("hex");
 }
 
+// ---------------------------------------------------------------------------
+// HOW LONG A SALE STAYS REPLAYABLE
+// ---------------------------------------------------------------------------
+// A replay is a RETRY: the same request body arriving a second time because the
+// first answer never got back to the till. That happens in seconds — an
+// auto-retry, a double tap, a reload mid-request — and at the very outside in a
+// minute or two, when a cashier watches a fly.io cold start time out and rings
+// the identical basket up again by hand.
+//
+// It is NOT what happens two days later. On Oct 4 a checkout response was lost,
+// so the till kept its cart id (it only rotated on success). On Oct 6 the same
+// two cakes hashed to the same fingerprint under that same stale id, matched the
+// Oct 4 bill, and the real sale was answered with "already recorded as Token
+// #014" and never written. Money gone, with a success message on the screen.
+// An unbounded lookup cannot tell a retry from a repeat order, because after
+// enough time there is no such thing as a retry.
+//
+// So the question the replay gate asks is "did THIS SALE go through JUST NOW?",
+// and the window is the honest answer to "just now".
+//
+// Why ten minutes:
+//   * Far above every real retry. A cold start plus the client's own timeout
+//     plus a cashier noticing and pressing Pay again is tens of seconds; re-
+//     ringing the same basket by hand is a minute or two. Ten minutes is an
+//     order of magnitude of headroom, which matters because the asymmetry runs
+//     one way: a missed replay DOUBLE-CHARGES a customer and double-deducts
+//     stock, while a missed match merely writes the second bill that the sale
+//     deserved.
+//   * Far below every real repeat order. A cake shop sells the same basket all
+//     day; "two fish buns, cash, exact change" recurs within the hour. Ten
+//     minutes keeps the content-only collision (see KNOWN RESIDUAL above) down
+//     to a window in which a till would have to be sitting on a stale cart id
+//     AND take a byte-identical sale — and the till now rotates its id the
+//     moment an empty cart takes its first item, so it is not sitting on one.
+//   * It is measured in ABSOLUTE TIME, not in business days. created_at is UTC
+//     `datetime('now')` and the bound below is UTC `datetime('now', '-N
+//     minutes')`, so the shop's 5 AM business-day rollover (todayDate(), which
+//     bills_date uses) never enters into it. Widening this to "the whole
+//     business day" would be the Oct 4 bug with a shorter fuse: it would still
+//     swallow the 11 AM repeat of the 9 AM order, and across the 5 AM rollover
+//     a 4:55 AM sale and a 5:05 AM one would fall in different days while being
+//     ten minutes apart. Absolute minutes have neither problem.
+const REPLAY_WINDOW_MINUTES = 10;
+
+// Guard the interpolation below: this value is inlined into SQL, so it must be
+// a plain positive integer and nothing else, ever.
+if (!Number.isInteger(REPLAY_WINDOW_MINUTES) || REPLAY_WINDOW_MINUTES <= 0) {
+  throw new Error("REPLAY_WINDOW_MINUTES must be a positive whole number of minutes");
+}
+
+/** The SQL bound, as a readable string, for logs and for the index comment. */
+export const REPLAY_WINDOW_DESCRIPTION = `${REPLAY_WINDOW_MINUTES} minutes`;
+
 // The lookups behind the whole idempotency scheme. Both read only the four
 // fields a caller gets back, so the replay path and the fresh path return the
-// same shape, and both are served by idx_bills_cart_sale.
+// same shape, and both are served by idx_bills_cart_sale_window.
+//
+// ORDER BY created_at DESC, id DESC on both: the same (cart_id, fingerprint)
+// pair can now legitimately appear more than once — that is the whole point of
+// the window — so "the bill for this sale" has to mean the LATEST one. Without
+// it SQLite's choice would be arbitrary, and a retry of today's sale could be
+// answered with a two-day-old token. id DESC breaks a same-second tie.
 const SELECT_BILL_BY_SALE =
-  "SELECT id, token_number, total, bill_date FROM bills WHERE cart_id = ? AND cart_fingerprint = ?";
-const SELECT_BILL_BY_CART = "SELECT id, token_number, total, bill_date FROM bills WHERE cart_id = ?";
+  "SELECT id, token_number, total, bill_date FROM bills" +
+  " WHERE cart_id = ? AND cart_fingerprint = ?" +
+  //  >= so a row written in this very second always matches, and a row with a
+  //  clock-skewed future timestamp still replays rather than being billed twice.
+  `   AND created_at >= datetime('now', '-${REPLAY_WINDOW_MINUTES} minutes')` +
+  " ORDER BY created_at DESC, id DESC LIMIT 1";
+// DELIBERATELY NOT time-bounded. This one answers "is this cart finished with?",
+// and that is a fact with no expiry date: a cart that was billed last week must
+// never be parked again, and a pre-order's 'preorder-<id>' cart must never be
+// collectable a second time however long the customer takes to come back. Only
+// the RETRY question (above) has a shelf life.
+const SELECT_BILL_BY_CART =
+  "SELECT id, token_number, total, bill_date FROM bills WHERE cart_id = ?" +
+  " ORDER BY created_at DESC, id DESC LIMIT 1";
 
 function toCreated(row: any): CreatedBill | null {
   return row
@@ -178,12 +261,16 @@ function toCreated(row: any): CreatedBill | null {
 }
 
 /**
- * Has this cart already produced a bill for THIS EXACT SALE? Returns that bill
- * in the CreatedBill shape (with replayed = true), or null.
+ * Has this cart already produced a bill for THIS EXACT SALE, JUST NOW? Returns
+ * that bill in the CreatedBill shape (with replayed = true), or null.
  *
  * This is the question the replay decision turns on. Note what it does NOT ask:
- * whether the cart has billed anything at all (findBillByCartId below), which
- * is true of a stale cart id carrying a brand-new sale.
+ *   * whether the cart has billed anything at all (findBillByCartId below),
+ *     which is true of a stale cart id carrying a brand-new sale;
+ *   * whether it EVER billed this sale. Only the last REPLAY_WINDOW_MINUTES
+ *     count — see the note on that constant. Past the window the identical
+ *     basket under the identical cart id is a genuine repeat order and gets a
+ *     bill of its own.
  *
  * ADVISORY when called outside a transaction: a caller may use it to decide
  * whether a request is a resubmission, but it must NOT be used to decide whether
@@ -210,6 +297,12 @@ export function findBillBySale(
  * pre-order collect route reads (its cart id is the deterministic
  * 'preorder-<id>', one cart per order, so for that caller the two questions
  * coincide).
+ *
+ * And deliberately NOT time-bounded, unlike findBillBySale: "finished with" is
+ * permanent. A cart billed last month is still not parkable, and a pre-order
+ * collected last month is still collected. Putting the replay window on this
+ * one would let a double Collect past the only check that is not a status
+ * check, which is precisely what must not happen to a customer's deposit.
  */
 export function findBillByCartId(cartId: string | null | undefined): CreatedBill | null {
   const id = String(cartId || "").trim();
@@ -217,16 +310,103 @@ export function findBillByCartId(cartId: string | null | undefined): CreatedBill
   return toCreated(getDb().query(SELECT_BILL_BY_CART).get(id));
 }
 
+// ---------------------------------------------------------------------------
+// THE INDEX BEHIND THE WINDOW
+// ---------------------------------------------------------------------------
+// The guard used to be a partial UNIQUE index on bills(cart_id,
+// cart_fingerprint). That is now WRONG BY CONSTRUCTION: outside the replay
+// window the same cart id carrying the same basket is a genuine repeat order
+// and MUST get a second bill, and that second row would violate it — the
+// cashier would be told "UNIQUE constraint failed" and still could not bill.
+//
+// So the key gains created_at:
+//     UNIQUE (cart_id, cart_fingerprint, created_at) WHERE cart_id IS NOT NULL
+// which is exactly as strong as it can be while still permitting what the
+// window permits:
+//   * two bills for the same basket under the same cart id are allowed — they
+//     differ in created_at, and they can only exist at all if they are more
+//     than REPLAY_WINDOW_MINUTES apart, because anything closer is caught by
+//     the in-transaction gate before it reaches the INSERT;
+//   * two bills for the same basket, same cart id, IN THE SAME SECOND are
+//     still refused. That is the only case the gate cannot see — a second
+//     process racing this one — and it is also the only shape a genuine
+//     duplicate can take, since a legitimate repeat is minutes away by
+//     definition. The catch below turns that refusal back into a replay.
+// It can never reject a legitimate write: to collide, two bills would have to
+// be both >= 10 minutes apart (to exist) and in the same second (to collide).
+//
+// It is also still the index the two lookups above read: (cart_id) and
+// (cart_id, cart_fingerprint) are prefixes of it, and the trailing created_at
+// serves the window's range test and the ORDER BY in the same seek.
+//
+// A STRAIGHT SWAP, NOT A TABLE REBUILD. production is a fly.io volume holding
+// real sales; nothing here touches a row.
+const REPLAY_INDEX = "idx_bills_cart_sale_window";
+const REPLAY_INDEX_COLUMNS = "bills(cart_id, cart_fingerprint, created_at) WHERE cart_id IS NOT NULL";
+/** The index this one replaces. See runMigrations(), which still creates it. */
+const SUPERSEDED_INDEX = "idx_bills_cart_sale";
+
+/**
+ * Put the windowed uniqueness guard in place, replacing the pair-unique one.
+ *
+ * MUST be called AFTER runMigrations(), and on EVERY boot: migrations still
+ * creates idx_bills_cart_sale with IF NOT EXISTS, so a swap done once would be
+ * undone by the next start and billing would break again the moment a genuine
+ * repeat order came through. Running it every boot is cheap (two DDL statements
+ * against one index) and idempotent.
+ *
+ * Both statements go in one transaction, so there is never a moment on disk
+ * with no guard at all — and the new one is created BEFORE the old one is
+ * dropped, so a failure leaves the database exactly as it was found.
+ */
+export function ensureBillReplayIndex(): void {
+  const db = getDb();
+  try {
+    db.transaction(() => {
+      db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS ${REPLAY_INDEX} ON ${REPLAY_INDEX_COLUMNS}`);
+      db.exec(`DROP INDEX IF EXISTS ${SUPERSEDED_INDEX}`);
+    })();
+    return;
+  } catch (err: any) {
+    // Only reachable on a database that already holds two bills with the same
+    // (cart_id, cart_fingerprint, created_at) — i.e. one where the pair-unique
+    // index was never successfully created either. Billing must not be dead on
+    // startup over a belt-and-braces guarantee, and it must certainly not be
+    // left with the OLD index, which would refuse every genuine repeat order.
+    // Fall back to the same index without UNIQUE: the lookups and the window
+    // still have their index, and the in-transaction gate under BEGIN IMMEDIATE
+    // is the protection that actually runs in this single-process deployment.
+    console.error(
+      `[billing] could not create UNIQUE ${REPLAY_INDEX} — falling back to a non-unique index; ` +
+        `duplicate-bill protection rests on the in-transaction check alone:`,
+      err?.message || err
+    );
+  }
+  try {
+    db.transaction(() => {
+      db.exec(`CREATE INDEX IF NOT EXISTS ${REPLAY_INDEX} ON ${REPLAY_INDEX_COLUMNS}`);
+      db.exec(`DROP INDEX IF EXISTS ${SUPERSEDED_INDEX}`);
+    })();
+  } catch (err: any) {
+    console.error(
+      `[billing] could not create ${REPLAY_INDEX} at all. If ${SUPERSEDED_INDEX} is still in place, ` +
+        `a genuine repeat order under a reused cart id will be REFUSED at the till:`,
+      err?.message || err
+    );
+  }
+}
+
 /**
  * Did this error come from the partial UNIQUE index on
- * bills(cart_id, cart_fingerprint)?
+ * bills(cart_id, cart_fingerprint, created_at)?
  *
  * SQLite words a violation of it as
- *   "UNIQUE constraint failed: bills.cart_id, bills.cart_fingerprint"
- * (verified against bun:sqlite with the partial index in place). The older
- * single-column form, "...: bills.cart_id", is still accepted so a database
- * where the index drop/recreate did not run is handled too. Both mention
- * cart_id, and nothing else unique in this transaction does.
+ *   "UNIQUE constraint failed: bills.cart_id, bills.cart_fingerprint, bills.created_at"
+ * (verified against bun:sqlite with the partial index in place). The two older
+ * forms — "...: bills.cart_id, bills.cart_fingerprint" and the single-column
+ * "...: bills.cart_id" — are still accepted so a database where the index swap
+ * did not run is handled too. All three mention cart_id, and nothing else
+ * unique in this transaction does.
  */
 function isDuplicateSaleKey(err: any): boolean {
   const msg = String(err?.message || "");
@@ -292,14 +472,23 @@ export function createBill(params: CreateBillParams): CreatedBill {
     // error reads to the cashier as "the sale failed", and they ring it up a
     // third time. So: return the bill that already exists.
     //
-    // Keyed on the PAIR (cart_id, fingerprint), never on cart_id alone. The
-    // cart id says which till conversation this is; the fingerprint says which
-    // sale. Both must match, because the till only rotates its cart id on a
-    // SUCCESSFUL response: a lost response leaves it on the old id and the next
-    // customer's sale arrives under it. Matching on the id alone answered that
-    // customer with the previous bill and wrote nothing — a real sale lost. A
-    // matching cart id with a different fingerprint is a NEW sale and falls
-    // straight through to the ordinary billing path below.
+    // Keyed on the TRIPLE (cart_id, fingerprint, recency), never on cart_id
+    // alone. The cart id says which till conversation this is; the fingerprint
+    // says which sale; the window (SELECT_BILL_BY_SALE, bounded by
+    // REPLAY_WINDOW_MINUTES) says it was JUST NOW and is therefore a retry.
+    //
+    // All three must match:
+    //   * the id alone is not enough, because a lost response leaves the till
+    //     on the old id and the next customer's sale arrives under it. Matching
+    //     on the id alone answered that customer with the previous bill and
+    //     wrote nothing — a real sale lost.
+    //   * id + fingerprint is not enough either, because a cake shop sells the
+    //     same basket twice. Days later, under an id that was never rotated, an
+    //     untimed match answered a live customer with an old receipt and again
+    //     wrote nothing. That is the Oct 4 / Oct 6 failure.
+    // A matching cart id with a different fingerprint, or a match too old to be
+    // a retry, is a NEW sale and falls straight through to the ordinary billing
+    // path below.
     if (cartId && fingerprint) {
       const existing = db.query(SELECT_BILL_BY_SALE).get(cartId, fingerprint) as any;
       if (existing) {
@@ -397,7 +586,7 @@ export function createBill(params: CreateBillParams): CreatedBill {
   });
 
   // BEGIN IMMEDIATE: this transaction check-then-writes against products,
-  // stock_reservations AND bills(cart_id, cart_fingerprint), so it takes its
+  // stock_reservations AND bills(cart_id, cart_fingerprint, created_at), so it takes its
   // write lock up front rather than trying to upgrade one half-way through.
   // That lock is what makes the duplicate-bill gate above race-safe: the check
   // and the insert are one atomic unit, so two simultaneous submissions of the
@@ -408,9 +597,12 @@ export function createBill(params: CreateBillParams): CreatedBill {
   } catch (err: any) {
     // Belt and braces. If the write lost anyway — a second process, a future
     // worker, anything the in-transaction check cannot see — the partial UNIQUE
-    // index on bills(cart_id, cart_fingerprint) rejected the INSERT and rolled
-    // this transaction back whole (no token, no deduction, no release). The
-    // winning bill is on disk, so this is still a replay, not a failure.
+    // index on bills(cart_id, cart_fingerprint, created_at) rejected the INSERT
+    // and rolled this transaction back whole (no token, no deduction, no
+    // release). The winning bill is on disk, written in the same second (that
+    // is the only way the triple can collide), so it is inside the replay
+    // window by construction and findBillBySale() will see it: this is still a
+    // replay, not a failure.
     if (cartId && fingerprint && isDuplicateSaleKey(err)) {
       const existing = findBillBySale(cartId, fingerprint);
       if (existing) return existing;

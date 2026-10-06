@@ -470,6 +470,9 @@
     function addToCart(id) {
       const p = products.find(x => x.id === id);
       if (!p) return;
+      // A SALE STARTS HERE. Before anything goes in, see whether this is the
+      // first item of a new one — if it is, it gets a cart id of its own.
+      beginSaleIfCartEmpty();
       const ex = cart.find(c => c.product_id === id);
       if (ex) ex.quantity++;
       else cart.push({ product_id: p.id, product_name: p.name, quantity: 1, unit_price: p.discount_price || p.selling_price, original_price: p.selling_price });
@@ -600,6 +603,63 @@
       // move the till onto a new id through here. Fire-and-forget — the new
       // cart does not wait on it and never hears about a failure.
       reportClaims();
+    }
+
+    // Rotate the cart id at the START of a sale, not only at its end.
+    //
+    // WHY. startNewCart() used to run only from clearCart(), parkCurrent() and
+    // the completed-checkout path — all of them ENDINGS. So an ending that
+    // never arrived left the id in place: lose the checkout response (flaky
+    // wifi, a fly.io cold start, a phone locked mid-request) and this till kept
+    // the same cart id for the next customer, the next hour and — as happened
+    // on Oct 4 — the next two days. On Oct 6 the same two cakes under that same
+    // id hashed to the same sale, matched the Oct 4 bill, and the live sale was
+    // refused with "already recorded as Token #014". Rotating here means every
+    // sale attempt carries a key of its own, so a lost response can never
+    // poison the NEXT customer's sale. The existing rotations all stay: this
+    // adds a beginning, it does not remove an ending.
+    //
+    // WHY IT IS FREE. An empty cart holds no stock and owns no server state:
+    // nothing is synced under the id, nothing is parked under it, nothing is
+    // persisted under it. Walking away from it releases nothing and orphans
+    // nothing.
+    //
+    // THE THREE GUARDS, each closing a way that would NOT be free:
+    //
+    //  1. cart.length — never rotate mid-sale. Lines already on screen were
+    //     synced to the server under the current id; moving off it would strand
+    //     their hold where only an admin could release it.
+    //
+    //  2. holdsOnServer — the screen can be empty while the id still holds
+    //     stock, and then the id is doing a job. Two ways in: rehydrateHolds()
+    //     finds holds with no cart behind them and asks the cashier to ring the
+    //     items up again (which must land under the SAME id, where the sync
+    //     simply replaces the hold); and the moment after the last line is
+    //     removed, when the releasing sync is queued but has not landed yet
+    //     (startNewCart() bumps syncSeq, which would retire that very sync and
+    //     leave the hold standing forever). holdsOnServer only goes false when
+    //     the server has confirmed there is nothing left to hold, so waiting on
+    //     it covers both.
+    //
+    //  3. cartStorageReady — restorePersistedCart() has not run yet. The grid
+    //     is tappable before it finishes, and it matches the saved cart against
+    //     the CURRENT id; rotating underneath it would make it discard the
+    //     snapshot it was about to restore, stranding that cart's hold. It
+    //     flips true as the restore begins, so this only skips the first moment
+    //     of the page's life — where not rotating is exactly today's behaviour.
+    //
+    // Everything downstream lines up by construction, because the id is changed
+    // BEFORE the cart is touched: queueCartSync() reads getCartId() when it
+    // runs, so the hold is taken under the new id; persistCart() (via recalc())
+    // stamps the snapshot with the new id; and startNewCart() itself calls
+    // reportClaims(), so the till's claim names the new active cart in the same
+    // breath.
+    function beginSaleIfCartEmpty() {
+      if (cart.length > 0) return false;   // mid-sale — the id is in use
+      if (holdsOnServer) return false;     // empty screen, but stock still held under it
+      if (!cartStorageReady) return false; // the saved cart has not been read back yet
+      startNewCart();
+      return true;
     }
 
     function releaseHoldsFor(id) {
