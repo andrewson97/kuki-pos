@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { getDb } from "../db/database";
-import { getUser } from "../middleware/auth";
+import { canSeeDashboardMoney, getUser } from "../middleware/auth";
 import { todayDate } from "../utils/helpers";
 import { getStockAlerts } from "../services/stock";
 import { costOfGoods, money, moneyReceivedByMethod, salesSummary } from "../services/sales";
@@ -12,12 +12,13 @@ mobile.get("/dashboard", (c) => {
   const db = getDb();
   const today = todayDate();
 
-  // Same rule as /api/dashboard/stats: the day's money is the owner's business,
-  // so it is left out of the response for a cashier rather than merely hidden in
-  // the view - anyone can open this endpoint directly. Everything a cashier
-  // actually works from (bill count, tasks, stock alerts) still comes through.
+  // Same rule as /api/dashboard/stats (canSeeDashboardMoney): the day's money
+  // goes to admins and to cashiers an admin has allowed to see it, and is left
+  // out of the response for everyone else rather than merely hidden in the view
+  // - anyone can open this endpoint directly. Everything a cashier actually
+  // works from (bill count, tasks, stock alerts) still comes through.
   const user = getUser(c);
-  const isAdmin = user?.role === "admin";
+  const showMoney = canSeeDashboardMoney(user);
 
   // Same figures as /api/dashboard/stats and /api/reports/daily for today, from
   // ../services/sales: gross sales on the sale day, refunds on the refund day,
@@ -67,7 +68,7 @@ mobile.get("/dashboard", (c) => {
     // Omitted, not nulled: a missing key cannot be mistaken for a figure, while
     // null would reach fmt() and render as "Rs. 0.00" - a wrong number is worse
     // than no number.
-    today: isAdmin
+    today: showMoney
       // `sales` is NET of refunds handed back today; gross_sales and refunds
       // are its two halves. by_payment is money RECEIVED today by method.
       ? {

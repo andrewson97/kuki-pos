@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { getDb } from "../db/database";
-import { getUser } from "../middleware/auth";
+import { canSeeDashboardMoney, getUser } from "../middleware/auth";
 import { todayDate } from "../utils/helpers";
 import { getStockAlerts } from "../services/stock";
 import { costOfGoods, money, moneyReceivedByMethod, salesSummary } from "../services/sales";
@@ -11,21 +11,22 @@ dashboard.get("/stats", (c) => {
   const db = getDb();
   const today = todayDate();
 
-  // The day's takings are the owner's business only. Same admin test as
-  // adminOnly() in ../middleware/auth, applied per field instead of per route:
-  // a cashier still needs the bill count, the stock alerts and the recent bills
+  // The day's takings are shown to admins, and to a cashier only if an admin
+  // has turned "Show today's money on the dashboard" on for them (Users page) —
+  // see canSeeDashboardMoney(). Applied per field instead of per route: every
+  // cashier still needs the bill count, the stock alerts and the recent bills
   // off this endpoint, so the route itself stays open and the money is left out
   // of the response. Hiding it in the view alone would not hide it at all —
   // anyone can open /api/dashboard/stats.
   const user = getUser(c);
-  const isAdmin = user?.role === "admin";
+  const showMoney = canSeeDashboardMoney(user);
 
   // Same figures as /api/reports/daily for today (../services/sales): gross
   // sales on the sale day, refunds on the refund day, net = gross - refunds.
   // bill_count is every bill sold today, refunded since or not.
   const todaySales = salesSummary(today, today);
 
-  const todayExpenses = isAdmin ? db.query(`
+  const todayExpenses = showMoney ? db.query(`
     SELECT COALESCE(SUM(amount), 0) as total
     FROM expenses WHERE expense_date = ? AND status = 'approved'
   `).get(today) as any : null;
@@ -49,7 +50,7 @@ dashboard.get("/stats", (c) => {
   // low_stock_count is exactly what the list shows.
   const { low_stock_items, out_of_stock_earlier } = getStockAlerts(today);
 
-  const todayCost = isAdmin ? costOfGoods(today, today) : null;
+  const todayCost = showMoney ? costOfGoods(today, today) : null;
 
   // Omitted, not nulled: a missing key is the only answer a caller cannot
   // mistake for a figure, and `null` would reach formatCurrency() as "Rs. 0.00"
@@ -60,7 +61,7 @@ dashboard.get("/stats", (c) => {
   // today; gross_sales and refunds are the two halves of it. by_payment is money
   // RECEIVED today by method (deposits included, refunds subtracted), so it does
   // not have to add up to `sales`.
-  const todayStats = isAdmin
+  const todayStats = showMoney
     ? {
         sales: todaySales.net_sales,
         gross_sales: todaySales.total_sales,
