@@ -295,14 +295,14 @@
             <div class="row g-2 align-items-end">
               <div class="col-sm-5">
                 <label class="form-label small mb-1" for="po-deposit">Amount taken now</label>
-                <input type="number" class="form-control" id="po-deposit" min="0" step="0.01" placeholder="0.00" oninput="poRenderTotals()">
+                <input type="number" class="form-control" id="po-deposit" min="0" step="any" placeholder="0.00" oninput="poRenderTotals()">
               </div>
               <div class="col-sm-4">
                 <label class="form-label small mb-1" for="po-deposit-method">Paid by</label>
                 <select class="form-select" id="po-deposit-method">
                   <option value="cash">Cash</option>
                   <option value="card">Card</option>
-                  <option value="upi">UPI</option>
+                  <option value="upi">LankaQR</option>
                 </select>
               </div>
               <div class="col-sm-3 text-end">
@@ -2204,7 +2204,7 @@
               <td><input type="number" class="form-control form-control-sm text-end" min="1" step="1"
                          value="${escapeHtml(String(l.quantity))}"
                          oninput="poSetLine(${i}, 'quantity', this.value)"></td>
-              <td><input type="number" class="form-control form-control-sm text-end" min="0" step="0.01"
+              <td><input type="number" class="form-control form-control-sm text-end" min="0" step="any"
                          value="${escapeHtml(String(l.unit_price))}" placeholder="0.00"
                          oninput="poSetLine(${i}, 'unit_price', this.value)"></td>
               <td class="text-end fw-bold" id="po-line-total-${i}">-</td>
@@ -2474,6 +2474,17 @@
           <li>No stock is held for this order - it is baked or picked on the day.</li>
           <li>Ring it up from the Pre-orders screen when the customer comes in.</li>
         </ul>`;
+      // Deposit slip, when money was taken: the server has already queued it on
+      // the shop printer (slip_text). This button is the browser-print fallback,
+      // through the same openAndPrint() the receipts use, without the logo so it
+      // cannot pass for a sales receipt.
+      if (order.slip_text) {
+        const slipBtn = document.createElement('button');
+        slipBtn.className = 'btn btn-outline-secondary w-100 mt-3';
+        slipBtn.textContent = 'Print deposit slip';
+        slipBtn.onclick = () => openAndPrint(order.slip_text, false);
+        document.getElementById('po-done-body').appendChild(slipBtn);
+      }
       new bootstrap.Modal(document.getElementById('preorderDoneModal')).show();
       showToast(`Pre-order #${order.id} taken for ${order.collection_date} - ${formatCurrency(balance)} still to pay.`);
     }
