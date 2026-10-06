@@ -49,7 +49,7 @@
       <h3 id="restock-title">Add stock</h3>
       <input type="hidden" id="restock-id">
       <div class="field"><label>Current quantity</label><input type="text" id="restock-current" readonly></div>
-      <div class="field"><label>Add (units)</label><input type="number" id="restock-add" min="1" step="1" inputmode="numeric"></div>
+      <div class="field"><label>Add (units)</label><input type="number" id="restock-add" min="0" step="1" inputmode="numeric"></div>
       <div class="field"><label>Note (optional)</label><input type="text" id="restock-note" placeholder="supplier, batch, etc."></div>
       <div class="btn-row">
         <button class="btn btn-outline" onclick="closeSheet('restock-sheet')">Cancel</button>
@@ -70,9 +70,12 @@
       <div class="field"><label>Name</label><input type="text" id="s-name"></div>
       <div class="field"><label>Category</label><select id="s-cat-sel"></select></div>
       <div class="field"><label>Unit (kg, L, pcs)</label><input type="text" id="s-unit"></div>
-      <div class="field"><label>Quantity on hand</label><input type="number" id="s-qty" min="0" step="0.001" inputmode="decimal"></div>
-      <div class="field"><label>Cost per unit (Rs.)</label><input type="number" id="s-cost" min="0" step="0.01" inputmode="decimal"></div>
-      <div class="field"><label>Reorder level</label><input type="number" id="s-reorder" min="0" step="0.001" inputmode="decimal"></div>
+      <!-- Editable only for a NEW item (its opening quantity). Saving an existing
+           item never changes its quantity — the server ignores it — so the box
+           is locked then and the movement form below is the way to change it. -->
+      <div class="field"><label id="s-qty-label">Opening quantity</label><input type="number" id="s-qty" min="0" step="any" inputmode="decimal"></div>
+      <div class="field"><label>Cost per unit (Rs.)</label><input type="number" id="s-cost" min="0" step="any" inputmode="decimal"></div>
+      <div class="field"><label>Reorder level</label><input type="number" id="s-reorder" min="0" step="any" inputmode="decimal"></div>
       <div class="btn-row">
         <button class="btn btn-outline" onclick="closeSheet('stock-sheet')">Cancel</button>
         <button class="btn btn-primary" onclick="saveItem(this)">Save</button>
@@ -80,8 +83,19 @@
       <button class="btn btn-danger" id="s-delete" style="display:none;margin-top:8px;" onclick="deleteStockItem(this)">Delete this stock item</button>
       <hr style="margin:18px 0;border:none;border-top:1px solid var(--line);">
       <h3 style="font-size:0.95rem;">Quick stock movement</h3>
-      <div class="field"><label>Quantity change (+ in, − out)</label><input type="number" id="tx-qty" step="0.001" placeholder="e.g., 5 or -2" inputmode="decimal"></div>
-      <div class="field"><label>Type</label><select id="tx-type"><option value="purchase">Purchase / Stock-in</option><option value="adjustment">Adjustment</option><option value="waste">Waste</option></select></div>
+      <!-- The type decides the direction; the quantity is always a plain amount
+           (or, for Count, the figure counted). -->
+      <div class="field">
+        <label>Type</label>
+        <select id="tx-type" onchange="onTxTypeChange()">
+          <option value="purchase">Purchase — adds to stock</option>
+          <option value="usage">Used — removes from stock</option>
+          <option value="waste">Waste — removes from stock</option>
+          <option value="adjustment">Count — sets stock to what you counted</option>
+        </select>
+        <div id="tx-help" style="color:var(--ink-soft);font-size:0.76rem;margin-top:4px;"></div>
+      </div>
+      <div class="field"><label id="tx-qty-label">Quantity</label><input type="number" id="tx-qty" min="0" step="any" inputmode="decimal"></div>
       <div class="field"><label>Reference (optional)</label><input type="text" id="tx-ref" placeholder="e.g., supplier #123"></div>
       <button class="btn btn-success" onclick="addTx(this)">Record movement</button>
     </div>
@@ -235,6 +249,10 @@
       $('sh-title').textContent = 'New stock item';
       $('s-id').value = '';
       ['s-name', 's-unit', 's-qty', 's-cost', 's-reorder', 'tx-qty', 'tx-ref'].forEach(id => $(id).value = '');
+      $('s-qty').disabled = false;
+      $('s-qty-label').textContent = 'Opening quantity';
+      $('tx-type').value = 'purchase';
+      onTxTypeChange();
       if (cats[0]) $('s-cat-sel').value = cats[0].id;
       $('s-delete').style.display = 'none';   // nothing to delete yet
       openSheet('stock-sheet');
@@ -247,9 +265,14 @@
       $('s-cat-sel').value = it.category_id || (cats[0] && cats[0].id);
       $('s-unit').value = it.unit || '';
       $('s-qty').value = it.quantity;
+      $('s-qty').disabled = true;
+      $('s-qty-label').textContent = 'Quantity on hand (change it with a movement below)';
       $('s-cost').value = it.cost_per_unit || 0;
       $('s-reorder').value = it.reorder_level || 0;
       ['tx-qty', 'tx-ref'].forEach(id => $(id).value = '');
+      $('tx-qty').step = qtyStep(it.unit);
+      $('tx-type').value = 'purchase';
+      onTxTypeChange();
       $('s-delete').style.display = currentUser.role === 'admin' ? 'block' : 'none';
       openSheet('stock-sheet');
     }
@@ -307,20 +330,46 @@
     async function addTx(btn) {
       const id = $('s-id').value;
       if (!id) { toast('Save the item first', 'error'); return; }
-      const qty = parseFloat($('tx-qty').value);
-      if (!qty) { toast('Enter a quantity change', 'error'); return; }
+      const raw = $('tx-qty').value;
+      const qty = parseFloat(raw);
       const type = $('tx-type').value;
+      if (raw === '' || !Number.isFinite(qty)) { toast('Enter a quantity', 'error'); return; }
+      if (type !== 'adjustment' && qty <= 0) { toast('Quantity must be greater than zero', 'error'); return; }
+      if (qty < 0) { toast('The counted quantity cannot be negative', 'error'); return; }
       const reference = $('tx-ref').value.trim() || null;
       await withBusy(btn, async () => {
-        await api(`/api/stock/items/${id}/transaction`, { method: 'POST', body: { type, quantity: qty, reference } });
+        const r = await api(`/api/stock/items/${id}/transaction`, { method: 'POST', body: { type, quantity: qty, reference } });
         $('tx-qty').value = '';
         $('tx-ref').value = '';
         items = await api('/api/stock/items');
         const it = items.find(x => x.id === parseInt(id));
         if (it) { $('s-qty').value = it.quantity; }
-        toast(`Recorded ${qty > 0 ? '+' : ''}${qty}${it ? ` — on hand ${it.quantity}` : ''}`);
+        // r.quantity is the signed movement the server recorded (for a count,
+        // the difference), so the toast says what actually happened.
+        const moved = r.unchanged ? 'Count matches — nothing changed' : `Recorded ${r.quantity > 0 ? '+' : ''}${Math.round(r.quantity * 1000) / 1000}`;
+        toast(`${moved}${it ? ` — on hand ${it.quantity}` : ''}`);
         render();
       }, 'Recording…');
+    }
+
+    // Counted things (pcs, boxes…) step by whole units; weights and volumes
+    // (kg, g, l, ml…) take decimals. Either way the arrows move by 1. Kept in
+    // step with views/stock.html.
+    function qtyStep(unit) {
+      return /^(pcs?|pieces?|nos?|units?|each|ea|box(es)?|packs?|packets?|bags?|bottles?|cans?|trays?|dozens?|doz)$/i.test(String(unit || '').trim()) ? '1' : 'any';
+    }
+
+    const TX_TEXT = {
+      purchase: { help: 'Bought or delivered. Adds to what is on hand.', qty: 'Quantity received' },
+      usage: { help: 'Used in the kitchen. Removes from what is on hand.', qty: 'Quantity used' },
+      waste: { help: 'Thrown away (spoiled, spilled, expired). Removes from what is on hand.', qty: 'Quantity thrown away' },
+      adjustment: { help: 'You counted it. On hand is SET to the figure you enter; the difference is recorded.', qty: 'Counted quantity on hand' },
+    };
+    function onTxTypeChange() {
+      const t = TX_TEXT[$('tx-type').value];
+      const unit = $('s-unit').value.trim();
+      $('tx-help').textContent = t.help;
+      $('tx-qty-label').textContent = t.qty + (unit ? ` (${unit})` : '');
     }
 
     // ===== Held stock (cart reservations) =====

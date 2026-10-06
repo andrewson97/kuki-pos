@@ -107,11 +107,11 @@
             <div class="col"><label class="form-label">Unit</label><input type="text" class="form-control" id="stock-unit" placeholder="kg, g, pcs, liters"></div>
           </div>
           <div class="row mb-3">
-            <div class="col"><label class="form-label">Initial Quantity</label><input type="number" class="form-control" id="stock-qty" step="0.01" min="0" value="0"></div>
-            <div class="col"><label class="form-label">Cost Per Unit</label><input type="number" class="form-control" id="stock-cost" step="0.01" min="0" value="0"></div>
+            <div class="col"><label class="form-label">Initial Quantity</label><input type="number" class="form-control" id="stock-qty" step="any" min="0" value="0"></div>
+            <div class="col"><label class="form-label">Cost Per Unit</label><input type="number" class="form-control" id="stock-cost" step="any" min="0" value="0"></div>
           </div>
           <div class="row mb-3">
-            <div class="col"><label class="form-label">Reorder Level</label><input type="number" class="form-control" id="stock-reorder" step="0.01" min="0" value="0"></div>
+            <div class="col"><label class="form-label">Reorder Level</label><input type="number" class="form-control" id="stock-reorder" step="any" min="0" value="0"></div>
             <div class="col"><label class="form-label">Expiry Date</label><input type="date" class="form-control" id="stock-expiry"></div>
           </div>
         </div>
@@ -128,16 +128,21 @@
         <div class="modal-body">
           <input type="hidden" id="txn-item-id">
           <p><strong id="txn-item-name"></strong> — Current: <span id="txn-current-qty"></span></p>
+          <!-- The type decides the direction; the quantity is always a plain,
+               positive amount (or, for Count, the figure you counted). -->
           <div class="mb-3">
             <label class="form-label">Type</label>
-            <select class="form-select" id="txn-type">
-              <option value="purchase">Purchase (Add)</option>
-              <option value="adjustment">Adjustment</option>
-              <option value="waste">Waste (Remove)</option>
+            <select class="form-select" id="txn-type" onchange="onTxnTypeChange()">
+              <option value="purchase">Purchase — adds to stock</option>
+              <option value="usage">Used — removes from stock</option>
+              <option value="waste">Waste — removes from stock</option>
+              <option value="adjustment">Count — sets stock to what you counted</option>
             </select>
+            <div class="text-muted mt-1" id="txn-help" style="font-size:0.8rem;"></div>
           </div>
-          <div class="mb-3"><label class="form-label">Quantity (use negative to remove)</label><input type="number" class="form-control" id="txn-qty" step="0.01"></div>
+          <div class="mb-3"><label class="form-label" id="txn-qty-label">Quantity</label><input type="number" class="form-control" id="txn-qty" step="any" min="0" oninput="updateTxnPreview()"></div>
           <div class="mb-3"><label class="form-label">Reference/Note</label><input type="text" class="form-control" id="txn-ref"></div>
+          <div id="txn-preview" class="fw-bold" style="font-size:0.9rem;"></div>
         </div>
         <div class="modal-footer"><button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button><button class="btn btn-primary" onclick="saveTransaction(this)">Save</button></div>
       </div>
@@ -246,7 +251,7 @@
           <td>${p.stock_reorder_level}</td>
           <td>
             <div class="d-flex gap-1" style="max-width:200px;">
-              <input type="number" class="form-control form-control-sm" id="restock-qty-${p.id}" min="0.01" step="1" placeholder="qty">
+              <input type="number" class="form-control form-control-sm" id="restock-qty-${p.id}" min="0" step="1" placeholder="qty">
               <button class="btn btn-sm btn-success" onclick="restock(${p.id}, this)">Add</button>
             </div>
           </td>
@@ -402,31 +407,80 @@
       }, 'Saving...');
     }
 
+    // Counted things (pcs, boxes…) step by whole units; weights and volumes
+    // (kg, g, l, ml…) take decimals. Either way the arrows move by 1 — never the
+    // 0.01 step the old fields had.
+    function qtyStep(unit) {
+      return /^(pcs?|pieces?|nos?|units?|each|ea|box(es)?|packs?|packets?|bags?|bottles?|cans?|trays?|dozens?|doz)$/i.test(String(unit || '').trim()) ? '1' : 'any';
+    }
+
+    const TXN_TEXT = {
+      purchase: { help: 'Stock bought or delivered. Adds to what is on hand.', qty: 'Quantity received' },
+      usage: { help: 'Used in the kitchen. Removes from what is on hand.', qty: 'Quantity used' },
+      waste: { help: 'Thrown away (spoiled, spilled, expired). Removes from what is on hand.', qty: 'Quantity thrown away' },
+      adjustment: { help: 'You counted it. On hand is SET to the figure you enter; the difference is recorded.', qty: 'Counted quantity on hand' },
+    };
+
     function showTransaction(id) {
       const i = stockItems.find(x => x.id === id);
       document.getElementById('txn-item-id').value = i.id;
       document.getElementById('txn-item-name').textContent = i.name;
       document.getElementById('txn-current-qty').textContent = `${i.quantity} ${i.unit}`;
+      document.getElementById('txn-type').value = 'purchase';
       document.getElementById('txn-qty').value = '';
+      document.getElementById('txn-qty').step = qtyStep(i.unit);
       document.getElementById('txn-ref').value = '';
+      onTxnTypeChange();
       new bootstrap.Modal(document.getElementById('transactionModal')).show();
+    }
+
+    function onTxnTypeChange() {
+      const t = TXN_TEXT[document.getElementById('txn-type').value];
+      const i = stockItems.find(x => x.id === parseInt(document.getElementById('txn-item-id').value));
+      document.getElementById('txn-help').textContent = t.help;
+      document.getElementById('txn-qty-label').textContent = t.qty + (i && i.unit ? ` (${i.unit})` : '');
+      updateTxnPreview();
+    }
+
+    function updateTxnPreview() {
+      const i = stockItems.find(x => x.id === parseInt(document.getElementById('txn-item-id').value));
+      const el = document.getElementById('txn-preview');
+      const raw = document.getElementById('txn-qty').value;
+      const qty = parseFloat(raw);
+      if (!i || raw === '' || !Number.isFinite(qty)) { el.textContent = ''; el.className = 'fw-bold'; return; }
+      const type = document.getElementById('txn-type').value;
+      const onHand = i.quantity || 0;
+      const next = type === 'purchase' ? onHand + qty : type === 'adjustment' ? qty : onHand - qty;
+      // Rounded for display only: 0.1 + 0.2 should read 0.3, not 0.30000000000000004.
+      const shown = Math.round(next * 1000) / 1000;
+      if (next < -1e-9) {
+        el.className = 'fw-bold text-danger';
+        el.textContent = `Only ${onHand} ${i.unit} on hand — you cannot remove ${qty}.`;
+        return;
+      }
+      el.className = 'fw-bold';
+      el.textContent = `On hand: ${onHand} → ${shown} ${i.unit}`;
     }
 
     async function saveTransaction(btn) {
       const id = document.getElementById('txn-item-id').value;
+      const type = document.getElementById('txn-type').value;
       await withBusy(btn, async () => {
-        const qty = parseFloat(document.getElementById('txn-qty').value);
-        if (!qty) throw new Error('Enter a quantity');
-        await api(`/api/stock/items/${id}/transaction`, {
+        const raw = document.getElementById('txn-qty').value;
+        const qty = parseFloat(raw);
+        if (raw === '' || !Number.isFinite(qty)) throw new Error('Enter a quantity');
+        if (type !== 'adjustment' && qty <= 0) throw new Error('Quantity must be greater than zero');
+        if (qty < 0) throw new Error('The counted quantity cannot be negative');
+        const r = await api(`/api/stock/items/${id}/transaction`, {
           method: 'POST',
           body: {
-            type: document.getElementById('txn-type').value,
+            type,
             quantity: qty,
             reference: document.getElementById('txn-ref').value,
           },
         });
         bootstrap.Modal.getInstance(document.getElementById('transactionModal')).hide();
-        showToast('Stock updated!');
+        showToast(r.unchanged ? 'Count matches — nothing to change' : 'Stock updated!');
         await loadStock();
       }, 'Saving...');
     }
@@ -523,7 +577,7 @@
         <tr>
           <td class="fw-bold">${item.name}</td>
           <td>${item.available} ${item.unit}</td>
-          <td><input type="number" class="form-control form-control-sm" value="${item.quantity}" min="0.01" max="${item.available}" step="0.01" style="width:100px;"
+          <td><input type="number" class="form-control form-control-sm" value="${item.quantity}" min="0" max="${item.available}" step="${qtyStep(item.unit)}" style="width:100px;"
             onchange="usageItems[${idx}].quantity = parseFloat(this.value) || 0"></td>
           <td>${item.unit}</td>
           <td><button class="btn btn-sm btn-outline-danger" onclick="usageItems.splice(${idx},1);renderUsageItems();">x</button></td>
