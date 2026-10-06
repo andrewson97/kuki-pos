@@ -34,8 +34,13 @@ const BIZ_DATE = (col: string) => `date(${col}, '+30 minutes')`;
 
 // "This bill was a sale." Shared so no query can drift back to 'completed' only.
 const SOLD = "b.status IN ('completed', 'refunded')";
-const REFUND_DAY = BIZ_DATE("b.refunded_at");
-const IN_REFUND_WINDOW = `b.status = 'refunded' AND b.refunded_at IS NOT NULL AND ${REFUND_DAY} >= ? AND ${REFUND_DAY} <= ?`;
+// A refunded bill with no refunded_at (a refund recorded before that column
+// existed) is treated as refunded on its own sale day. That is exactly how every
+// report showed it before this change, and it keeps such a bill from turning
+// into a sale with no matching refund now that gross sales include refunded
+// bills.
+const REFUND_DAY = `CASE WHEN b.refunded_at IS NULL THEN b.bill_date ELSE ${BIZ_DATE("b.refunded_at")} END`;
+const IN_REFUND_WINDOW = `b.status = 'refunded' AND ${REFUND_DAY} >= ? AND ${REFUND_DAY} <= ?`;
 
 // Report figures are money; keep them to the cent so a refunded day nets to a
 // clean 0.00 rather than -1.8e-12.
