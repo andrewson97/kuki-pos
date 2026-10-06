@@ -1,3 +1,8 @@
+# Deploys happen automatically on every push to main, through fly.io's own
+# GitHub integration - NOT through GitHub Actions. There is no workflow file
+# and none is needed; a second one would race this and produce two releases
+# per commit. Check a deploy with `fly releases -a kuki-pos`, which lands
+# about a minute after the push.
 app = "kuki-pos"
 # Mumbai (bom) is deprecated on fly.io and cannot take new resources.
 # Singapore is the nearest region to the shop: ~3,400 km from Colombo
