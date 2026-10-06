@@ -80,14 +80,39 @@
       <h3>Take a payment</h3>
       <input type="hidden" id="py-id">
       <div id="py-info" style="font-size:0.85rem;color:var(--ink-soft);margin-bottom:10px;"></div>
-      <div class="field"><label>Amount (Rs.)</label><input type="number" id="py-amount" min="0" step="0.01" inputmode="decimal"></div>
+      <div class="field"><label>Amount (Rs.)</label><input type="number" id="py-amount" min="0" step="any" inputmode="decimal"></div>
       <div class="field"><label>Method</label>
-        <select id="py-method"><option value="cash">Cash</option><option value="card">Card</option><option value="upi">UPI</option></select>
+        <select id="py-method"><option value="cash">Cash</option><option value="card">Card</option><option value="upi">LankaQR</option></select>
       </div>
       <div class="field"><label>Paid on</label><input type="date" id="py-date"></div>
       <div class="btn-row">
         <button class="btn btn-outline" onclick="closeSheet('pay-sheet')">Cancel</button>
         <button class="btn btn-success" onclick="submitPayment(this)">Record</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Cancel (admin): an order with money on it needs a decision about that
+       money - refund (and how) or keep. See POST /:id/cancel. -->
+  <div class="sheet" id="cancel-sheet" onclick="if(event.target===this)closeSheet('cancel-sheet')">
+    <div class="sheet-inner">
+      <div class="sheet-handle"></div>
+      <h3 id="cn-title">Cancel order</h3>
+      <div id="cn-info" style="font-size:0.85rem;color:var(--ink-soft);margin-bottom:10px;"></div>
+      <div class="field"><label>Reason (optional)</label><input type="text" id="cn-reason" maxlength="500" placeholder="e.g. no show"></div>
+      <div class="field" id="cn-deposit-wrap"><label id="cn-deposit-label">Deposit</label>
+        <select id="cn-deposit" onchange="syncCancelHint()">
+          <option value="">Choose what happens to it…</option>
+          <option value="refund:cash">Refund in cash (from the drawer)</option>
+          <option value="refund:card">Refund by card</option>
+          <option value="refund:upi">Refund by LankaQR</option>
+          <option value="keep">Keep it (customer forfeits it)</option>
+        </select>
+        <div id="cn-hint" style="font-size:0.78rem;color:var(--ink-soft);margin-top:4px;"></div>
+      </div>
+      <div class="btn-row">
+        <button class="btn btn-outline" onclick="closeSheet('cancel-sheet')">Back</button>
+        <button class="btn btn-danger" onclick="submitCancel(this)">Cancel order</button>
       </div>
     </div>
   </div>
@@ -98,11 +123,11 @@
       <div class="sheet-handle"></div>
       <h3 id="cl-title">Collect</h3>
       <div id="cl-body"></div>
-      <div class="field"><label>Discount (Rs.)</label><input type="number" id="cl-discount" min="0" step="0.01" value="0" inputmode="decimal" oninput="recalcCollect()"></div>
+      <div class="field"><label>Discount (Rs.)</label><input type="number" id="cl-discount" min="0" step="any" value="0" inputmode="decimal" oninput="recalcCollect()"></div>
       <div class="field"><label>Payment method</label>
-        <select id="cl-method" onchange="recalcCollect()"><option value="cash">Cash</option><option value="card">Card</option><option value="upi">UPI</option></select>
+        <select id="cl-method" onchange="recalcCollect()"><option value="cash">Cash</option><option value="card">Card</option><option value="upi">LankaQR</option></select>
       </div>
-      <div class="field" id="cl-cash-wrap"><label>Cash received (Rs.)</label><input type="number" id="cl-cash" min="0" step="0.01" inputmode="decimal" placeholder="optional" oninput="recalcCollect()"></div>
+      <div class="field" id="cl-cash-wrap"><label>Cash received (Rs.)</label><input type="number" id="cl-cash" min="0" step="any" inputmode="decimal" placeholder="optional" oninput="recalcCollect()"></div>
       <div id="cl-summary"></div>
       <div class="btn-row">
         <button class="btn btn-outline" onclick="closeSheet('collect-sheet')">Cancel</button>
@@ -160,11 +185,28 @@
     let editLines = [];
     let lastReceiptText = '';
     let lastKitchenText = '';
+    let lastNoLogo = false;
 
     const isAdmin = () => !!currentUser && currentUser.role === 'admin';
     const isOpenOrder = (o) => o.status === 'taken' || o.status === 'ready';
     const STATUS_LABEL = { taken: 'To make', ready: 'Ready', collected: 'Collected', cancelled: 'Cancelled' };
     const STATUS_BADGE = { taken: 'warning', ready: 'success', collected: 'muted', cancelled: 'muted' };
+
+    // 'upi' is what is stored; the shop and its customers call it LankaQR.
+    function methodLabel(m) {
+      const v = String(m || '').toLowerCase();
+      return v === 'upi' ? 'LankaQR' : v === 'card' ? 'Card' : v === 'cash' ? 'Cash' : String(m || '-');
+    }
+
+    // What became of a cancelled order's deposit (refunded / kept), or that it
+    // was never settled, for an order cancelled before cancelling required it.
+    function depositOutcomeText(o) {
+      if (o.status !== 'cancelled') return '';
+      if (o.deposit_outcome === 'refunded') return `deposit ${fmt(o.deposit_settled_amount)} refunded (${methodLabel(o.deposit_refund_method)})`;
+      if (o.deposit_outcome === 'kept') return `deposit ${fmt(o.deposit_settled_amount)} kept as income`;
+      if (o.amount_paid > 0) return `deposit ${fmt(o.amount_paid)} not settled`;
+      return 'no deposit';
+    }
 
     // ----- Business dates -------------------------------------------------
     // collection_date and paid_on are plain YYYY-MM-DD business dates: formatted
@@ -246,7 +288,10 @@
       const view = $('filter-view').value;
       const p = new URLSearchParams();
       if (view === 'work') { p.set('status', 'open'); p.set('sort', 'due'); }
-      else if (view === 'today') { p.set('date', 'today'); p.set('status', 'all'); p.set('sort', 'due'); }
+      // Today = the production list: still to make or hand over (taken/ready),
+      // due today or earlier, so an overdue cake stays on it (marked OVERDUE)
+      // and a collected or cancelled one does not clutter it.
+      else if (view === 'today') { p.set('to', 'today'); p.set('status', 'open'); p.set('sort', 'due'); }
       else if (view === 'overdue') { p.set('overdue', '1'); p.set('sort', 'due'); }
       else { p.set('status', 'all'); p.set('sort', 'recent'); }
       p.set('limit', '300');
@@ -304,12 +349,12 @@
     // as money the customer still owes.
     function moneyTail(o) {
       if (o.status === 'collected') return 'settled by bill';
-      if (o.status === 'cancelled') return 'not collected';
+      if (o.status === 'cancelled') return escapeHtml(depositOutcomeText(o));
       return 'balance ' + escapeHtml(fmt(o.balance));
     }
     function moneyColor(o) {
       if (o.status === 'collected') return 'var(--green)';
-      if (o.status === 'cancelled') return 'var(--ink-soft)';
+      if (o.status === 'cancelled') return o.amount_paid > 0 && !o.deposit_outcome ? 'var(--red)' : 'var(--ink-soft)';
       return o.balance > 0 ? 'var(--red)' : 'var(--green)';
     }
 
@@ -334,7 +379,7 @@
             <span class="list-meta">${o.amount_paid > 0 ? 'paid ' + escapeHtml(fmt(o.amount_paid)) : 'no deposit'}</span>
             <span class="list-meta" style="font-weight:700;color:${moneyColor(o)};">${moneyTail(o)}</span>
           </div>
-          ${o.is_overdue ? `<div class="list-meta" style="color:var(--red);font-weight:700;margin-top:4px;">${escapeHtml(lateText(o.collection_date))}</div>` : ''}
+          ${o.is_overdue ? `<div class="list-meta" style="color:var(--red);font-weight:700;margin-top:4px;">OVERDUE · ${escapeHtml(lateText(o.collection_date))}</div>` : ''}
         </div>`;
     }
 
@@ -362,7 +407,7 @@
         </div>`).join('');
       const payments = (o.payments || []).map(p => `
         <div class="kv">
-          <span style="color:var(--ink-soft);">${escapeHtml(formatBizDate(p.paid_on))} · ${escapeHtml(String(p.payment_method || '').toUpperCase())}</span>
+          <span style="color:var(--ink-soft);">${escapeHtml(formatBizDate(p.paid_on))} · ${escapeHtml(methodLabel(p.payment_method))}</span>
           <span>${escapeHtml(fmt(p.amount))}
             ${isAdmin() && o.status !== 'collected'
               ? `<button class="btn btn-danger btn-sm" style="width:auto;display:inline-block;margin-left:6px;" onclick="deletePayment(${p.id}, this)">✕</button>`
@@ -385,7 +430,10 @@
         <div class="kv"><span>Paid in advance</span><span>${escapeHtml(fmt(o.amount_paid))}</span></div>
         ${o.status === 'collected'
           ? `<div class="kv" style="font-weight:700;color:var(--green);"><span>Settled</span><span>on the bill</span></div>`
-          : `<div class="kv" style="font-weight:700;color:${moneyColor(o)};"><span>${o.status === 'cancelled' ? 'Was outstanding' : 'Balance'}</span><span>${escapeHtml(fmt(o.balance))}</span></div>`}
+          : `<div class="kv" style="font-weight:700;color:${o.status === 'cancelled' ? 'var(--ink-soft)' : moneyColor(o)};"><span>${o.status === 'cancelled' ? 'Was outstanding' : 'Balance'}</span><span>${escapeHtml(fmt(o.balance))}</span></div>`}
+        ${o.status === 'cancelled'
+          ? `<div class="kv" style="font-weight:700;color:${moneyColor(o)};"><span>On cancelling</span><span>${escapeHtml(depositOutcomeText(o))}</span></div>`
+          : ''}
         ${o.notes ? `<div class="po-note">${escapeHtml(o.notes)}</div>` : ''}
         <div style="margin-top:12px;font-size:0.78rem;font-weight:700;color:var(--ink-soft);text-transform:uppercase;letter-spacing:0.06em;">Payments</div>
         ${payments}
@@ -431,15 +479,49 @@
     }
 
     // ===== Cancel (admin) =================================================
-    async function cancelOrder(btn) {
-      if (!detailOrder) return;
-      const id = detailOrder.id;
-      // confirm stays OUTSIDE the guard: it writes nothing, and backing out must
-      // not leave the button disabled.
-      if (!confirm('Cancel this pre-order? Any deposit already taken has to be refunded as a cash expense.')) return;
+    // An order with money on it cannot be cancelled without deciding what
+    // happens to the money (refund how, or keep) — the server refuses a cancel
+    // that does not say, so the sheet asks first.
+    function cancelOrder() {
+      const o = detailOrder;
+      if (!o) return;
+      const paid = Number(o.amount_paid || 0);
+      $('cn-title').textContent = `Cancel #${o.id}`;
+      $('cn-info').innerHTML = `${escapeHtml(o.customer_name || 'Customer')} · order ${escapeHtml(fmt(o.total))} · paid <strong>${escapeHtml(fmt(paid))}</strong>`;
+      $('cn-reason').value = '';
+      $('cn-deposit').value = '';
+      $('cn-deposit-label').textContent = `Deposit of ${fmt(paid)} — what happens to it?`;
+      $('cn-deposit-wrap').style.display = paid > 0 ? '' : 'none';
+      syncCancelHint();
+      openSheet('cancel-sheet');
+    }
+
+    function syncCancelHint() {
+      const v = $('cn-deposit').value;
+      $('cn-hint').textContent = v === 'refund:cash' ? 'Comes out of the drawer for this shift. Not an expense.'
+        : v.startsWith('refund:') ? 'Paid back outside the drawer.'
+        : v === 'keep' ? 'Recorded as today’s income. No money moves.'
+        : '';
+    }
+
+    async function submitCancel(btn) {
+      const o = detailOrder;
+      if (!o) return;
+      const id = o.id;
+      const body = { reason: $('cn-reason').value.trim() };
+      if (Number(o.amount_paid || 0) > 0) {
+        const v = $('cn-deposit').value;
+        if (!v) { toast('Choose what happens to the deposit', 'error'); return; }
+        if (v === 'keep') body.deposit_action = 'keep';
+        else { body.deposit_action = 'refund'; body.refund_method = v.split(':')[1]; }
+      }
       await withBusy(btn, async () => {
-        const res = await api(`/api/preorders/${id}/cancel`, { method: 'POST', body: {} });
-        toast(res.refund_due > 0 ? `Cancelled — ${fmt(res.refund_due)} refundable` : 'Cancelled');
+        const res = await api(`/api/preorders/${id}/cancel`, { method: 'POST', body });
+        const s = res.deposit_settled;
+        toast(!s ? 'Cancelled'
+          : s.outcome === 'refunded' ? `Cancelled — refund ${fmt(s.amount)} (${methodLabel(res.deposit_refund_method)})`
+          : `Cancelled — ${fmt(s.amount)} kept as income`);
+        closeSheet('cancel-sheet');
         closeSheet('detail-sheet');
         await refreshAll();
       }, 'Cancelling…');
@@ -474,7 +556,7 @@
       const amount = parseFloat($('py-amount').value);
       if (!Number.isFinite(amount) || amount <= 0) { toast('Enter an amount', 'error'); return; }
       await withBusy(btn, async () => {
-        await api(`/api/preorders/${id}/payments`, {
+        const res = await api(`/api/preorders/${id}/payments`, {
           method: 'POST',
           body: { amount, payment_method: $('py-method').value, paid_on: $('py-date').value || todayISO() },
         });
@@ -482,6 +564,13 @@
         closeSheet('pay-sheet');
         detailOrder = await api(`/api/preorders/${id}`);
         renderDetail();
+        // The customer's proof of payment, already queued on the shop printer
+        // by the server; shown here with the same Print button as a receipt.
+        // No logo — a logo-topped slip would pass for a sales receipt.
+        if (res && res.slip_text) {
+          showReceipt(null, `${fmt(amount)} taken · balance ${fmt(res.balance)}`, res.slip_text, '',
+            { title: `Deposit slip · #${id}`, noLogo: true });
+        }
         await refreshAll();
       }, 'Saving…');
     }
@@ -576,12 +665,16 @@
     }
 
     // ===== Receipt ========================================================
-    function showReceipt(token, headline, receipt, kitchen) {
-      $('rc-title').textContent = token == null ? 'Receipt' : `Token #${String(token).padStart(3, '0')}`;
+    // opts.title replaces the token heading and opts.noLogo keeps the logo off
+    // the printout — both for the deposit slip.
+    function showReceipt(token, headline, receipt, kitchen, opts) {
+      opts = opts || {};
+      $('rc-title').textContent = opts.title || (token == null ? 'Receipt' : `Token #${String(token).padStart(3, '0')}`);
       $('rc-headline').textContent = headline || '';
       $('rc-text').textContent = receipt || '';
       lastReceiptText = receipt || '';
       lastKitchenText = kitchen || '';
+      lastNoLogo = !!opts.noLogo;
       openSheet('receipt-sheet');
     }
 
@@ -602,7 +695,7 @@
       if (!text) { toast(`No ${which} copy available`, 'error'); return; }
       const w = window.open('', '_blank', 'width=350,height=700');
       const logoUrl = window.location.origin + '/public/img/kuki_logo.png';
-      const logo = which === 'kitchen' ? '' : `<img src="${logoUrl}">`;
+      const logo = which === 'kitchen' || lastNoLogo ? '' : `<img src="${logoUrl}">`;
       w.document.write(`<html><head><style>@page{size:58mm auto;margin:0;}body{font-family:monospace;width:58mm;margin:0;}.slip{width:58mm;padding:0 0 2mm;text-align:center;}.slip img{max-width:45mm;max-height:22mm;display:block;margin:0 auto 2px;}pre{font-size:13px;font-weight:600;white-space:pre-wrap;text-align:left;padding:0 1mm;}</style></head><body><div class="slip">${logo}<pre>${escapeHtml(text)}</pre></div><script>window.addEventListener('load',()=>{window.addEventListener('afterprint',()=>setTimeout(()=>window.close(),200));window.print();});<\/script></body></html>`);
       w.document.close();
     }
@@ -656,7 +749,7 @@
                 <input type="number" min="1" step="1" inputmode="numeric" value="${escapeHtml(String(l.quantity))}"
                        oninput="onLineChange(${i}, 'quantity', this.value)"></div>
               <div class="field"><label>Unit price</label>
-                <input type="number" min="0" step="0.01" inputmode="decimal" value="${escapeHtml(String(l.unit_price))}"
+                <input type="number" min="0" step="any" inputmode="decimal" value="${escapeHtml(String(l.unit_price))}"
                        oninput="onLineChange(${i}, 'unit_price', this.value)"></div>
             </div>
             <button class="btn btn-danger btn-sm" style="margin-top:6px;" onclick="removeLine(${i})">Remove line</button>

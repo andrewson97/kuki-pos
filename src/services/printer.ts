@@ -343,7 +343,8 @@ export function buildDepositSlipText(data: DepositSlipData): string {
   const collectOn = m
     ? `${new Date(Date.UTC(+m[1], +m[2] - 1, +m[3])).toLocaleDateString("en-GB", { timeZone: "UTC", weekday: "short" })} ${m[3]} ${months[+m[2] - 1]} ${m[1]}`
     : data.collectionDate;
-  wrap(`Collect: ${collectOn}${data.collectionTime ? ", " + data.collectionTime : ""}`);
+  lines.push(`Collect: ${collectOn}`);
+  if (data.collectionTime) wrap(`Time: ${data.collectionTime}`);
   lines.push("-".repeat(w));
 
   // Lines summary: what the deposit is FOR. Qty and description, then the line
