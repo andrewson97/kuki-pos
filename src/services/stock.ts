@@ -1,39 +1,13 @@
 import { getDb } from "../db/database";
 import { todayDate } from "../utils/helpers";
 
-export function deductStockForBill(productId: number, quantity: number, billId: number, userId: number): void {
-  const db = getDb();
-  const recipe = db.query(
-    "SELECT stock_item_id, quantity_needed FROM recipes WHERE product_id = ?"
-  ).all(productId) as { stock_item_id: number; quantity_needed: number }[];
-
-  for (const item of recipe) {
-    const totalNeeded = item.quantity_needed * quantity;
-    db.query(
-      "UPDATE stock_items SET quantity = quantity - ?, updated_at = datetime('now') WHERE id = ?"
-    ).run(totalNeeded, item.stock_item_id);
-    db.query(
-      "INSERT INTO stock_transactions (stock_item_id, type, quantity, reference, user_id) VALUES (?, 'usage', ?, ?, ?)"
-    ).run(item.stock_item_id, -totalNeeded, `Bill #${billId}`, userId);
-  }
-}
-
-export function restoreStockForBill(productId: number, quantity: number, billId: number, userId: number): void {
-  const db = getDb();
-  const recipe = db.query(
-    "SELECT stock_item_id, quantity_needed FROM recipes WHERE product_id = ?"
-  ).all(productId) as { stock_item_id: number; quantity_needed: number }[];
-
-  for (const item of recipe) {
-    const totalReturned = item.quantity_needed * quantity;
-    db.query(
-      "UPDATE stock_items SET quantity = quantity + ?, updated_at = datetime('now') WHERE id = ?"
-    ).run(totalReturned, item.stock_item_id);
-    db.query(
-      "INSERT INTO stock_transactions (stock_item_id, type, quantity, reference, user_id) VALUES (?, 'adjustment', ?, ?, ?)"
-    ).run(item.stock_item_id, totalReturned, `Refund Bill #${billId}`, userId);
-  }
-}
+// Recipes are for COSTING only (getProductCost below): selling a product never
+// deducts its recipe ingredients, and so a refund never restores them. The old
+// deductStockForBill / restoreStockForBill pair did exactly that per recipe; the
+// first was never called and the second ran on every refund of an untracked
+// product, quietly adding ingredients back that had never been taken out. Both
+// were removed. Finished-product stock is moved by createBill() and the refund
+// route in src/routes/pos.ts; ingredients move only through src/routes/stock.ts.
 
 export function getLowStockItems(): any[] {
   const db = getDb();

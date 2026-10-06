@@ -3,7 +3,6 @@ import { getDb } from "../db/database";
 import { getUser } from "../middleware/auth";
 import { createBill, findBillByCartId, findBillBySale, saleFingerprint, getNextTokenNumber } from "../services/billing";
 import { getSettings, buildReceiptText, buildKitchenTicket, buildProformaText, queuePrint } from "../services/printer";
-import { restoreStockForBill } from "../services/stock";
 import {
   syncCartReservations,
   releaseCartReservations,
@@ -342,6 +341,23 @@ pos.get("/bills/:id", (c) => {
   return c.json({ ...(bill as any), items });
 });
 
+// Refund a bill. Putting the items back into stock is now the cashier's
+// choice (`restock: true`), OFF by default: most refunds are a cake the
+// customer brought back or complained about, and that goes in the bin, not
+// back on the shelf. Restoring stock for those inflated the count and the till
+// later sold cakes that did not exist. The choice is stored on the bill
+// (bills.refund_restocked) and in the log, so reports and Stock History can
+// tell the two kinds of refund apart.
+//
+// Only finished-product stock is restored — the product's own count when it is
+// tracked, and its tracked components (the same two arms computeStockNeeds()
+// deducts at checkout). Recipe ingredients are NOT touched: recipes are for
+// costing only and selling never deducts them, so a refund must not "give
+// back" ingredients that were never taken (it used to, via restoreStockForBill).
+//
+// A bill made by collecting a pre-order (cart_id 'preorder-…') never deducted
+// stock — collection skips it — so its refund never restores any, whatever the
+// caller asked for. The UI hides the checkbox for those; this is the backstop.
 pos.post("/bills/:id/refund", async (c) => {
   const db = getDb();
   const user = getUser(c)!;
@@ -349,45 +365,66 @@ pos.post("/bills/:id/refund", async (c) => {
   const body = await c.req.json().catch(() => ({}));
   const reason = (body.reason || "").trim();
   if (!reason) return c.json({ error: "Refund reason is required" }, 400);
+  const restockRequested = body.restock === true;
 
   const bill = db.query("SELECT * FROM bills WHERE id = ?").get(id) as any;
   if (!bill) return c.json({ error: "Not found" }, 404);
   if (bill.status !== "completed") return c.json({ error: "Bill is already " + bill.status }, 400);
 
+  const fromPreorder = String(bill.cart_id || "").startsWith("preorder-");
+  const restock = restockRequested && !fromPreorder;
+
   const items = db.query("SELECT product_id, quantity FROM bill_items WHERE bill_id = ?").all(id) as any[];
 
-  db.transaction(() => {
-    for (const item of items) {
-      if (!item.product_id) continue;
-      const product = db.query("SELECT track_stock FROM products WHERE id = ?").get(item.product_id) as any;
+  try {
+    // .immediate() and the status re-check inside it: two taps (or two tills)
+    // refunding the same bill must not both pass the check above and restore
+    // its stock twice.
+    db.transaction(() => {
+      const fresh = db.query("SELECT status FROM bills WHERE id = ?").get(id) as any;
+      if (fresh?.status !== "completed") throw new Error("Bill is already " + (fresh?.status || "gone"));
 
-      // Restore this product's own stock if it's tracked.
-      if (product?.track_stock) {
-        db.query("UPDATE products SET stock_quantity = stock_quantity + ?, stock_updated_at = datetime('now') WHERE id = ?").run(item.quantity, item.product_id);
-      } else {
-        restoreStockForBill(item.product_id, item.quantity, Number(id), user.id);
-      }
+      if (restock) {
+        for (const item of items) {
+          if (!item.product_id) continue;
+          const product = db.query("SELECT track_stock FROM products WHERE id = ?").get(item.product_id) as any;
 
-      // Restore any tracked components (composite/BoM).
-      const components = db.query(
-        "SELECT component_product_id, quantity FROM product_components WHERE product_id = ?"
-      ).all(item.product_id) as any[];
-      for (const c of components) {
-        const comp = db.query("SELECT track_stock FROM products WHERE id = ?").get(c.component_product_id) as any;
-        if (comp?.track_stock) {
-          db.query("UPDATE products SET stock_quantity = stock_quantity + ?, stock_updated_at = datetime('now') WHERE id = ?").run(c.quantity * item.quantity, c.component_product_id);
+          // Restore this product's own stock if it's tracked.
+          if (product?.track_stock) {
+            db.query("UPDATE products SET stock_quantity = stock_quantity + ?, stock_updated_at = datetime('now') WHERE id = ?").run(item.quantity, item.product_id);
+          }
+
+          // Restore any tracked components (composite/BoM).
+          const components = db.query(
+            "SELECT component_product_id, quantity FROM product_components WHERE product_id = ?"
+          ).all(item.product_id) as any[];
+          for (const c of components) {
+            const comp = db.query("SELECT track_stock FROM products WHERE id = ?").get(c.component_product_id) as any;
+            if (comp?.track_stock) {
+              db.query("UPDATE products SET stock_quantity = stock_quantity + ?, stock_updated_at = datetime('now') WHERE id = ?").run(c.quantity * item.quantity, c.component_product_id);
+            }
+          }
         }
       }
-    }
-    db.query(
-      "UPDATE bills SET status = 'refunded', refund_reason = ?, refunded_at = datetime('now'), refunded_by_user_id = ? WHERE id = ?"
-    ).run(reason, user.id, id);
-    db.query("INSERT INTO activity_log (user_id, action, details) VALUES (?, 'refunded_bill', ?)").run(
-      user.id, JSON.stringify({ bill_id: id, token: bill.token_number, amount: bill.total, reason })
-    );
-  })();
+      db.query(
+        "UPDATE bills SET status = 'refunded', refund_reason = ?, refunded_at = datetime('now'), refunded_by_user_id = ?, refund_restocked = ? WHERE id = ?"
+      ).run(reason, user.id, restock ? 1 : 0, id);
+      // `restock` is what actually happened; `restock_requested` is what was
+      // asked for — they differ only for a pre-order bill, where the request is
+      // ignored. Stock History reads `restock` (a missing key = a refund from
+      // before the choice existed, which always restored).
+      db.query("INSERT INTO activity_log (user_id, action, details) VALUES (?, 'refunded_bill', ?)").run(
+        user.id, JSON.stringify({
+          bill_id: id, token: bill.token_number, amount: bill.total, reason,
+          restock, restock_requested: restockRequested, from_preorder: fromPreorder,
+        })
+      );
+    }).immediate();
+  } catch (err: any) {
+    return c.json({ error: err?.message || "Refund failed" }, 400);
+  }
 
-  return c.json({ success: true });
+  return c.json({ success: true, restocked: restock, from_preorder: fromPreorder });
 });
 
 pos.get("/bills/:id/receipt", async (c) => {
