@@ -12,7 +12,9 @@ import { adminOnly } from "../middleware/auth";
 //
 // The four sources:
 //   1. stock_transactions  — ingredients (stock_items). purchase/usage/adjustment/waste.
-//   2. activity_log        — 'restocked_product' (tracked finished goods), plus
+//   2. activity_log        — 'restocked_product' (tracked finished goods),
+//                            'counted_product_stock' (a stock count that set the
+//                            figure — POST /api/products/:id/stock-adjust), plus
 //                            'released_stock_hold' and 'refunded_bill' as context rows.
 //   3. product_disposals   — tracked-product wastage, with its cost.
 //   4. bill_items + bills  — sales. No stock-movement row is ever written for a
@@ -129,6 +131,39 @@ const UNIFIED_SQL = `
   FROM activity_log al
   LEFT JOIN users u ON u.id = al.user_id
   WHERE al.action = 'restocked_product'
+
+  UNION ALL
+
+  -- 2d. A tracked product counted and set to the counted figure ("there are
+  --     actually 5"). The log keeps the signed difference, which is the
+  --     movement; a count that matched is an 'info' row so the check itself
+  --     still shows. The note carries both figures so "why did it jump?" is
+  --     answered on the row.
+  SELECT
+    'stock_count',
+    al.id,
+    al.created_at,
+    ${BIZ_DATE("al.created_at")},
+    'product',
+    CAST(json_extract(al.details, '$.product_id') AS INTEGER),
+    COALESCE(json_extract(al.details, '$.name'), 'Deleted product'),
+    'pcs',
+    'adjustment',
+    CASE
+      WHEN json_extract(al.details, '$.difference') > 0 THEN 'in'
+      WHEN json_extract(al.details, '$.difference') < 0 THEN 'out'
+      ELSE 'info'
+    END,
+    ABS(COALESCE(json_extract(al.details, '$.difference'), 0)),
+    'Counted ' || COALESCE(json_extract(al.details, '$.counted'), '?')
+      || ' (was ' || COALESCE(json_extract(al.details, '$.previous'), '?') || ')'
+      || COALESCE(' — ' || json_extract(al.details, '$.reason'), ''),
+    NULL,
+    u.full_name,
+    NULL
+  FROM activity_log al
+  LEFT JOIN users u ON u.id = al.user_id
+  WHERE al.action = 'counted_product_stock'
 
   UNION ALL
 
