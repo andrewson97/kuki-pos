@@ -340,9 +340,12 @@ export function buildDepositSlipText(data: DepositSlipData): string {
   // Date in local time, which could move it to the neighbouring day.
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(data.collectionDate || "");
   const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-  const collectOn = m
-    ? `${new Date(Date.UTC(+m[1], +m[2] - 1, +m[3])).toLocaleDateString("en-GB", { timeZone: "UTC", weekday: "short" })} ${m[3]} ${months[+m[2] - 1]} ${m[1]}`
-    : data.collectionDate;
+  let collectOn = data.collectionDate;
+  if (m) {
+    const [, y = "", mo = "", d = ""] = m;
+    const weekday = new Date(Date.UTC(+y, +mo - 1, +d)).toLocaleDateString("en-GB", { timeZone: "UTC", weekday: "short" });
+    collectOn = `${weekday} ${d} ${months[+mo - 1] ?? mo} ${y}`;
+  }
   lines.push(`Collect: ${collectOn}`);
   if (data.collectionTime) wrap(`Time: ${data.collectionTime}`);
   lines.push("-".repeat(w));
