@@ -644,6 +644,34 @@ export function runMigrations(): void {
   addColumn("pre_orders", "deposit_refund_method", "TEXT");
   addColumn("pre_orders", "deposit_settled_at", "TEXT");
   addColumn("pre_orders", "deposit_settled_by", "INTEGER");
+
+  // --- fix/stock-refunds ---------------------------------------------------
+  // Whether a refund put the bill's items back into stock. A refund used to
+  // restore stock unconditionally; now the cashier chooses ("Put items back
+  // into stock", off by default — a returned cake usually goes in the bin, not
+  // back on the shelf), and POST /api/pos/bills/:id/refund records the choice
+  // here. 1 = stock was restored, 0 = it was not (or the bill is not refunded).
+  // The reports branch adds this identical line and reads it; addColumn is a
+  // no-op for whichever runs second. Added as a column, never by rebuilding the
+  // table.
+  addColumn("bills", "refund_restocked", "INTEGER NOT NULL DEFAULT 0");
+  // Backfill: every refund made BEFORE the choice existed did restore stock, so
+  // those bills must read 1, not the column default. They are recognised by
+  // their 'refunded_bill' log row, which predates the 'restock' key — every
+  // refund from now on writes that key, true or false. Idempotent: it only ever
+  // touches legacy rows still at 0, so running it on every boot is harmless.
+  try {
+    db.exec(`
+      UPDATE bills SET refund_restocked = 1
+      WHERE status = 'refunded' AND refund_restocked = 0
+        AND id IN (
+          SELECT CAST(json_extract(details, '$.bill_id') AS INTEGER) FROM activity_log
+          WHERE action = 'refunded_bill' AND json_extract(details, '$.restock') IS NULL
+        )
+    `);
+  } catch (err: any) {
+    console.error("[migration] could not backfill bills.refund_restocked for legacy refunds:", err?.message || err);
+  }
 }
 
 export function seedDefaults(): void {

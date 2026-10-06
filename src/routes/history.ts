@@ -12,7 +12,9 @@ import { adminOnly } from "../middleware/auth";
 //
 // The four sources:
 //   1. stock_transactions  — ingredients (stock_items). purchase/usage/adjustment/waste.
-//   2. activity_log        — 'restocked_product' (tracked finished goods), plus
+//   2. activity_log        — 'restocked_product' (tracked finished goods),
+//                            'counted_product_stock' (a stock count that set the
+//                            figure — POST /api/products/:id/stock-adjust), plus
 //                            'released_stock_hold' and 'refunded_bill' as context rows.
 //   3. product_disposals   — tracked-product wastage, with its cost.
 //   4. bill_items + bills  — sales. No stock-movement row is ever written for a
@@ -83,6 +85,12 @@ const MAX_LIMIT = 500;
 // UTC timestamp -> Asia/Colombo business date (5 AM rollover). See note above.
 const BIZ_DATE = (col: string) => `date(${col}, '+30 minutes')`;
 
+// Which bills' sales still count as stock that left the shop: completed bills,
+// and refunded bills whose refund did NOT put the items back. A refund that
+// restocked (refund_restocked = 1, including every refund from before the
+// choice existed — see the backfill in src/db/migrations.ts) cancels its sale.
+const SALE_STILL_OUT = "(b.status = 'completed' OR (b.status = 'refunded' AND b.refund_restocked = 0))";
+
 // One SELECT per source, all sharing the same column list. Column names come
 // from the first branch, but every branch is aliased so the shape is obvious.
 const UNIFIED_SQL = `
@@ -132,6 +140,39 @@ const UNIFIED_SQL = `
 
   UNION ALL
 
+  -- 2d. A tracked product counted and set to the counted figure ("there are
+  --     actually 5"). The log keeps the signed difference, which is the
+  --     movement; a count that matched is an 'info' row so the check itself
+  --     still shows. The note carries both figures so "why did it jump?" is
+  --     answered on the row.
+  SELECT
+    'stock_count',
+    al.id,
+    al.created_at,
+    ${BIZ_DATE("al.created_at")},
+    'product',
+    CAST(json_extract(al.details, '$.product_id') AS INTEGER),
+    COALESCE(json_extract(al.details, '$.name'), 'Deleted product'),
+    'pcs',
+    'adjustment',
+    CASE
+      WHEN json_extract(al.details, '$.difference') > 0 THEN 'in'
+      WHEN json_extract(al.details, '$.difference') < 0 THEN 'out'
+      ELSE 'info'
+    END,
+    ABS(COALESCE(json_extract(al.details, '$.difference'), 0)),
+    'Counted ' || COALESCE(json_extract(al.details, '$.counted'), '?')
+      || ' (was ' || COALESCE(json_extract(al.details, '$.previous'), '?') || ')'
+      || COALESCE(' — ' || json_extract(al.details, '$.reason'), ''),
+    NULL,
+    u.full_name,
+    NULL
+  FROM activity_log al
+  LEFT JOIN users u ON u.id = al.user_id
+  WHERE al.action = 'counted_product_stock'
+
+  UNION ALL
+
   -- 3. Tracked-product disposals, with the money lost.
   SELECT
     'disposal',
@@ -177,7 +218,7 @@ const UNIFIED_SQL = `
   JOIN bills b ON b.id = bi.bill_id
   JOIN products p ON p.id = bi.product_id
   LEFT JOIN users u ON u.id = b.user_id
-  WHERE b.status = 'completed' AND p.track_stock = 1
+  WHERE ${SALE_STILL_OUT} AND p.track_stock = 1
 
   UNION ALL
 
@@ -205,7 +246,7 @@ const UNIFIED_SQL = `
   JOIN product_components pc ON pc.product_id = bi.product_id
   JOIN products cp ON cp.id = pc.component_product_id
   LEFT JOIN users u ON u.id = b.user_id
-  WHERE b.status = 'completed' AND cp.track_stock = 1
+  WHERE ${SALE_STILL_OUT} AND cp.track_stock = 1
 
   UNION ALL
 
@@ -235,12 +276,16 @@ const UNIFIED_SQL = `
 
   UNION ALL
 
-  -- 2c. A refunded bill. Branch 4 only counts status = 'completed', so refunding
-  --     a bill removes its sale rows from this timeline AND the refund handler
-  --     puts the stock back — the two cancel out and the timeline stays
-  --     consistent with on-hand stock. But rows silently vanishing is exactly the
-  --     misleading picture to avoid, so the refund itself is shown as an 'info'
-  --     row. The log has no per-item detail, hence no quantity.
+  -- 2c. A refunded bill. A refund only puts stock back when the cashier ticked
+  --     "Put items back into stock" (bills.refund_restocked = 1). For those,
+  --     branch 4 drops the bill's sale rows AND the stock came back — the two
+  --     cancel out and the timeline stays consistent with on-hand stock. For a
+  --     refund that did NOT restock, the units really did leave, so branch 4
+  --     keeps the sale rows (see SALE_STILL_OUT). Either way the refund itself
+  --     is shown as an 'info' row, saying which of the two happened. Log rows
+  --     written before the choice existed have no 'restock' key; every refund
+  --     back then restored stock, so a missing key reads as "returned". The log
+  --     has no per-item detail, hence no quantity.
   SELECT
     'refund',
     al.id,
@@ -248,7 +293,10 @@ const UNIFIED_SQL = `
     ${BIZ_DATE("al.created_at")},
     '',
     NULL,
-    'All items on bill (returned to stock)',
+    CASE WHEN json_extract(al.details, '$.restock') = 0
+      THEN 'All items on bill (NOT returned to stock)'
+      ELSE 'All items on bill (returned to stock)'
+    END,
     '',
     'refund',
     'info',

@@ -136,21 +136,96 @@ stock.delete("/items/:id", adminOnly, (c) => {
 });
 
 // Stock Transactions (add/remove stock)
+//
+// The TYPE decides the direction; the quantity is always a plain amount. This
+// used to add whatever number was typed regardless of type, so "Waste 5" ADDED
+// five, and a negative typed into "Purchase" quietly removed stock. Now:
+//   purchase   — "we bought N"            → on hand + N
+//   usage      — "we used N"              → on hand − N
+//   waste      — "N went in the bin"      → on hand − N
+//   adjustment — "I counted it, there is N" → on hand = N
+// usage/waste are refused when they would take the item below zero (same rule
+// as the bulk-usage endpoint below), and purchase/usage/waste refuse a quantity
+// of zero or less. An adjustment takes the counted figure, which may be zero.
+//
+// stock_transactions.quantity keeps its signed meaning — negative = out — so
+// Stock History reads these rows unchanged. For an adjustment the row stores
+// the DIFFERENCE between the count and what was on hand, which is the movement.
+const TXN_TYPES = ["purchase", "usage", "waste", "adjustment"];
+
+class TxnError extends Error {
+  constructor(message: string, public status: 400 | 404 = 400) { super(message); }
+}
+
 stock.post("/items/:id/transaction", adminOnly, async (c) => {
-  const stockItemId = c.req.param("id");
-  const { type, quantity, reference } = await c.req.json();
+  const stockItemId = Number(c.req.param("id"));
+  if (!Number.isInteger(stockItemId) || stockItemId <= 0) return c.json({ error: "Invalid stock item id" }, 400);
+  const { type, quantity, reference } = await c.req.json().catch(() => ({} as any));
   const user = getUser(c)!;
   const db = getDb();
 
-  db.query(
-    "INSERT INTO stock_transactions (stock_item_id, type, quantity, reference, user_id) VALUES (?, ?, ?, ?, ?)"
-  ).run(stockItemId, type, quantity, reference || null, user.id);
+  if (!TXN_TYPES.includes(type)) {
+    return c.json({ error: "type must be purchase, usage, waste or adjustment" }, 400);
+  }
+  const qty = Number(quantity);
+  if (quantity === null || quantity === undefined || quantity === "" || !Number.isFinite(qty)) {
+    return c.json({ error: "Enter a quantity" }, 400);
+  }
+  if (type === "adjustment" ? qty < 0 : qty <= 0) {
+    return c.json({ error: type === "adjustment" ? "The counted quantity cannot be negative" : "Quantity must be greater than zero" }, 400);
+  }
+  const note = String(reference || "").trim() || null;
 
-  db.query(
-    "UPDATE stock_items SET quantity = quantity + ?, updated_at = datetime('now') WHERE id = ?"
-  ).run(quantity, stockItemId);
+  let result: any;
+  try {
+    // One write-locked transaction: the on-hand figure the checks and the
+    // adjustment's difference are based on cannot change underneath them.
+    result = db.transaction(() => {
+      const item = db.query("SELECT name, unit, quantity FROM stock_items WHERE id = ?").get(stockItemId) as any;
+      if (!item) throw new TxnError("Stock item not found", 404);
+      const onHand = Number(item.quantity) || 0;
+      const unit = item.unit ? ` ${item.unit}` : "";
 
-  return c.json({ success: true });
+      let delta: number;
+      let next: number;
+      let ref = note;
+      if (type === "purchase") {
+        delta = qty;
+        next = onHand + qty;
+      } else if (type === "adjustment") {
+        delta = qty - onHand;
+        next = qty;
+        // Keep both figures on the row: the stored quantity is only the
+        // difference, and "counted 3 (was 5)" is what someone reading the
+        // history later actually wants to know.
+        ref = `Counted ${qty}${unit} (was ${onHand}${unit})` + (note ? ` — ${note}` : "");
+      } else {
+        // usage / waste. The tiny tolerance stops float dust (0.30000000000000004)
+        // refusing a removal of exactly what is on hand.
+        if (qty > onHand + 1e-9) {
+          throw new TxnError(`Only ${onHand}${unit} of ${item.name} on hand — cannot remove ${qty}${unit}. Use "Count" to correct the figure first if it is wrong.`);
+        }
+        delta = -qty;
+        next = Math.max(0, onHand - qty);
+      }
+
+      // A count that matches what is recorded changes nothing; no movement row.
+      if (delta === 0) return { quantity: 0, new_quantity: onHand, unchanged: true };
+
+      db.query(
+        "INSERT INTO stock_transactions (stock_item_id, type, quantity, reference, user_id) VALUES (?, ?, ?, ?, ?)"
+      ).run(stockItemId, type, delta, ref, user.id);
+      db.query(
+        "UPDATE stock_items SET quantity = ?, updated_at = datetime('now') WHERE id = ?"
+      ).run(next, stockItemId);
+      return { quantity: delta, new_quantity: next };
+    }).immediate();
+  } catch (err: any) {
+    if (err instanceof TxnError) return c.json({ error: err.message }, err.status);
+    throw err;
+  }
+
+  return c.json({ success: true, type, ...result });
 });
 
 stock.get("/items/:id/transactions", (c) => {

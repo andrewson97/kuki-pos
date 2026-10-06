@@ -137,15 +137,150 @@ products.post("/", adminOnly, async (c) => {
   const cat = canonicalCategory(category);
   const cleanName = (name || "").trim();
   const ts = track_stock ? 1 : 0;
-  // stock_updated_at is stamped here too: the row's stock was just set, so a
-  // product created today at zero really did "run out" today, not at an
-  // unknown time in the past.
-  const result = db.query(
-    "INSERT INTO products (name, category, cost_price, selling_price, discount_price, is_active, track_stock, stock_quantity, stock_reorder_level, stock_updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))"
-  ).run(cleanName, cat, cost_price || 0, selling_price, dp, is_active ?? 1, ts, ts ? (stock_quantity || 0) : 0, ts ? (stock_reorder_level || 0) : 0);
-  const id = Number(result.lastInsertRowid);
-  saveComponents(id, components);
+  const user = getUser(c)!;
+  // Creating a product is the one place a form may still SET the count: there
+  // is no earlier figure to overwrite. Never negative.
+  const openingRaw = Number(stock_quantity);
+  const opening = ts && Number.isFinite(openingRaw) && openingRaw > 0 ? openingRaw : 0;
+  let id = 0;
+  db.transaction(() => {
+    // stock_updated_at is stamped here too: the row's stock was just set, so a
+    // product created today at zero really did "run out" today, not at an
+    // unknown time in the past.
+    const result = db.query(
+      "INSERT INTO products (name, category, cost_price, selling_price, discount_price, is_active, track_stock, stock_quantity, stock_reorder_level, stock_updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))"
+    ).run(cleanName, cat, cost_price || 0, selling_price, dp, is_active ?? 1, ts, opening, ts ? (stock_reorder_level || 0) : 0);
+    id = Number(result.lastInsertRowid);
+    saveComponents(id, components);
+    // The opening count is a stock movement like any other, so it is logged as
+    // a 'restocked_product' row — the action Stock History already reads — and
+    // the product's history starts with where its first units came from.
+    if (opening > 0) {
+      db.query("INSERT INTO activity_log (user_id, action, details) VALUES (?, 'restocked_product', ?)").run(
+        user.id, JSON.stringify({ product_id: id, name: cleanName, quantity: opening, note: "Opening stock", previous: 0, new_quantity: opening })
+      );
+    }
+  })();
   return c.json({ id, name: cleanName, category: cat, cost_price, selling_price, discount_price: dp });
+});
+
+// --- Adjust a tracked product's stock --------------------------------------
+//
+// The ONE way to change a tracked product's count after it exists. The product
+// edit form used to carry the count and write it back on every save, which
+// silently undid any sales rung up while the form was open (the form held the
+// figure from when it was opened) and left no record of the change. The edit
+// form no longer touches stock; this endpoint does, deliberately and on the
+// record.
+//
+// Three types, each a different question the person at the counter is
+// answering:
+//   received — "we baked / bought N more"           → count + N
+//   waste    — "N went in the bin"                   → count − N, refused if it
+//                                                      would go below zero
+//   count    — "I counted them and there are N"      → count = N
+//
+// Every adjustment is written where Stock History (src/routes/history.ts)
+// already looks, so it appears there with who, when, how much and why:
+//   received → activity_log 'restocked_product' (the same row the old restock
+//              endpoint writes — history source 2a)
+//   waste    → product_disposals, with cost_loss (history source 3). It is a
+//              disposal in every sense: the daily/monthly reports subtract
+//              disposal loss from profit, so waste entered here counts there.
+//              Plus the usual 'disposed_product' log row, as /dispose writes.
+//   count    → activity_log 'counted_product_stock' with the previous figure,
+//              the counted figure and the signed difference (history source 2d).
+const ADJUST_TYPES = ["received", "waste", "count"] as const;
+type AdjustType = (typeof ADJUST_TYPES)[number];
+
+class AdjustError extends Error {
+  constructor(message: string, public status: 400 | 404 = 400) { super(message); }
+}
+
+products.post("/:id/stock-adjust", adminOnly, async (c) => {
+  const id = Number(c.req.param("id"));
+  if (!Number.isInteger(id) || id <= 0) return c.json({ error: "Invalid product id" }, 400);
+  const user = getUser(c)!;
+  const body = await c.req.json().catch(() => ({} as any));
+
+  const type = String(body.type || "") as AdjustType;
+  if (!ADJUST_TYPES.includes(type)) {
+    return c.json({ error: "type must be 'received', 'waste' or 'count'" }, 400);
+  }
+  const qty = Number(body.quantity);
+  if (body.quantity === null || body.quantity === "" || !Number.isFinite(qty)) {
+    return c.json({ error: "Enter a quantity" }, 400);
+  }
+  // A count can legitimately be zero ("there are none left"); adding or
+  // removing zero is a mistake, and a negative number here would turn a
+  // removal into an addition.
+  if (type === "count" ? qty < 0 : qty <= 0) {
+    return c.json({ error: type === "count" ? "The counted figure cannot be negative" : "Quantity must be greater than zero" }, 400);
+  }
+  const reason = String(body.reason || "").trim() || null;
+  // Waste and counts are exactly the movements someone later asks "why?" about.
+  if (!reason && type !== "received") {
+    return c.json({ error: type === "waste" ? "Say why it was thrown away" : "Say why the count is being corrected" }, 400);
+  }
+
+  const db = getDb();
+  let result: any;
+  try {
+    // .immediate(): read the count and write it under one write lock, so a sale
+    // landing between the read and the write cannot be lost — the bug this
+    // endpoint exists to fix.
+    result = db.transaction(() => {
+      const product = db.query(
+        "SELECT id, name, cost_price, track_stock, stock_quantity FROM products WHERE id = ?"
+      ).get(id) as any;
+      if (!product) throw new AdjustError("Product not found", 404);
+      if (!product.track_stock) throw new AdjustError("Inventory tracking is off for this product");
+
+      const previous = Number(product.stock_quantity) || 0;
+      if (type === "received") {
+        const next = previous + qty;
+        db.query("UPDATE products SET stock_quantity = ?, stock_updated_at = datetime('now') WHERE id = ?").run(next, id);
+        db.query("INSERT INTO activity_log (user_id, action, details) VALUES (?, 'restocked_product', ?)").run(
+          user.id, JSON.stringify({ product_id: id, name: product.name, quantity: qty, note: reason, previous, new_quantity: next })
+        );
+        return { previous, stock_quantity: next, difference: qty };
+      }
+
+      if (type === "waste") {
+        if (qty > previous) {
+          throw new AdjustError(`Only ${previous} of ${product.name} on hand — cannot throw away ${qty}. Count the stock first if the figure is wrong.`);
+        }
+        const next = previous - qty;
+        const costLoss = qty * (product.cost_price || 0);
+        db.query("UPDATE products SET stock_quantity = ?, stock_updated_at = datetime('now') WHERE id = ?").run(next, id);
+        db.query(
+          "INSERT INTO product_disposals (product_id, quantity, cost_loss, reason, business_date, user_id) VALUES (?, ?, ?, ?, ?, ?)"
+        ).run(id, qty, costLoss, reason, todayDate(), user.id);
+        db.query("INSERT INTO activity_log (user_id, action, details) VALUES (?, 'disposed_product', ?)").run(
+          user.id, JSON.stringify({ product_id: id, name: product.name, quantity: qty, cost_loss: costLoss, reason, previous, new_quantity: next })
+        );
+        return { previous, stock_quantity: next, difference: -qty, cost_loss: costLoss };
+      }
+
+      // count: set to the counted figure; the difference is what gets recorded.
+      // A count that matches is still logged (the check itself is worth
+      // recording) but leaves stock_updated_at alone: nothing changed, and the
+      // dashboard reads that date as "when it ran out".
+      const difference = qty - previous;
+      if (difference !== 0) {
+        db.query("UPDATE products SET stock_quantity = ?, stock_updated_at = datetime('now') WHERE id = ?").run(qty, id);
+      }
+      db.query("INSERT INTO activity_log (user_id, action, details) VALUES (?, 'counted_product_stock', ?)").run(
+        user.id, JSON.stringify({ product_id: id, name: product.name, previous, counted: qty, difference, reason })
+      );
+      return { previous, stock_quantity: qty, difference };
+    }).immediate();
+  } catch (err: any) {
+    if (err instanceof AdjustError) return c.json({ error: err.message }, err.status);
+    throw err;
+  }
+
+  return c.json({ success: true, type, ...result });
 });
 
 
@@ -221,18 +356,34 @@ products.post("/:id/dispose", adminOnly, async (c) => {
   const costLoss = qty * (product.cost_price || 0);
   const businessDate = todayDate();
 
-  db.transaction(() => {
-    if (product.track_stock) {
-      // Subtract from stock (allow going negative — admin's call)
-      db.query("UPDATE products SET stock_quantity = stock_quantity - ?, stock_updated_at = datetime('now') WHERE id = ?").run(qty, id);
-    }
-    db.query(
-      "INSERT INTO product_disposals (product_id, quantity, cost_loss, reason, business_date, user_id) VALUES (?, ?, ?, ?, ?, ?)"
-    ).run(id, qty, costLoss, reason, businessDate, user.id);
-    db.query("INSERT INTO activity_log (user_id, action, details) VALUES (?, 'disposed_product', ?)").run(
-      user.id, JSON.stringify({ product_id: id, name: product.name, quantity: qty, cost_loss: costLoss, reason })
-    );
-  })();
+  // Same rule as waste in POST /:id/stock-adjust: disposing of more than is on
+  // hand is refused, so a tracked product's count can never go negative here
+  // either (this used to allow it as "admin's call", which is how counts went
+  // below zero). The stock screens now use stock-adjust; this endpoint stays
+  // working for anything else that calls it. Untracked products have no count,
+  // so for them the disposal is only recorded, as before.
+  try {
+    db.transaction(() => {
+      if (product.track_stock) {
+        // Re-read under the write lock: a sale may have landed since the read above.
+        const fresh = db.query("SELECT stock_quantity FROM products WHERE id = ?").get(product.id) as any;
+        const onHand = Number(fresh?.stock_quantity) || 0;
+        if (qty > onHand) {
+          throw new AdjustError(`Only ${onHand} of ${product.name} on hand — cannot dispose of ${qty}. Count the stock first if the figure is wrong.`);
+        }
+        db.query("UPDATE products SET stock_quantity = stock_quantity - ?, stock_updated_at = datetime('now') WHERE id = ?").run(qty, id);
+      }
+      db.query(
+        "INSERT INTO product_disposals (product_id, quantity, cost_loss, reason, business_date, user_id) VALUES (?, ?, ?, ?, ?, ?)"
+      ).run(id, qty, costLoss, reason, businessDate, user.id);
+      db.query("INSERT INTO activity_log (user_id, action, details) VALUES (?, 'disposed_product', ?)").run(
+        user.id, JSON.stringify({ product_id: id, name: product.name, quantity: qty, cost_loss: costLoss, reason })
+      );
+    }).immediate();
+  } catch (err: any) {
+    if (err instanceof AdjustError) return c.json({ error: err.message }, err.status);
+    throw err;
+  }
 
   return c.json({ success: true, cost_loss: costLoss, business_date: businessDate });
 });
@@ -250,12 +401,18 @@ products.put("/category-order", adminOnly, async (c) => {
 
 products.put("/:id", adminOnly, async (c) => {
   const id = c.req.param("id");
-  const { name, category, cost_price, selling_price, discount_price, is_active, track_stock, stock_quantity, stock_reorder_level, components } = await c.req.json();
+  // stock_quantity is deliberately NOT read from this payload. See the UPDATE.
+  const { name, category, cost_price, selling_price, discount_price, is_active, track_stock, stock_reorder_level, components } = await c.req.json();
   const db = getDb();
   const dp = discount_price && discount_price > 0 && discount_price < selling_price ? discount_price : null;
   const cat = canonicalCategory(category);
   const cleanName = (name || "").trim();
   const ts = track_stock ? 1 : 0;
+  // Absent or junk → keep whatever is stored, rather than zeroing the alert.
+  const reorderRaw = Number(stock_reorder_level);
+  const reorder = stock_reorder_level === undefined || stock_reorder_level === null || stock_reorder_level === "" || !Number.isFinite(reorderRaw)
+    ? null
+    : Math.max(0, reorderRaw);
 
   // A discontinued product must never be re-activated through a plain edit.
   // is_discontinued is not in this payload, so saving one as active would leave
@@ -265,10 +422,19 @@ products.put("/:id", adminOnly, async (c) => {
   const existing = db.query("SELECT is_discontinued FROM products WHERE id = ?").get(Number(id)) as any;
   const active = existing?.is_discontinued ? 0 : is_active;
 
-  // This UPDATE always writes stock_quantity, so it always re-dates the stock.
+  // This UPDATE never writes stock_quantity (or stock_updated_at). The edit form
+  // used to load the count when it opened and send it back on save, so every
+  // sale rung up while the form sat open was silently undone, with no log; and
+  // switching tracking off zeroed the count outright. A product edit is about
+  // the product — name, price, category, whether stock is tracked and where the
+  // alert sits. Changing how many are on the shelf goes through
+  // POST /:id/stock-adjust, which takes the write lock and logs the movement.
+  //
+  // Turning tracking off keeps the count as it is (sales simply stop deducting
+  // from it), so turning it back on picks up where it left off instead of at 0.
   db.query(
-    "UPDATE products SET name = ?, category = ?, cost_price = ?, selling_price = ?, discount_price = ?, is_active = ?, track_stock = ?, stock_quantity = ?, stock_reorder_level = ?, stock_updated_at = datetime('now') WHERE id = ?"
-  ).run(cleanName, cat, cost_price || 0, selling_price, dp, active, ts, ts ? (stock_quantity || 0) : 0, ts ? (stock_reorder_level || 0) : 0, id);
+    "UPDATE products SET name = ?, category = ?, cost_price = ?, selling_price = ?, discount_price = ?, is_active = ?, track_stock = ?, stock_reorder_level = COALESCE(?, stock_reorder_level) WHERE id = ?"
+  ).run(cleanName, cat, cost_price || 0, selling_price, dp, active, ts, reorder, id);
   saveComponents(parseInt(id), components);
   return c.json({ success: true });
 });

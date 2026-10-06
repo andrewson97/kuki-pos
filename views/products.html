@@ -96,15 +96,15 @@
           <div class="row mb-3">
             <div class="col">
               <label class="form-label">Cost Price</label>
-              <input type="number" class="form-control" id="product-cost" step="0.01" min="0" required>
+              <input type="number" class="form-control" id="product-cost" step="any" min="0" required>
             </div>
             <div class="col">
               <label class="form-label">Selling Price</label>
-              <input type="number" class="form-control" id="product-price" step="0.01" min="0" required>
+              <input type="number" class="form-control" id="product-price" step="any" min="0" required>
             </div>
             <div class="col">
               <label class="form-label">Discount Price <small class="text-muted">(optional)</small></label>
-              <input type="number" class="form-control" id="product-discount" step="0.01" min="0" placeholder="leave blank for none">
+              <input type="number" class="form-control" id="product-discount" step="any" min="0" placeholder="leave blank for none">
             </div>
           </div>
           <div class="mb-3">
@@ -116,25 +116,31 @@
             <label class="form-check-label" for="product-track-stock">Track finished-product inventory</label>
             <div class="text-muted" style="font-size:0.8rem;">When on, every sale deducts 1 from the count; recipes are NOT used.</div>
           </div>
+          <!-- The count is only ENTERED here when the product is new. Saving an
+               existing product never changes its stock (it used to write back
+               whatever the form loaded, undoing sales made meanwhile); the
+               count changes only through "Adjust stock", which is logged. -->
           <div class="row mb-3" id="stock-fields" style="display:none;">
-            <div class="col">
-              <label class="form-label">Quantity on hand</label>
+            <div class="col" id="opening-stock-col">
+              <label class="form-label">Opening stock</label>
               <input type="number" class="form-control" id="product-qty" step="1" min="0" value="0">
+            </div>
+            <div class="col" id="onhand-col" style="display:none;">
+              <label class="form-label">On hand</label>
+              <div class="form-control-plaintext fw-bold" id="product-onhand">0</div>
             </div>
             <div class="col">
               <label class="form-label">Reorder level (alert below)</label>
               <input type="number" class="form-control" id="product-reorder" step="1" min="0" value="0">
             </div>
-            <div class="col d-flex align-items-end">
-              <button type="button" class="btn btn-outline-danger w-100" id="btn-dispose" onclick="disposeProduct(this)" style="display:none;">Dispose (expired)…</button>
-            </div>
+            <div class="col-12 text-muted" id="onhand-hint" style="font-size:0.8rem;display:none;">Saving this form never changes the count. Use <strong>Adjust stock</strong> in the product list for deliveries, waste or a recount. Turning tracking off keeps the count as it is.</div>
           </div>
           <div class="mb-3">
             <label class="form-label">Also deducts stock from <small class="text-muted">(components — e.g. "Brownie w/ Ice Cream" deducts 1 Brownie)</small></label>
             <div id="components-list"></div>
             <div class="d-flex gap-2 mt-2">
               <select class="form-select" id="component-picker" style="flex:1;"></select>
-              <input type="number" class="form-control" id="component-qty" style="width:80px;" step="0.01" min="0.01" value="1" placeholder="Qty">
+              <input type="number" class="form-control" id="component-qty" style="width:80px;" step="1" min="0" value="1" placeholder="Qty">
               <button type="button" class="btn btn-outline-primary" onclick="addComponent()">Add</button>
             </div>
           </div>
@@ -146,6 +152,45 @@
         <div class="modal-footer">
           <button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
           <button class="btn btn-primary" onclick="saveProduct(this)">Save</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Adjust stock: the only way to change a tracked product's count after it
+       exists. Each type is recorded where Stock History shows it. -->
+  <div class="modal fade" id="adjustModal" tabindex="-1">
+    <div class="modal-dialog">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title">Adjust stock &mdash; <span id="adj-name"></span></h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body">
+          <input type="hidden" id="adj-id">
+          <p class="mb-3">On hand now: <strong id="adj-onhand">0</strong></p>
+          <div class="btn-group w-100 mb-1" role="group">
+            <input type="radio" class="btn-check" name="adj-type" id="adj-type-received" value="received" checked onchange="onAdjustTypeChange()">
+            <label class="btn btn-outline-success" for="adj-type-received">Received / baked<br><small>adds</small></label>
+            <input type="radio" class="btn-check" name="adj-type" id="adj-type-waste" value="waste" onchange="onAdjustTypeChange()">
+            <label class="btn btn-outline-danger" for="adj-type-waste">Waste<br><small>removes</small></label>
+            <input type="radio" class="btn-check" name="adj-type" id="adj-type-count" value="count" onchange="onAdjustTypeChange()">
+            <label class="btn btn-outline-primary" for="adj-type-count">Count<br><small>sets to counted</small></label>
+          </div>
+          <div class="text-muted mb-3" id="adj-help" style="font-size:0.8rem;"></div>
+          <div class="mb-3">
+            <label class="form-label" id="adj-qty-label">How many?</label>
+            <input type="number" class="form-control" id="adj-qty" step="1" min="0" oninput="updateAdjustPreview()">
+          </div>
+          <div class="mb-2">
+            <label class="form-label" id="adj-reason-label">Reason</label>
+            <input type="text" class="form-control" id="adj-reason">
+          </div>
+          <div id="adj-preview" class="fw-bold" style="font-size:0.9rem;"></div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button class="btn btn-primary" id="adj-save" onclick="saveAdjust(this)">Save</button>
         </div>
       </div>
     </div>
@@ -211,7 +256,7 @@
           const name = p ? p.name : `#${c.component_product_id}`;
           return `<div class="d-flex align-items-center gap-2 py-1 border-bottom">
             <span class="flex-fill"><strong>${escapeHtml(name)}</strong> ${p?.track_stock ? '<span class="badge bg-success">tracked</span>' : '<span class="badge bg-light text-dark">not tracked</span>'}</span>
-            <input type="number" class="form-control form-control-sm" style="width:80px;" value="${c.quantity}" step="0.01" min="0.01" onchange="currentComponents[${i}].quantity = parseFloat(this.value) || 0">
+            <input type="number" class="form-control form-control-sm" style="width:80px;" value="${c.quantity}" step="1" min="0" onchange="currentComponents[${i}].quantity = parseFloat(this.value) || 0">
             <button type="button" class="btn btn-sm btn-outline-danger" onclick="currentComponents.splice(${i},1); renderComponents(); refreshComponentPicker();">×</button>
           </div>`;
         }).join('');
@@ -230,30 +275,106 @@
       renderComponents();
     }
 
-    function onTrackStockToggle() {
+    // New product: the count is typed here as opening stock. Existing product:
+    // shown read-only — the count changes only through Adjust stock.
+    function syncStockFields() {
       const on = document.getElementById('product-track-stock').checked;
+      const isEdit = !!document.getElementById('product-id').value;
       document.getElementById('stock-fields').style.display = on ? 'flex' : 'none';
-      const id = document.getElementById('product-id').value;
-      document.getElementById('btn-dispose').style.display = (on && id) ? 'block' : 'none';
+      document.getElementById('opening-stock-col').style.display = isEdit ? 'none' : 'block';
+      document.getElementById('onhand-col').style.display = isEdit ? 'block' : 'none';
+      document.getElementById('onhand-hint').style.display = isEdit ? 'block' : 'none';
     }
 
-    async function disposeProduct(btn) {
-      const id = document.getElementById('product-id').value;
-      if (!id) { showToast('Save the product first', 'warning'); return; }
-      const qtyStr = prompt('How many units to dispose?', '1');
-      if (qtyStr === null) return;
-      const qty = parseFloat(qtyStr);
-      if (!qty || qty <= 0) { showToast('Invalid quantity', 'error'); return; }
-      const reason = prompt('Reason (e.g., expired, damaged)?', 'expired');
-      if (reason === null) return;
+    function onTrackStockToggle() {
+      syncStockFields();
+    }
+
+    // ===== Adjust stock =====
+    // POST /api/products/:id/stock-adjust. Each type is a different question:
+    // what came in, what was thrown away, or what is actually on the shelf.
+    const ADJUST_TEXT = {
+      received: {
+        help: 'Freshly baked or delivered units. Adds to what is on hand.',
+        qty: 'How many came in?',
+        reason: 'Note (optional)',
+        placeholder: 'e.g., morning bake, supplier delivery',
+      },
+      waste: {
+        help: 'Units thrown away (expired, damaged, dropped). Removes from what is on hand and is counted as a loss at cost price in the reports.',
+        qty: 'How many were thrown away?',
+        reason: 'Reason (required)',
+        placeholder: 'e.g., expired, damaged',
+      },
+      count: {
+        help: 'You counted the shelf. On hand is SET to the number you counted; the difference is recorded.',
+        qty: 'How many did you count?',
+        reason: 'Reason (required)',
+        placeholder: 'e.g., end-of-day count',
+      },
+    };
+
+    function adjustType() {
+      return document.querySelector('input[name="adj-type"]:checked').value;
+    }
+
+    function showAdjust(id) {
+      const p = allProducts.find(x => x.id === id);
+      if (!p) return;
+      document.getElementById('adj-id').value = p.id;
+      document.getElementById('adj-name').textContent = p.name;
+      document.getElementById('adj-onhand').textContent = p.stock_quantity || 0;
+      document.getElementById('adj-type-received').checked = true;
+      document.getElementById('adj-qty').value = '';
+      document.getElementById('adj-reason').value = '';
+      onAdjustTypeChange();
+      new bootstrap.Modal(document.getElementById('adjustModal')).show();
+    }
+
+    function onAdjustTypeChange() {
+      const t = ADJUST_TEXT[adjustType()];
+      document.getElementById('adj-help').textContent = t.help;
+      document.getElementById('adj-qty-label').textContent = t.qty;
+      document.getElementById('adj-reason-label').textContent = t.reason;
+      document.getElementById('adj-reason').placeholder = t.placeholder;
+      updateAdjustPreview();
+    }
+
+    function updateAdjustPreview() {
+      const p = allProducts.find(x => x.id === parseInt(document.getElementById('adj-id').value));
+      const el = document.getElementById('adj-preview');
+      const raw = document.getElementById('adj-qty').value;
+      const qty = parseFloat(raw);
+      if (!p || raw === '' || !Number.isFinite(qty)) { el.textContent = ''; el.className = 'fw-bold'; return; }
+      const onHand = p.stock_quantity || 0;
+      const type = adjustType();
+      const next = type === 'received' ? onHand + qty : type === 'waste' ? onHand - qty : qty;
+      if (next < 0) {
+        el.className = 'fw-bold text-danger';
+        el.textContent = `Only ${onHand} on hand — you cannot throw away ${qty}.`;
+        return;
+      }
+      el.className = 'fw-bold';
+      el.textContent = `On hand: ${onHand} → ${next}`;
+    }
+
+    async function saveAdjust(btn) {
+      const id = document.getElementById('adj-id').value;
+      const type = adjustType();
+      const raw = document.getElementById('adj-qty').value;
+      const reason = document.getElementById('adj-reason').value.trim();
       await withBusy(btn, async () => {
-        const r = await api(`/api/products/${id}/dispose`, { method: 'POST', body: { quantity: qty, reason } });
-        showToast(`Disposed ${qty} unit(s) — loss ${formatCurrency(r.cost_loss)}`);
+        const qty = parseFloat(raw);
+        if (raw === '' || !Number.isFinite(qty)) throw new Error('Enter a quantity');
+        if (type !== 'count' && qty <= 0) throw new Error('Quantity must be greater than zero');
+        if (qty < 0) throw new Error('The count cannot be negative');
+        if (type !== 'received' && !reason) throw new Error('Enter a reason');
+        const r = await api(`/api/products/${id}/stock-adjust`, { method: 'POST', body: { type, quantity: qty, reason } });
+        bootstrap.Modal.getInstance(document.getElementById('adjustModal')).hide();
+        const extra = r.cost_loss ? ` — loss ${formatCurrency(r.cost_loss)}` : '';
+        showToast(`Stock ${r.previous} → ${r.stock_quantity}${extra}`);
         await loadProducts();
-        // refresh form fields from cache
-        const updated = allProducts.find(x => x.id === parseInt(id));
-        if (updated) document.getElementById('product-qty').value = updated.stock_quantity || 0;
-      }, 'Disposing...');
+      }, 'Saving...');
     }
 
     // ===== Arrange categories =====
@@ -415,6 +536,7 @@
           <td>${statusBadge(p)}</td>
           <td>
             <button class="btn btn-sm btn-outline-primary" onclick="editProduct(${p.id})">Edit</button>
+            ${p.track_stock ? `<button class="btn btn-sm btn-outline-success" onclick="showAdjust(${p.id})">Adjust stock</button>` : ''}
             <button class="btn btn-sm btn-outline-danger" onclick="deleteProduct(${p.id}, this)">Delete</button>
           </td>
         </tr>`;
@@ -486,8 +608,7 @@
       document.getElementById('product-track-stock').checked = false;
       document.getElementById('product-qty').value = 0;
       document.getElementById('product-reorder').value = 0;
-      document.getElementById('stock-fields').style.display = 'none';
-      document.getElementById('btn-dispose').style.display = 'none';
+      syncStockFields();
       currentComponents = [];
       renderComponents();
       document.getElementById('product-cost').oninput = updateMarginPreview;
@@ -506,10 +627,9 @@
       document.getElementById('product-discount').value = p.discount_price || '';
       document.getElementById('product-active').checked = !!p.is_active;
       document.getElementById('product-track-stock').checked = !!p.track_stock;
-      document.getElementById('product-qty').value = p.stock_quantity || 0;
+      document.getElementById('product-onhand').textContent = p.stock_quantity || 0;
       document.getElementById('product-reorder').value = p.stock_reorder_level || 0;
-      document.getElementById('stock-fields').style.display = p.track_stock ? 'flex' : 'none';
-      document.getElementById('btn-dispose').style.display = p.track_stock ? 'block' : 'none';
+      syncStockFields();
       currentComponents = (p.components || []).map(c => ({ component_product_id: c.component_product_id, quantity: c.quantity }));
       renderComponents();
       document.getElementById('product-cost').oninput = updateMarginPreview;
@@ -529,7 +649,6 @@
         discount_price: discountInput ? parseFloat(discountInput) : null,
         is_active: document.getElementById('product-active').checked ? 1 : 0,
         track_stock: document.getElementById('product-track-stock').checked ? 1 : 0,
-        stock_quantity: parseFloat(document.getElementById('product-qty').value) || 0,
         stock_reorder_level: parseFloat(document.getElementById('product-reorder').value) || 0,
         components: currentComponents.filter(c => c.component_product_id && c.quantity > 0),
       };
@@ -537,8 +656,11 @@
         // Blank / NaN would become JSON null and blow up on selling_price NOT NULL.
         if (!data.selling_price || data.selling_price < 0) throw new Error('Selling price is required');
         if (id) {
+          // No stock_quantity on an edit: the server ignores it anyway, and
+          // leaving it out makes it plain that this form cannot change the count.
           await api(`/api/products/${id}`, { method: 'PUT', body: data });
         } else {
+          data.stock_quantity = Math.max(0, parseFloat(document.getElementById('product-qty').value) || 0);
           await api('/api/products', { method: 'POST', body: data });
         }
 
