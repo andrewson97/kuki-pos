@@ -19,8 +19,9 @@
       <div class="row g-4 mb-4">
         <div class="col-md-3" data-money>
           <div class="stat-card position-relative">
-            <div class="stat-label">Today's Sales</div>
+            <div class="stat-label">Today's Net Sales</div>
             <div class="stat-value" id="stat-sales">-</div>
+            <div class="small text-muted" id="stat-sales-note"></div>
             <div class="stat-icon">&#128176;</div>
           </div>
         </div>
@@ -57,6 +58,13 @@
           <div class="stat-card position-relative">
             <div class="stat-label">Net Profit</div>
             <div class="stat-value" id="stat-net-profit">-</div>
+          </div>
+        </div>
+        <div class="col-md-6" data-money>
+          <div class="stat-card">
+            <div class="stat-label">Money received today by method</div>
+            <div class="small text-muted mb-1">Deposits the day they are paid, refunds the day they go back &mdash; need not add up to sales.</div>
+            <div id="stat-by-payment" class="small">-</div>
           </div>
         </div>
       </div>
@@ -167,6 +175,23 @@
       return `out since ${escapeHtml(formatBusinessDate(since))}`;
     }
 
+    // 'upi' is what the database stores; the customer pays with LankaQR.
+    function payLabel(m) {
+      const v = String(m || '').toLowerCase();
+      return v === 'upi' ? 'LankaQR' : v.toUpperCase();
+    }
+
+    // Money RECEIVED today by method (server: today.by_payment) — a deposit
+    // counts on the day and by the method it was paid, a refund comes off on
+    // the day it was handed back.
+    function renderByPayment(rows) {
+      const el = document.getElementById('stat-by-payment');
+      if (!el || !Array.isArray(rows)) return;
+      el.innerHTML = rows.length
+        ? rows.map(p => `<div class="d-flex justify-content-between"><span>${escapeHtml(payLabel(p.payment_method))}</span><strong>${formatCurrency(p.total)}</strong></div>`).join('')
+        : '<span class="text-muted">Nothing received yet today</span>';
+    }
+
     // "chicken bun" as an ingredient has confused the owner before - always say which.
     function kindBadge(kind) {
       const label = kind === 'ingredient' ? 'Ingredient' : kind === 'product' ? 'Product' : '';
@@ -210,7 +235,12 @@
         const stats = await api('/api/dashboard/stats');
         const t = stats.today || {};
         const signColor = v => (v >= 0 ? '#28a745' : '#dc3545');
+        // t.sales is NET of refunds handed back today; the note shows both halves.
         setStat('stat-sales', t.sales === undefined ? undefined : formatCurrency(t.sales));
+        if (t.gross_sales !== undefined) {
+          setStat('stat-sales-note', `Gross ${formatCurrency(t.gross_sales)} · Refunds \u2212${formatCurrency(t.refunds || 0)}`);
+        }
+        renderByPayment(t.by_payment);
         setStat('stat-bills', t.bill_count);
         setStat('stat-cost', t.cost_of_goods === undefined ? undefined : formatCurrency(t.cost_of_goods));
         setStat('stat-profit', t.gross_profit === undefined ? undefined : formatCurrency(t.gross_profit),
@@ -231,7 +261,7 @@
               <td><strong>#${String(b.token_number).padStart(3,'0')}</strong></td>
               <td>${escapeHtml(b.customer_name || '-')}</td>
               <td>${formatCurrency(b.total)}</td>
-              <td><span class="badge bg-info">${escapeHtml(b.payment_method)}</span></td>
+              <td><span class="badge bg-info">${escapeHtml(payLabel(b.payment_method))}</span></td>
               <td>${formatTime(b.created_at)}</td>
             </tr>
           `).join('');

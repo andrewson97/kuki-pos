@@ -553,6 +553,17 @@ export function runMigrations(): void {
   // than a row per coin: nobody counts Rs 1 coins one by one at closing time,
   // they bag or weigh them. Counts saved before this had no coins, hence 0.
   addColumn("cash_counts", "coins_total", "REAL NOT NULL DEFAULT 0");
+  // The two lines below are IDENTICAL to ones another branch adds; addColumn()
+  // swallows "duplicate column", so whichever branch lands second is a no-op.
+  // They are here because the reports in this branch read them:
+  //   refund_restocked — 1 when the refund put the bill's items back into
+  //     stock. Only then does the item cost come back off cost of goods on the
+  //     refund day; otherwise the cake is gone and its cost stays a cost.
+  //   paid_in_advance — the part of a pre-order collection bill that was paid
+  //     as deposits before collection day, so "money received by method" counts
+  //     only the balance under the bill's own day and method.
+  addColumn("bills", "refund_restocked", "INTEGER NOT NULL DEFAULT 0");
+  addColumn("bills", "paid_in_advance", "REAL NOT NULL DEFAULT 0");
 }
 
 export function seedDefaults(): void {
