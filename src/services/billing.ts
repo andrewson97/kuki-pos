@@ -431,6 +431,15 @@ interface CreateBillParams {
   // cart id carrying a different sale is billed normally. See the gate at the
   // top of the transaction below.
   cart_id?: string | null;
+  // Bill WITHOUT checking or deducting stock. Only for a pre-order collection
+  // (src/routes/preorders.ts): the owner never enters pre-ordered goods as
+  // stock — they are baked or bought in for that customer — so even a
+  // catalogue line whose product has track_stock = 1 must neither be refused
+  // for "out of stock" nor push the shelf count negative. Holds are still
+  // released and everything else (token, lines, cost price, log) is unchanged.
+  // Not part of the fingerprint: it changes what happens to the shelf, not
+  // which sale this is.
+  skip_stock?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -528,6 +537,16 @@ export function computeBillTotals(
   return { lineTotals, subtotal, discount: disc, tax_amount, total };
 }
 
+
+// CALLING THIS INSIDE YOUR OWN TRANSACTION is supported, and is what the
+// pre-order collect route does so that "bill written" and "order marked
+// collected" commit together or not at all. bun:sqlite turns a transaction
+// started while one is already open into a SAVEPOINT — including the
+// .immediate() variant below, whose BEGIN IMMEDIATE is simply not issued when
+// nested (verified against bun 1.3: an inner throw rolls back only the inner
+// savepoint, an inner success is committed or rolled back with the outer
+// transaction). So the caller must open its outer transaction with
+// .immediate() itself; that is what then holds the write lock across both.
 export function createBill(params: CreateBillParams): CreatedBill {
   const db = getDb();
   const { items, customer_id, discount, tax_rate, payment_method, user_id, amount_given, cart_id } = params;
@@ -628,7 +647,9 @@ export function createBill(params: CreateBillParams): CreatedBill {
     // times in the cart or across item+component sums correctly.
     // Shared with cart reservations (src/services/reservations.ts) so a hold
     // and a deduction can never disagree about what a cake consumes.
-    const needs = computeStockNeeds(items);
+    // skip_stock: no needs at all, so neither the check nor the deduction below
+    // runs. See the option's note on CreateBillParams.
+    const needs: ReturnType<typeof computeStockNeeds> = params.skip_stock ? new Map() : computeStockNeeds(items);
 
     // Validate every aggregated need against stock that is actually ours to
     // take: on-hand minus whatever OTHER carts are holding. With no holds in

@@ -141,6 +141,33 @@ function getDepositsAppliedSince(since: string): number {
 }
 
 /**
+ * Deposits paid BACK in cash when a pre-order was cancelled, since the shift
+ * opened.
+ *
+ * Money leaving the drawer, so it comes off expected cash. It is deliberately
+ * NOT an expense (it was the customer's money held for them, never the shop's
+ * spending, and booking it as one used to cut the day's profit) and not
+ * negative income — it simply undoes getDepositsTakenSince() for that order,
+ * on the day the cash actually went back over the counter.
+ *
+ * Only cash refunds: a card or LankaQR refund never touches the drawer. A
+ * deposit the customer forfeited ('kept') moves no cash at all — it was
+ * counted in when it was taken and simply stays — so it is not here either.
+ * Compared on deposit_settled_at (UTC datetime('now'), set by POST
+ * /api/preorders/:id/cancel) for the same shift-window reason as the rest.
+ */
+function getDepositsRefundedSince(since: string): number {
+  const db = getDb();
+  const row = db.query(`
+    SELECT COALESCE(SUM(deposit_settled_amount), 0) as total
+    FROM pre_orders
+    WHERE deposit_outcome = 'refunded' AND deposit_refund_method = 'cash'
+      AND deposit_settled_at >= ?
+  `).get(since) as { total: number };
+  return row.total;
+}
+
+/**
  * Why a cash movement must be refused right now, or null if it may proceed.
  *
  * The same rule POST /api/pos/bill enforces inline, exposed as a function so
@@ -186,13 +213,15 @@ cash.get("/today", (c) => {
   // the two helpers above; the close below applies exactly these figures.
   const deposits_taken = getDepositsTakenSince(since);
   const deposits_applied = getDepositsAppliedSince(since);
+  // Cash deposits handed back on cancelled pre-orders (-). Not an expense.
+  const deposits_refunded = getDepositsRefundedSince(since);
   const pending_expenses = open ? getPendingExpenseCountSince(open.created_at) : 0;
 
   // What a close right now would expect to find in the drawer. Returned so the
   // close screen can show the running figure and its parts without having to
   // re-derive the formula in the browser.
   const expected_now = open
-    ? (open.total_amount || 0) + cash_sales - cash_refunds - cash_expenses + deposits_taken - deposits_applied
+    ? (open.total_amount || 0) + cash_sales - cash_refunds - cash_expenses + deposits_taken - deposits_applied - deposits_refunded
     : 0;
 
   // Surface whether the open shift is from a prior day (cashier must close it
@@ -211,6 +240,7 @@ cash.get("/today", (c) => {
     cash_expenses,
     deposits_taken,
     deposits_applied,
+    deposits_refunded,
     expected_now,
     pending_expenses,
   });
@@ -273,7 +303,12 @@ cash.post("/close", async (c) => {
   // total, which is exactly what the drawer received.
   const depositsTaken = getDepositsTakenSince(since);
   const depositsApplied = getDepositsAppliedSince(since);
-  const expected = opening + cashSales - cashRefunds - cashExpenses + depositsTaken - depositsApplied;
+  //   - depositsRefunded cash deposits paid back on cancelled pre-orders during
+  //                     this shift: real cash out of the drawer, neither an
+  //                     expense nor income.
+  const depositsRefunded = getDepositsRefundedSince(since);
+  const expected =
+    opening + cashSales - cashRefunds - cashExpenses + depositsTaken - depositsApplied - depositsRefunded;
   const counted = computeTotal(body);
   const variance = counted - expected;
 
@@ -301,6 +336,7 @@ cash.post("/close", async (c) => {
       cash_expenses: cashExpenses,
       deposits_taken: depositsTaken,
       deposits_applied: depositsApplied,
+      deposits_refunded: depositsRefunded,
     },
   });
 });

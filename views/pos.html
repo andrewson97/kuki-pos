@@ -3059,6 +3059,17 @@
           <li>No stock is held for this order - it is baked or picked on the day.</li>
           <li>Ring it up from the Pre-orders screen when the customer comes in.</li>
         </ul>`;
+      // Deposit slip, when money was taken: the server has already queued it on
+      // the shop printer (slip_text). This button is the browser-print fallback,
+      // through the same openAndPrint() the receipts use, without the logo so it
+      // cannot pass for a sales receipt.
+      if (order.slip_text) {
+        const slipBtn = document.createElement('button');
+        slipBtn.className = 'btn btn-outline-secondary w-100 mt-3';
+        slipBtn.textContent = 'Print deposit slip';
+        slipBtn.onclick = () => openAndPrint(order.slip_text, false);
+        document.getElementById('po-done-body').appendChild(slipBtn);
+      }
       new bootstrap.Modal(document.getElementById('preorderDoneModal')).show();
       showToast(`Pre-order #${order.id} taken for ${order.collection_date} - ${formatCurrency(balance)} still to pay.`);
     }

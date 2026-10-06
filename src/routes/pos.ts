@@ -506,6 +506,10 @@ pos.post("/bills/:id/refund", async (c) => {
   return c.json({ success: true });
 });
 
+// Imported here rather than in the block at the top so this route's reprint
+// addition stays self-contained (other work touches that import list).
+import { buildPreorderSettlementBlock } from "../services/printer";
+
 pos.get("/bills/:id/receipt", async (c) => {
   const db = getDb();
   const bill = db.query(`
@@ -540,7 +544,38 @@ pos.get("/bills/:id/receipt", async (c) => {
   // Same treatment as checkout: the caller only renders the text in a browser print
   // popup, and a reprint hits the same shared printer — so it goes through the same
   // queue (never concurrently with a checkout slip) and is not awaited.
-  const receiptText = buildReceiptText(receiptData);
+  //
+  // A pre-order's collection bill gets the same "Paid in advance / Balance"
+  // block the collect route printed under it the first time. Without it a
+  // reprint shows only the bill TOTAL — the whole cake — and reads as though
+  // the customer handed all of it over today, when part was a deposit taken
+  // days ago. bills.paid_in_advance is the figure collect stored; for a
+  // 'preorder-' bill written before that column existed (still 0) it is
+  // recomputed from the order's payments, which are pre-collection only. The
+  // cash given / change of the original visit is not on record (amount_given is
+  // deliberately null for these bills), so the reprint shows the balance only.
+  let settlement = "";
+  const isPreorderBill = String(bill.cart_id || "").startsWith("preorder-");
+  if (isPreorderBill || Number(bill.paid_in_advance || 0) > 0) {
+    const po = db.query("SELECT id FROM pre_orders WHERE bill_id = ?").get(bill.id) as { id: number } | null;
+    let paidInAdvance = Number(bill.paid_in_advance || 0);
+    if (paidInAdvance <= 0 && po) {
+      const row = db
+        .query("SELECT COALESCE(SUM(amount), 0) AS paid FROM pre_order_payments WHERE pre_order_id = ?")
+        .get(po.id) as { paid: number };
+      paidInAdvance = Math.round(row.paid * 100) / 100;
+    }
+    settlement =
+      buildPreorderSettlementBlock({
+        preOrderId: po?.id ?? (isPreorderBill ? Number(String(bill.cart_id).slice("preorder-".length)) || null : null),
+        billTotal: bill.total,
+        depositApplied: paidInAdvance,
+        cashToCollect: Math.round((bill.total - paidInAdvance) * 100) / 100,
+        cashReceived: null,
+        changeDue: null,
+      }) || "";
+  }
+  const receiptText = buildReceiptText(receiptData) + settlement;
   const kitchenText = buildKitchenTicket(receiptData);
   queuePrint(receiptText).then((r) => {
     if (!r.success) console.error(`[print] reprint bill #${bill.id} token #${bill.token_number}: ${r.error}`);
