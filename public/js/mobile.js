@@ -8,9 +8,27 @@ function $(id) { return document.getElementById(id); }
 function escapeHtml(s) {
   return String(s == null ? '' : s).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
 }
+// Money is rounded to the cent with ONE formula, the same one the server uses
+// (round2() in src/services/billing.ts) and the desktop pages use (app.js).
+// toFixed(2) alone works on the binary float — 1.005.toFixed(2) is "1.00" — so
+// a figure shown as 109.67 could still be compared as 109.675 a line later.
+function round2(x) {
+  return Math.round(((Number(x) || 0) + Number.EPSILON) * 100) / 100;
+}
+// Fallback "Rs.", the same as formatCurrency() in app.js, so the phone and the
+// counter never disagree about the symbol before settings load.
 function fmt(amount) {
-  const sym = appSettings.currency_symbol || 'Rs. ';
-  return sym + parseFloat(amount || 0).toFixed(2);
+  const sym = appSettings.currency_symbol || 'Rs.';
+  return sym + round2(parseFloat(amount || 0)).toFixed(2);
+}
+// 'upi' is the stored value (unchanged); LankaQR is what customers scan here.
+// Same mapping as paymentMethodLabel() in app.js and the receipt printer.
+function paymentMethodLabel(method) {
+  const m = String(method || '').trim().toLowerCase();
+  if (m === 'upi') return 'LankaQR';
+  if (m === 'cash') return 'Cash';
+  if (m === 'card') return 'Card';
+  return String(method || '');
 }
 function todayISO() {
   const adjusted = new Date(Date.now() - BUSINESS_DAY_START_HOUR * 60 * 60 * 1000);

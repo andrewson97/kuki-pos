@@ -104,9 +104,33 @@ function createToastContainer() {
   return c;
 }
 
+// Money is rounded to the cent with ONE formula, the same one the server uses
+// (round2() in src/services/billing.ts). toFixed(2) alone is not rounding: it
+// works on the binary float, so 1.005.toFixed(2) is "1.00", and a figure shown
+// as 109.67 could still be compared as 109.675 a line later. Number.EPSILON
+// nudges those exact-half cases the right way. Mirrored in public/js/mobile.js.
+function round2(x) {
+  return Math.round(((Number(x) || 0) + Number.EPSILON) * 100) / 100;
+}
+
+// The shop trades in rupees, so the fallback (before settings load, or with no
+// symbol set) is "Rs." \u2014 the same on every page and on the mobile screens. It
+// used to fall back to the Indian rupee sign here and "Rs. " on mobile.
 function formatCurrency(amount) {
-  const sym = appSettings.currency_symbol || '\u20B9';
-  return `${sym}${parseFloat(amount).toFixed(2)}`;
+  const sym = appSettings.currency_symbol || 'Rs.';
+  return `${sym}${round2(parseFloat(amount)).toFixed(2)}`;
+}
+
+// How a stored payment method reads on screen. 'upi' is what the database has
+// always stored (its CHECK constraint is unchanged), but what customers scan at
+// this counter is LankaQR, so that is the word the cashier sees. Same mapping
+// as paymentLabel() in src/services/printer.ts, and in public/js/mobile.js.
+function paymentMethodLabel(method) {
+  const m = String(method || '').trim().toLowerCase();
+  if (m === 'upi') return 'LankaQR';
+  if (m === 'cash') return 'Cash';
+  if (m === 'card') return 'Card';
+  return String(method || '');
 }
 
 // SQLite's datetime('now') returns UTC without a timezone marker.

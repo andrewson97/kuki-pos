@@ -6,6 +6,13 @@
   <title>POS - Cake Shop</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
   <link href="/public/css/style.css" rel="stylesheet">
+  <style>
+    /* While a sale is being saved (or the till is still finding out whether the
+       last one went through), the cart is frozen: every cart action refuses in
+       code, and this makes that visible so nobody keeps tapping. */
+    .cart-locked .cart-items, .cart-locked .cart-header .btn, .grid-locked { opacity: 0.55; pointer-events: none; }
+    #sale-status .btn-link { padding: 0; vertical-align: baseline; }
+  </style>
 </head>
 <body>
   <div class="sidebar" id="sidebar"></div>
@@ -30,11 +37,14 @@
       <!-- Cart panel -->
       <div class="cart-panel">
         <div class="cart-header">
-          <span>Cart <span class="badge bg-secondary" id="cart-count">0</span></span>
+          <span>Cart <span class="badge bg-secondary" id="cart-count">0</span>
+            <!-- Shown while a stock-hold sync is failing on the network (not a
+                 refusal): the cart is kept and the sync retries by itself. -->
+            <span class="badge bg-warning text-dark ms-1" id="sync-offline" style="display:none;" title="The server could not be reached to hold stock for this cart. The cart is kept and the till keeps retrying.">offline &mdash; retrying</span></span>
           <div class="d-flex gap-2">
             <button class="btn btn-sm btn-outline-primary" onclick="openHeld()">⏸ Held <span class="badge bg-primary" id="held-count" style="display:none;">0</span></button>
             <button class="btn btn-sm btn-outline-info" onclick="parkCurrent(this)">Park</button>
-            <button class="btn btn-sm btn-outline-danger" onclick="clearCart()">Clear</button>
+            <button class="btn btn-sm btn-outline-danger" onclick="clearCartClicked()">Clear</button>
           </div>
         </div>
         <div class="cart-items" id="cart-items">
@@ -43,12 +53,19 @@
         <div class="cart-summary">
           <div class="summary-row" id="row-savings" style="display:none;color:#dc3545;"><span>Item Discounts</span><span id="cart-savings">-</span></div>
           <div class="summary-row"><span>Subtotal</span><span id="cart-subtotal">-</span></div>
+          <!-- Two ways to type the same discount: a percentage or an amount.
+               Only the AMOUNT is ever sent to the server (and parked); the %
+               box just works it out. See onDiscountPctInput(). step="any": the
+               arrows move by 1 and cents can still be typed. -->
           <div class="summary-row">
             <span>Extra Discount</span>
             <div class="d-flex align-items-center gap-1">
-              <input type="number" class="form-control form-control-sm" id="discount-input" value="0" min="0" style="width:80px;text-align:right;" oninput="updateCartTotals()">
+              <input type="number" class="form-control form-control-sm" id="discount-pct" value="0" min="0" max="100" step="any" title="Discount as a percentage of the subtotal" style="width:64px;text-align:right;" oninput="onDiscountPctInput()">
+              <span class="text-muted small">%</span>
+              <input type="number" class="form-control form-control-sm" id="discount-input" value="0" min="0" step="any" title="Discount amount" style="width:84px;text-align:right;" oninput="onDiscountAmountInput()">
             </div>
           </div>
+          <div class="text-danger small text-end" id="discount-hint" style="display:none;">The discount is more than the subtotal &mdash; reduce it to take payment.</div>
           <div class="summary-row"><span>Tax (<span id="tax-rate-display">0</span>%)</span><span id="cart-tax">-</span></div>
           <div class="summary-row total-row"><span>TOTAL</span><span id="cart-total">-</span></div>
         </div>
@@ -78,15 +95,21 @@
                badge beside it is pre-order work already due, so the till can see
                there is something to do without leaving the sale. -->
           <div class="d-flex gap-2 mb-2">
-            <button class="btn btn-sm flex-fill" id="open-preorder" onclick="openPreorder()"
+            <button class="btn btn-sm flex-fill" id="open-preorder" onclick="openPreorderFresh()"
                     title="Take an order for a future date (a cake, a bulk order), with an optional deposit"
                     style="background:white;color:#6f42c1;border:1px solid #6f42c1;font-weight:600;">&#128197; Pre-order (collect later)</button>
             <a class="btn btn-sm" id="preorder-due" href="/preorders" style="display:none;background:#fff3cd;color:#664d03;border:1px solid #ffe69c;font-weight:700;white-space:nowrap;"></a>
           </div>
+          <!-- What the payment buttons are waiting for, when they are: the sale
+               being saved, or the till asking the server whether the last sale
+               went through. Filled by renderSaleStatus(). -->
+          <div id="sale-status" class="alert py-2 px-2 mb-2 small" style="display:none;"></div>
           <div class="d-flex gap-2 mb-2">
             <button class="btn btn-sm flex-fill" id="pay-cash" onclick="openCashModal()" style="background:#28a745;color:white;">Cash</button>
-            <button class="btn btn-sm flex-fill" id="pay-card" onclick="checkout('card', null, this)" style="background:#007bff;color:white;">Card</button>
-            <button class="btn btn-sm flex-fill" id="pay-upi" onclick="checkout('upi', null, this)" style="background:#6f42c1;color:white;">UPI</button>
+            <!-- Card and LankaQR ask "approved?" first: the money moves on another
+                 device, so one stray tap or key must never record a sale. -->
+            <button class="btn btn-sm flex-fill" id="pay-card" onclick="confirmPayment('card', this)" style="background:#007bff;color:white;">Card</button>
+            <button class="btn btn-sm flex-fill" id="pay-upi" onclick="confirmPayment('upi', this)" style="background:#6f42c1;color:white;">LankaQR</button>
           </div>
         </div>
       </div>
@@ -133,7 +156,7 @@
         <div class="modal-body">
           <div class="d-flex justify-content-between mb-2"><span>Total:</span><strong id="cash-total"></strong></div>
           <label class="form-label fw-bold">Amount Given</label>
-          <input type="number" class="form-control form-control-lg" id="cash-given" step="0.01" min="0" autofocus>
+          <input type="number" class="form-control form-control-lg" id="cash-given" step="any" min="0" autofocus>
           <div class="d-flex flex-wrap gap-1 mt-2" id="quick-cash"></div>
           <hr>
           <div class="d-flex justify-content-between fs-5"><span>Change:</span><strong id="cash-change" class="text-success">Rs. 0.00</strong></div>
@@ -142,6 +165,28 @@
         <div class="modal-footer">
           <button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
           <button class="btn btn-success" id="cash-confirm">Confirm Sale</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Card / LankaQR confirmation. The terminal or the customer's phone is
+       where that money actually moves, so the till asks before it records a
+       sale: Enter or Yes records it, Escape or No cancels. -->
+  <div class="modal fade" id="payConfirmModal" tabindex="-1">
+    <div class="modal-dialog modal-sm modal-dialog-centered">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title" id="pay-confirm-title">Confirm payment</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body">
+          <p class="fs-5 mb-1" id="pay-confirm-text"></p>
+          <small class="text-muted">Enter = Yes, record the sale &middot; Esc = No</small>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" id="pay-confirm-no" data-bs-dismiss="modal">No</button>
+          <button class="btn btn-primary" id="pay-confirm-yes">Yes, approved</button>
         </div>
       </div>
     </div>
@@ -233,7 +278,7 @@
           </div>
           <label class="form-label fw-bold" for="us-qty">Quantity to use</label>
           <div class="input-group">
-            <input type="number" class="form-control" id="us-qty" value="1" min="0" step="0.001">
+            <input type="number" class="form-control" id="us-qty" value="1" min="0" step="any">
             <span class="input-group-text" id="us-qty-unit">units</span>
           </div>
           <label class="form-label mt-3" for="us-note">Note (optional)</label>
@@ -295,14 +340,14 @@
             <div class="row g-2 align-items-end">
               <div class="col-sm-5">
                 <label class="form-label small mb-1" for="po-deposit">Amount taken now</label>
-                <input type="number" class="form-control" id="po-deposit" min="0" step="0.01" placeholder="0.00" oninput="poRenderTotals()">
+                <input type="number" class="form-control" id="po-deposit" min="0" step="any" placeholder="0.00" oninput="poRenderTotals()">
               </div>
               <div class="col-sm-4">
                 <label class="form-label small mb-1" for="po-deposit-method">Paid by</label>
                 <select class="form-select" id="po-deposit-method">
                   <option value="cash">Cash</option>
                   <option value="card">Card</option>
-                  <option value="upi">UPI</option>
+                  <option value="upi">LankaQR</option>
                 </select>
               </div>
               <div class="col-sm-3 text-end">
@@ -388,6 +433,10 @@
     async function loadPOS() {
       taxRate = parseFloat(appSettings.tax_rate || '0');
       document.getElementById('tax-rate-display').textContent = taxRate;
+      // A sale whose answer never arrived blocks payment from the very first
+      // paint — before anything else loads — so a reload cannot sneak a second
+      // Pay in while the check is still to run. See checkPendingSale().
+      loadPendingSale();
 
       const [prods, token, custs] = await Promise.all([
         // Without ?cart= the till's own holds count as somebody else's and its
@@ -408,6 +457,12 @@
       // up FIRST, so the list read next already includes them.
       await migrateLegacyParked();
       await loadParked(); // fills the badge
+
+      // The last sale's answer never arrived (the page was reloaded, or the
+      // tab closed, mid-request): ask the server about it FIRST. If it went
+      // through, this resets the till onto a fresh cart and the saved cart is
+      // gone before restorePersistedCart() could put a sold cart back on screen.
+      if (pendingSale) await checkPendingSale();
 
       // Needs the grid: a restored line is reconciled against it. Before
       // rehydrateHolds(), which is now only the fallback for holds with no
@@ -464,16 +519,91 @@
 
     function updateShiftUI() {
       const banner = document.getElementById('shift-banner');
-      const cashBtn = document.getElementById('pay-cash');
-      const cardBtn = document.getElementById('pay-card');
-      const upiBtn = document.getElementById('pay-upi');
       if (shiftBlocked) {
         banner.innerHTML = `<div class="alert alert-warning mb-0 rounded-0">&#9888;&#65039; ${shiftBlockReason}</div>`;
         banner.style.display = 'block';
-        [cashBtn, cardBtn, upiBtn].forEach(b => { if (b) { b.disabled = true; b.style.opacity = '0.5'; b.style.cursor = 'not-allowed'; } });
       } else {
         banner.style.display = 'none';
-        [cashBtn, cardBtn, upiBtn].forEach(b => { if (b) { b.disabled = false; b.style.opacity = ''; b.style.cursor = ''; } });
+      }
+      // The shift is one of several things that can stop payment now, so the
+      // buttons are no longer switched from here directly — that let the shift
+      // check re-enable buttons a sale in flight had just locked.
+      refreshPayButtons();
+    }
+
+    // ===== Payment buttons: their resting state, decided in ONE place =====
+    // Four things can each forbid taking money: the cash shift, a sale being
+    // saved right now, a sale whose answer never arrived (pendingSale), and a
+    // discount bigger than the subtotal. Each used to switch the buttons on its
+    // own and they overwrote one another; now every change calls this and the
+    // answer is the same whoever asks. The message is also what the refusals
+    // say when a shortcut key gets past a disabled button.
+    function payBlockReason() {
+      if (shiftBlocked) return shiftBlockReason.replace(/<[^>]+>/g, '');
+      if (checkoutInProgress) return 'Saving the sale… wait for it to finish.';
+      if (pendingSale) return 'Checking whether the last sale went through… do not take payment again yet.';
+      if (cartTotals().discountTooBig) return 'The discount is more than the subtotal — reduce it to take payment.';
+      return '';
+    }
+
+    // The cart is frozen while a sale posts AND while the till does not know
+    // whether the last one went through: if it did, the cart on screen is
+    // already sold, and anything added to it would be thrown away by the reset.
+    function cartLocked() {
+      return checkoutInProgress || !!pendingSale;
+    }
+
+    // For every cart action: refuse, out loud, while the cart is frozen.
+    function refuseIfLocked() {
+      if (!cartLocked()) return false;
+      showToast(checkoutInProgress
+        ? 'Saving the sale — the cart is locked until the server answers.'
+        : 'Checking whether the last sale went through — the cart is locked until the till knows. Press "Check again" if it is taking long.', 'warning');
+      return true;
+    }
+
+    function refreshPayButtons() {
+      const blocked = !!payBlockReason();
+      PAYMENT_BUTTON_IDS.forEach(id => {
+        const b = document.getElementById(id);
+        if (!b) return;
+        // withBusy() owns the trigger while its request is in flight (disabled,
+        // busy label) and restores it itself; touching it here would fight that.
+        if (b.getAttribute('data-busy') === '1') return;
+        b.disabled = blocked;
+        b.style.opacity = blocked ? '0.5' : '';
+        b.style.cursor = blocked ? (checkoutInProgress ? 'progress' : 'not-allowed') : '';
+      });
+      const locked = cartLocked();
+      const panel = document.querySelector('.cart-panel');
+      if (panel) panel.classList.toggle('cart-locked', locked);
+      const grid = document.getElementById('product-grid');
+      if (grid) grid.classList.toggle('grid-locked', locked);
+      ['discount-input', 'discount-pct', 'open-preorder'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.disabled = locked;
+      });
+      renderSaleStatus();
+    }
+
+    // The line above the payment buttons that says what they are waiting for.
+    function renderSaleStatus() {
+      const el = document.getElementById('sale-status');
+      if (!el) return;
+      if (checkoutInProgress) {
+        el.className = 'alert alert-info py-2 px-2 mb-2 small';
+        el.innerHTML = '<strong>Saving sale&hellip;</strong> The cart is locked until the server answers.';
+        el.style.display = 'block';
+      } else if (pendingSale) {
+        el.className = 'alert alert-warning py-2 px-2 mb-2 small';
+        el.innerHTML = saleCheckRunning
+          ? '<strong>Checking whether the last sale went through&hellip;</strong> Do not take payment again yet.'
+          : '<strong>Checking whether the last sale went through&hellip;</strong> The server cannot be reached right now, so the till does not know yet. Do not take payment again. ' +
+            '<button type="button" class="btn btn-link btn-sm fw-bold" onclick="checkPendingSale()">Check again</button>';
+        el.style.display = 'block';
+      } else {
+        el.style.display = 'none';
+        el.innerHTML = '';
       }
     }
 
@@ -601,8 +731,20 @@
         dropdown.style.display = 'block';
       });
 
-      input.addEventListener('blur', () => {
+      input.addEventListener('blur', (e) => {
         setTimeout(() => { dropdown.style.display = 'none'; }, 150);
+        // The pre-order detour ENDS when the cashier leaves this box without
+        // picking anyone. Picking from the list runs on mousedown, before this
+        // blur, so a real pick has already cleared poPickingCustomer. Moving to
+        // the + button is not leaving: that path decides for itself when the
+        // new-customer dialog closes (saved, or not).
+        if (!poPickingCustomer) return;
+        const toPlus = e.relatedTarget && e.relatedTarget.id === 'customer-add-btn';
+        if (toPlus) return;
+        setTimeout(() => {
+          if (!poPickingCustomer || newCustomerOpen || document.activeElement === input) return;
+          poExpireDetour();
+        }, 400);
       });
       input.addEventListener('focus', () => {
         if (input.value.trim().length > 0) input.dispatchEvent(new Event('input'));
@@ -638,7 +780,17 @@
     }
 
     // Quick-add a customer without leaving the till. Same fields as /customers.
+    // newCustomerOpen lets the pre-order detour tell "went to + to add the
+    // customer" apart from "walked away from the customer box".
+    let newCustomerOpen = false;
+    document.getElementById('newCustomerModal').addEventListener('hidden.bs.modal', () => {
+      newCustomerOpen = false;
+      // Saved: selectCustomer() already ran and ended the detour. Still picking
+      // means the dialog was cancelled, so the detour is abandoned.
+      if (poPickingCustomer) poExpireDetour();
+    });
     function openNewCustomer() {
+      newCustomerOpen = true;
       const typed = document.getElementById('customer-search').value.trim();
       const looksLikePhone = typed.length > 0 && /^[\d+\-\s()]+$/.test(typed);
       document.getElementById('nc-name').value = looksLikePhone ? '' : typed;
@@ -732,8 +884,11 @@
     }
 
     function addToCart(productId) {
+      if (refuseIfLocked()) return;
       const product = products.find(p => p.id === productId);
       if (!product) return;
+      // A sale is starting, so an abandoned pre-order detour is over.
+      poExpireDetour();
       // A SALE STARTS HERE. Before anything goes in, see whether this is the
       // first item of a new one — if it is, it gets a cart id of its own.
       beginSaleIfCartEmpty();
@@ -756,13 +911,16 @@
 
     function renderCart() {
       const container = document.getElementById('cart-items');
-      const emptyEl = document.getElementById('cart-empty');
       document.getElementById('cart-count').textContent = cart.reduce((s, i) => s + i.quantity, 0);
 
       if (cart.length === 0) {
-        container.innerHTML = '';
-        emptyEl.style.display = 'block';
-        container.appendChild(emptyEl);
+        // Rebuilt every time. This used to look the placeholder up by id and
+        // re-append it — but once any line had been rendered, innerHTML had
+        // already thrown the original away, the lookup returned null and this
+        // threw. Removing the last line, Clear, and the reset after every sale
+        // all died here half-way: after a sale, startNewCart() and
+        // clearPersistedCart() never ran, so the till kept the sold cart's id.
+        container.innerHTML = '<div class="text-center text-muted py-5" id="cart-empty">No items in cart</div>';
       } else {
         container.innerHTML = cart.map((item, idx) => {
           const hasDiscount = item.original_price && item.original_price > item.unit_price;
@@ -790,6 +948,8 @@
     }
 
     function changeQty(idx, delta) {
+      if (refuseIfLocked()) return;
+      if (!cart[idx]) return;
       cart[idx].quantity += delta;
       if (cart[idx].quantity <= 0) cart.splice(idx, 1);
       renderCart();
@@ -797,6 +957,7 @@
     }
 
     function removeItem(idx) {
+      if (refuseIfLocked()) return;
       cart.splice(idx, 1);
       renderCart();
       queueCartSync();
@@ -809,6 +970,8 @@
     function resetCartState() {
       cart = [];
       document.getElementById('discount-input').value = 0;
+      document.getElementById('discount-pct').value = 0;
+      discountMode = 'amount';
       document.getElementById('cart-count').textContent = '0';
       document.getElementById('cart-subtotal').textContent = formatCurrency(0);
       document.getElementById('cart-tax').textContent = formatCurrency(0);
@@ -819,9 +982,23 @@
       renderCart();
     }
 
-    // The Clear button and Escape: this cart is abandoned, so the stock goes back
-    // on the shelf and the next customer starts on a fresh id.
+    // The Clear button. Escape used to call clearCart() too, which wiped a whole
+    // order on the key every cashier presses to close a dialog; it no longer
+    // touches the cart at all (see the keydown handler). The button asks first
+    // whenever there is something to lose.
+    function clearCartClicked() {
+      if (refuseIfLocked()) return;
+      if (cart.length > 0 && !confirm('Clear this cart?')) return;
+      clearCart();
+    }
+
+    // This cart is abandoned, so the stock goes back on the shelf and the next
+    // customer starts on a fresh id. Also called by savePreorder() once a
+    // converted cart has become a pre-order.
     function clearCart() {
+      // Clear ends an abandoned pre-order detour too (silently: the cashier
+      // just chose to throw things away).
+      poExpireDetour(true);
       const abandoned = getCartId();
       const hadHolds = holdsOnServer || cart.length > 0;
       resetCartState();
@@ -865,6 +1042,11 @@
       // Anything still queued belongs to the cart being left behind, so retire
       // its sequence number: queued runs see the bump and skip themselves.
       syncSeq++;
+      // ...and so does a background retry of a failed sync: the new cart has
+      // nothing to hold yet, so it starts out "online".
+      stopSyncRetry();
+      syncRetryDelay = 0;
+      setSyncOffline(false);
       adoptCartId(newCartId());
       lastSyncedCart = [];
       holdsOnServer = false;
@@ -938,10 +1120,67 @@
       return api(`/api/pos/reservations/cart/${encodeURIComponent(id)}`, { method: 'DELETE' }).catch(() => {});
     }
 
+    // Did the server ANSWER, and say no? Only that is a refusal: an HTTP 400
+    // carrying an error message (out of stock, a closed shift, a bad discount).
+    // A network failure, a 5xx, a proxy page or an unreadable body is NOT an
+    // answer — the request may or may not have landed — so it must never be
+    // treated like one. api() puts status and the parsed body on the error.
+    function isClearRefusal(err) {
+      return !!(err && err.status === 400 && err.data && typeof err.data.error === 'string');
+    }
+
+    // ===== Holding stock on a flaky connection =====
+    // A failed sync used to be treated as an out-of-stock refusal whatever the
+    // cause: the cart rolled back to lastSyncedCart and lines the cashier had
+    // just rung up disappeared because the wifi blinked — and after a reload,
+    // when lastSyncedCart is empty, the whole restored cart (and its saved
+    // copy) was wiped while the server still held its stock. Now only a real
+    // refusal (isClearRefusal) reverts anything. A network failure keeps the
+    // cart exactly as it is, shows "offline — retrying", and re-sends in the
+    // background with backoff until the server answers. The sync is a full
+    // replace, so re-sending is always safe.
+    let syncOffline = false;
+    let syncRetryTimer = null;
+    let syncRetryDelay = 0;
+    const SYNC_RETRY_MIN_MS = 2000;
+    const SYNC_RETRY_MAX_MS = 30000;
+
+    function setSyncOffline(on) {
+      syncOffline = !!on;
+      const badge = document.getElementById('sync-offline');
+      if (badge) badge.style.display = syncOffline ? 'inline-block' : 'none';
+    }
+
+    function stopSyncRetry() {
+      clearTimeout(syncRetryTimer);
+      syncRetryTimer = null;
+    }
+
+    function scheduleSyncRetry() {
+      stopSyncRetry();
+      syncRetryDelay = syncRetryDelay ? Math.min(syncRetryDelay * 2, SYNC_RETRY_MAX_MS) : SYNC_RETRY_MIN_MS;
+      syncRetryTimer = setTimeout(() => {
+        syncRetryTimer = null;
+        // Never while a sale is posting, or while its outcome is unknown: a
+        // hold landing after that sale committed would re-hold stock for a
+        // cart that is already sold. resumeSyncRetry() picks it up afterwards.
+        if (checkoutInProgress || pendingSale) return;
+        if (syncOffline) queueCartSync();
+      }, syncRetryDelay);
+    }
+
+    // After a sale attempt settles (or the last-sale check is answered): if
+    // the cart is still waiting to be held, try again now.
+    function resumeSyncRetry() {
+      if (syncOffline && !syncRetryTimer && !checkoutInProgress && !pendingSale) queueCartSync();
+    }
+
     // "This cart now holds exactly these lines." Full replace, not a delta, so
     // re-sending is free and a lost request heals on the next change.
     function queueCartSync() {
       const seq = ++syncSeq;
+      // A newer sync supersedes any retry that was waiting to go.
+      stopSyncRetry();
       const run = async () => {
         if (seq !== syncSeq) return; // a newer change is already queued — skip
         const id = getCartId();
@@ -952,8 +1191,26 @@
           if (id !== cartId) return; // parked or sold mid-flight — not this cart any more
           lastSyncedCart = snapshot;
           holdsOnServer = items.length > 0;
+          syncRetryDelay = 0;
+          setSyncOffline(false);
         } catch (err) {
+          if (!isClearRefusal(err)) {
+            // No answer. The server may or may not have taken this sync, so the
+            // screen is left exactly as the cashier built it and nothing is
+            // reverted or deleted. Not this cart any more: nothing to retry.
+            if (id !== cartId) return;
+            // It might be holding these lines now, so the id is treated as
+            // holding stock (beginSaleIfCartEmpty() must not rotate away from
+            // it). A failed RELEASE leaves holdsOnServer as it was, too.
+            if (items.length) holdsOnServer = true;
+            setSyncOffline(true);
+            scheduleSyncRetry();
+            return;
+          }
           if (id !== cartId) { showToast(err.message, 'error'); return; }
+          // The server answered, so it is reachable again.
+          syncRetryDelay = 0;
+          setSyncOffline(false);
           // Rejected syncs roll back whole, so the server still holds exactly
           // what it held before this change. Put the screen back on that footing
           // — never let the cashier believe stock is held when it isn't.
@@ -1010,7 +1267,9 @@
         localStorage.setItem(CART_SAVE_KEY, JSON.stringify({
           cart_id: getCartId(), // which hold these lines belong to
           items: cart.map(i => ({ ...i })),
-          discount: parseFloat(document.getElementById('discount-input').value) || 0,
+          // The amount only. A % the cashier typed is not kept — the amount it
+          // produced is, exactly as a parked bill keeps it.
+          discount: discountAmount(),
           customer_id: document.getElementById('customer-id').value || '',
           customer_label: document.getElementById('customer-selected-name').textContent || '',
           saved_at: new Date().toISOString(),
@@ -1080,11 +1339,23 @@
 
       cart = kept;
       document.getElementById('discount-input').value = snap.discount || 0;
+      discountMode = 'amount'; // only the amount is saved; the % follows it
       if (snap.customer_id && snap.customer_label) selectCustomer(parseInt(snap.customer_id), snap.customer_label);
       else clearCustomer();
       // Rebuilds the lines, the counter and the totals — and writes the
       // reconciled cart back through updateCartTotals() → persistCart().
       renderCart();
+
+      // The till still does not know whether this cart's last sale went
+      // through (the server could not be reached to ask). Do NOT re-take its
+      // holds: if the sale did land, the server released them in the same
+      // transaction, and a sync now would hold stock for a sold cart. The cart
+      // stays locked; checkPendingSale() re-syncs it if the answer is "not
+      // recorded", and resets the till if it is "already recorded".
+      if (pendingSale) {
+        showToast('Cart restored, but the till is still checking whether its sale already went through. It cannot be paid until that is known.', 'warning');
+        return;
+      }
 
       // Re-sync on purpose. Sync is a full replace under the same cart id, so
       // re-sending the same lines is idempotent, and it is the only thing that
@@ -1105,7 +1376,11 @@
       if (!cart.length) return;
 
       const units = cart.reduce((s, i) => s + i.quantity, 0);
-      showToast(`Cart restored: ${units} unit${units === 1 ? '' : 's'} still held for this sale.`);
+      // Offline: the cart is back on screen and kept, but its stock is not
+      // confirmed as held yet — say so rather than claim it.
+      showToast(syncOffline
+        ? `Cart restored: ${units} unit${units === 1 ? '' : 's'}. The server could not be reached to hold the stock — the till keeps retrying.`
+        : `Cart restored: ${units} unit${units === 1 ? '' : 's'} still held for this sale.`, syncOffline ? 'warning' : 'success');
       if (dropped.length || trimmed.length) {
         const parts = [];
         if (dropped.length) parts.push(`removed ${dropped.join(', ')}`);
@@ -1177,6 +1452,7 @@
     // stock for that customer is the whole point. Returns true only when the
     // server took the bill, because nothing may clear this cart until it did.
     async function parkCurrent(btn) {
+      if (refuseIfLocked()) return false;
       if (!cart.length) { showToast('Cart is empty', 'warning'); return false; }
       // withBusy guards the button itself; this only stops the second click from
       // reporting an in-flight park as a failure below.
@@ -1200,7 +1476,7 @@
         })),
         customer_id: document.getElementById('customer-id').value || '',
         customer_label: custLabel,
-        discount: parseFloat(document.getElementById('discount-input').value) || 0,
+        discount: discountAmount(), // the amount only; a % is not parked
         till_id: getTillId(),
         till_label: tillLabel(),
       };
@@ -1301,6 +1577,10 @@
     async function resumeHeld(cartId, btn) {
       const id = String(cartId || '');
       if (!id) return;
+      if (refuseIfLocked()) return;
+      // Resuming starts a sale: an abandoned pre-order detour must not ride
+      // along (selectCustomer() below would otherwise reopen it).
+      poExpireDetour();
       // Confirm first, outside the busy guard.
       if (cart.length > 0) {
         if (!confirm('You have items in the current cart. Park the current one and switch?')) return;
@@ -1346,6 +1626,7 @@
       lastSyncedCart = cart.map(i => ({ ...i }));
       holdsOnServer = true;
       document.getElementById('discount-input').value = bill.discount || 0;
+      discountMode = 'amount'; // parked bills keep the amount; the % follows it
       if (bill.customer_id && bill.customer_label) selectCustomer(parseInt(bill.customer_id), bill.customer_label);
       else clearCustomer();
       reportClaims(); // this cart is the active claim now, not a parked one
@@ -1581,23 +1862,97 @@
       });
     }
 
-    function updateCartTotals() {
-      const subtotal = cart.reduce((s, i) => s + i.quantity * i.unit_price, 0);
-      const savings = cart.reduce((s, i) => s + (i.original_price && i.original_price > i.unit_price ? (i.original_price - i.unit_price) * i.quantity : 0), 0);
-      const discount = parseFloat(document.getElementById('discount-input').value) || 0;
-      const taxable = Math.max(0, subtotal - discount);
-      const tax = taxable * (taxRate / 100);
-      const total = taxable + tax;
+    // ===== Totals: the server's arithmetic, step for step =====
+    // computeBillTotals() in src/services/billing.ts rounds every step to the
+    // cent — each line, the subtotal, the taxable amount, the tax, the total —
+    // and this is that function in the same order. So the total on screen, the
+    // figure the cash dialog compares the tender against and the total the
+    // server stores are ONE number: 109.67 can no longer be shown while 109.675
+    // is compared, which is how "Rs 109.67 given" used to read as short.
+    function discountAmount() {
+      const v = parseFloat(document.getElementById('discount-input').value);
+      return Number.isFinite(v) && v > 0 ? round2(v) : 0;
+    }
 
-      document.getElementById('row-savings').style.display = savings > 0 ? 'flex' : 'none';
-      document.getElementById('cart-savings').textContent = '-' + formatCurrency(savings);
-      document.getElementById('cart-subtotal').textContent = formatCurrency(subtotal);
-      document.getElementById('cart-tax').textContent = formatCurrency(tax);
-      document.getElementById('cart-total').textContent = formatCurrency(total);
+    function cartSubtotal() {
+      return round2(cart.reduce((s, i) => s + round2(i.quantity * i.unit_price), 0));
+    }
+
+    function cartTotals() {
+      const subtotal = cartSubtotal();
+      const savings = round2(cart.reduce((s, i) => s + (i.original_price && i.original_price > i.unit_price ? (i.original_price - i.unit_price) * i.quantity : 0), 0));
+      const discount = discountAmount();
+      const taxable = Math.max(0, round2(subtotal - discount));
+      const tax = round2(taxable * (taxRate / 100));
+      const total = round2(taxable + tax);
+      // The server refuses a discount over the subtotal (with the same half
+      // cent of slack), so the till stops it before Pay rather than after.
+      // Only meaningful with something in the cart.
+      const discountTooBig = cart.length > 0 && discount > subtotal + 0.005;
+      return { subtotal, savings, discount, tax, total, discountTooBig };
+    }
+
+    // ===== Extra discount: a percentage OR an amount =====
+    // Two boxes for one discount. Whichever the cashier typed in LAST is the
+    // one that means something; the other is worked out from it. The server
+    // only ever receives the amount (and a parked or saved cart only keeps the
+    // amount), so the % box is purely a way of typing it.
+    //
+    // When the cart changes, a discount typed as a percentage follows the new
+    // subtotal (10% stays 10% as items are added), while one typed as an
+    // amount stays the amount that was agreed — which is what each one means
+    // when the cashier says it out loud.
+    let discountMode = 'amount';
+
+    function onDiscountAmountInput() {
+      const el = document.getElementById('discount-input');
+      // A negative discount would SURCHARGE the customer; the box cannot go there.
+      if (parseFloat(el.value) < 0) el.value = 0;
+      discountMode = 'amount';
+      updateCartTotals();
+    }
+
+    function onDiscountPctInput() {
+      const el = document.getElementById('discount-pct');
+      const v = parseFloat(el.value);
+      if (v < 0) el.value = 0;
+      else if (v > 100) el.value = 100;
+      discountMode = 'pct';
+      updateCartTotals();
+    }
+
+    // Bring the box the cashier is NOT typing in into line with the one they
+    // are. Never rewrites the box being typed in, so a half-typed "12." is left
+    // alone.
+    function syncDiscountFields() {
+      const amtEl = document.getElementById('discount-input');
+      const pctEl = document.getElementById('discount-pct');
+      const subtotal = cartSubtotal();
+      if (discountMode === 'pct') {
+        const pct = Math.min(100, Math.max(0, parseFloat(pctEl.value) || 0));
+        amtEl.value = String(round2(subtotal * pct / 100));
+      } else {
+        const amt = Math.max(0, parseFloat(amtEl.value) || 0);
+        pctEl.value = subtotal > 0 ? String(round2(amt / subtotal * 100)) : '0';
+      }
+    }
+
+    function updateCartTotals() {
+      syncDiscountFields();
+      const t = cartTotals();
+
+      document.getElementById('row-savings').style.display = t.savings > 0 ? 'flex' : 'none';
+      document.getElementById('cart-savings').textContent = '-' + formatCurrency(t.savings);
+      document.getElementById('cart-subtotal').textContent = formatCurrency(t.subtotal);
+      document.getElementById('cart-tax').textContent = formatCurrency(t.tax);
+      document.getElementById('cart-total').textContent = formatCurrency(t.total);
+      document.getElementById('discount-hint').style.display = t.discountTooBig ? 'block' : 'none';
       syncProformaButton();
+      // A discount change can block or unblock payment.
+      refreshPayButtons();
       // The one place every line and discount change already funnels through:
       // renderCart() calls it on add/remove/qty (right where queueCartSync()
-      // fires), the discount input calls it on input, and resetCartState() calls
+      // fires), the discount inputs call it on input, and resetCartState() calls
       // it when the cart ends. Picking a customer is the only cart change that
       // does not come through here, so selectCustomer()/clearCustomer() write
       // through themselves.
@@ -1618,16 +1973,16 @@
     }
 
     function getCartTotal() {
-      const subtotal = cart.reduce((s, i) => s + i.quantity * i.unit_price, 0);
-      const discount = parseFloat(document.getElementById('discount-input').value) || 0;
-      const taxable = Math.max(0, subtotal - discount);
-      const tax = taxable * (taxRate / 100);
-      return taxable + tax;
+      return cartTotals().total;
     }
 
     function openCashModal() {
+      if (checkoutInProgress) return;
       if (cart.length === 0) { showToast('Cart is empty', 'warning'); return; }
-      if (shiftBlocked) { showToast(shiftBlockReason.replace(/<[^>]+>/g, ''), 'error'); return; }
+      // The shift, an unanswered last sale, a discount over the subtotal: the
+      // dialog does not even open while any of them stands.
+      const blocked = payBlockReason();
+      if (blocked) { showToast(blocked, 'error'); return; }
       const total = getCartTotal();
       document.getElementById('cash-total').textContent = formatCurrency(total);
       const given = document.getElementById('cash-given');
@@ -1647,17 +2002,25 @@
         `<button type="button" class="btn btn-outline-secondary btn-sm" onclick="setCashGiven(${v})">${formatCurrency(v)}</button>`
       ).join('');
 
+      // The tender is rounded to the cent exactly like the total, so the
+      // comparison and the change shown are the figures the server will store.
       given.oninput = () => {
-        const amt = parseFloat(given.value) || 0;
-        const change = amt - total;
+        const amt = round2(parseFloat(given.value) || 0);
+        const change = round2(amt - total);
         document.getElementById('cash-change').textContent = formatCurrency(Math.max(0, change));
         document.getElementById('cash-warning').style.display = (amt > 0 && amt < total) ? 'block' : 'none';
         document.getElementById('cash-confirm').disabled = amt < total;
       };
       document.getElementById('cash-confirm').disabled = true;
       document.getElementById('cash-confirm').onclick = (ev) => {
-        const amt = parseFloat(given.value) || 0;
+        const amt = round2(parseFloat(given.value) || 0);
         if (amt < total) return;
+        // A sale already posting (or unanswered) means this confirmation must
+        // NOT go anywhere. It used to return silently here while a card sale
+        // that was in flight got recorded instead — the cashier took cash and
+        // the books said card. Now it says why and leaves the dialog open.
+        const blockedNow = payBlockReason();
+        if (checkoutInProgress || blockedNow) { showToast(blockedNow || 'Saving the sale… wait for it to finish.', 'error'); return; }
         // Explicitly lock the confirm button. Hiding the modal happens to take it
         // off screen too, but don't rely on that — a second click here would post
         // a second bill. openCashModal() re-disables it every time it opens, and
@@ -1677,6 +2040,55 @@
       input.dispatchEvent(new Event('input'));
     }
 
+    // ===== Card / LankaQR: "approved?" before anything is recorded =====
+    // The money for these moves on another device — the card terminal, the
+    // customer's phone — so the till cannot know it happened. F10/F11 used to
+    // record the sale on a single key press; a stray press (or the wrong one of
+    // the two) wrote a bill for money that never moved. Now both the buttons
+    // and the keys open this question first: Enter or Yes records the sale,
+    // Escape or No cancels it.
+    let payConfirmPending = null; // { method, btn, confirmed }
+
+    function confirmPayment(method, btn) {
+      if (checkoutInProgress) return;
+      if (cart.length === 0) { showToast('Cart is empty', 'warning'); return; }
+      const blocked = payBlockReason();
+      if (blocked) { showToast(blocked, 'error'); return; }
+      const label = paymentMethodLabel(method);
+      document.getElementById('pay-confirm-title').textContent = `${label} payment`;
+      document.getElementById('pay-confirm-text').textContent = `${label} payment of ${formatCurrency(getCartTotal())} approved?`;
+      payConfirmPending = { method, btn: btn || null, confirmed: false };
+      bootstrap.Modal.getOrCreateInstance(document.getElementById('payConfirmModal')).show();
+    }
+
+    (function setupPayConfirm() {
+      const el = document.getElementById('payConfirmModal');
+      const yes = document.getElementById('pay-confirm-yes');
+      // One way in, however Yes was given (click or Enter), and only once.
+      const accept = () => {
+        if (!payConfirmPending || payConfirmPending.confirmed) return;
+        payConfirmPending.confirmed = true;
+        bootstrap.Modal.getOrCreateInstance(el).hide();
+      };
+      yes.addEventListener('click', accept);
+      el.addEventListener('keydown', (e) => {
+        if (e.key !== 'Enter' || e.repeat) return;
+        // Enter on the focused No button means No: its own click dismisses.
+        if (e.target && e.target.id === 'pay-confirm-no') return;
+        e.preventDefault(); // no second, synthetic click on Yes
+        accept();
+      });
+      el.addEventListener('shown.bs.modal', () => yes.focus());
+      // The sale starts only once the dialog is fully gone, so the receipt
+      // dialog never stacks on a half-hidden one (Bootstrap leaves a dead
+      // backdrop when it does). Escape, No and the X all land here unconfirmed.
+      el.addEventListener('hidden.bs.modal', () => {
+        const p = payConfirmPending;
+        payConfirmPending = null;
+        if (p && p.confirmed) checkout(p.method, null, p.btn);
+      });
+    })();
+
     // ===== Checkout (double-submit guarded) =====
     // POST /api/pos/bill prints the receipt inside the request, so a slow or
     // jammed printer can keep it running for many seconds while the cart still
@@ -1685,149 +2097,294 @@
     // So: one flag for the function itself (covers keyboard shortcuts and the
     // cash modal, which have no button of their own) plus all three payment
     // buttons locked for the duration — otherwise the cashier just hits another
-    // one. Releasing goes through updateShiftUI() rather than `disabled = false`
-    // so the cash-shift rule stays the single source of truth for the resting
-    // state; it runs in a finally, so nothing stays stuck after a failure.
+    // one. While the flag is up the CART is locked too (cartLocked()): adding,
+    // removing, Clear, Park, Resume, the cash dialog and Pre-order all refuse,
+    // and the panel says "Saving sale…". The buttons' resting state is decided
+    // by refreshPayButtons(), which runs in a finally, so nothing stays stuck.
     const PAYMENT_BUTTON_IDS = ['pay-cash', 'pay-card', 'pay-upi'];
     let checkoutInProgress = false;
 
-    function lockPaymentButtons(exceptId) {
-      PAYMENT_BUTTON_IDS.forEach(id => {
-        const b = document.getElementById(id);
-        if (!b) return;
-        b.style.opacity = '0.5';
-        b.style.cursor = 'progress';
-        // The trigger is left to withBusy(), which disables it, swaps in the
-        // busy label and restores both when the request settles.
-        if (id !== exceptId) b.disabled = true;
-      });
+    // ===== The sale whose answer never arrived =====
+    // A network error AFTER the server committed used to leave the till on
+    // "Failed to fetch" with the cart still on screen. Retrying the identical
+    // sale was safe (the server replays it), but a cashier who changed ANYTHING
+    // first — the other cash preset, Card instead of Cash, the customer's name
+    // added — sent a different sale, and the customer was billed twice.
+    //
+    // So the exact request body is written down (memory AND localStorage, so a
+    // reload still knows) BEFORE it is sent, and crossed out only on a clear
+    // answer: a bill (success) or an HTTP 400 with an error (refused — nothing
+    // was written). Anything else — no response, an unreadable one, a 5xx — is
+    // NOT an answer, and the till then refuses to take any payment until it has
+    // asked POST /api/pos/bill/status with that same body:
+    //   found       -> "This sale was already recorded — token #N", the normal
+    //                  receipt, and a fresh cart, exactly like a sale;
+    //   not found   -> crossed out; the cashier takes the payment again;
+    //   unreachable -> still blocked, "Checking whether the last sale went
+    //                  through… [Check again]", and it keeps asking by itself.
+    const PENDING_SALE_KEY = 'kuki_pos_pending_sale';
+    const SALE_CHECK_RETRY_MS = 15000;
+    let pendingSale = null; // { body, sent_at }
+    let saleCheckRunning = false;
+    let saleCheckTimer = null;
+
+    function setPendingSale(body) {
+      // A deep copy: the body must be the bytes that were sent, whatever
+      // happens to the cart afterwards.
+      pendingSale = { body: JSON.parse(JSON.stringify(body)), sent_at: new Date().toISOString() };
+      try { localStorage.setItem(PENDING_SALE_KEY, JSON.stringify(pendingSale)); } catch {}
+    }
+
+    function clearPendingSale() {
+      pendingSale = null;
+      clearTimeout(saleCheckTimer);
+      saleCheckTimer = null;
+      try { localStorage.removeItem(PENDING_SALE_KEY); } catch {}
+    }
+
+    function loadPendingSale() {
+      try {
+        const raw = localStorage.getItem(PENDING_SALE_KEY);
+        if (!raw) return;
+        const p = JSON.parse(raw);
+        if (p && p.body && Array.isArray(p.body.items) && p.body.items.length) pendingSale = p;
+        else localStorage.removeItem(PENDING_SALE_KEY); // unreadable: nothing to ask about
+      } catch {}
     }
 
     async function checkout(paymentMethod, amountGiven, btn) {
       if (checkoutInProgress) return;
       if (cart.length === 0) { showToast('Cart is empty', 'warning'); return; }
-      if (shiftBlocked) { showToast(shiftBlockReason.replace(/<[^>]+>/g, ''), 'error'); return; }
+      const blocked = payBlockReason();
+      if (blocked) { showToast(blocked, 'error'); return; }
+      // A sale is happening: an abandoned pre-order detour is over.
+      poExpireDetour();
 
-      const discount = parseFloat(document.getElementById('discount-input').value) || 0;
       const customerId = document.getElementById('customer-id').value || null;
       // Keyboard shortcuts and the cash modal pass no button — fall back to the
       // matching payment button so there is always visible progress feedback.
       const trigger = btn || document.getElementById('pay-' + paymentMethod);
 
       checkoutInProgress = true;
-      lockPaymentButtons(trigger ? trigger.id : null);
+      // A background retry of a failed hold sync must not land on this cart
+      // while it is being sold (it would re-hold stock the sale just released).
+      stopSyncRetry();
+      refreshPayButtons(); // all three locked, the cart frozen, "Saving sale…"
+      let needsCheck = false;
       try {
         // Inside the guard (the flag is already set, so a second click still
         // does nothing): let a hold sync still in flight land first, or it could
         // re-create this cart's holds a moment after the sale released them.
         await syncChain;
-        const result = await withBusy(trigger, () => api('/api/pos/bill', {
-          method: 'POST',
-          body: {
-            items: cart.map(i => ({
-              product_id: i.product_id,
-              product_name: i.product_name,
-              quantity: i.quantity,
-              unit_price: i.unit_price,
-              original_price: i.original_price || i.unit_price,
-            })),
-            customer_id: customerId ? parseInt(customerId) : null,
-            discount,
-            tax_rate: taxRate,
-            payment_method: paymentMethod,
-            amount_given: paymentMethod === 'cash' && amountGiven ? amountGiven : null,
-            // Must be the id the holds were synced under, or this cart's own
-            // hold counts against it and the sale blocks itself.
-            cart_id: getCartId(),
-          },
-        }).catch(err => { throw new Error('Failed to create bill: ' + err.message); }), 'Processing...');
-        if (!result) return; // failed — withBusy already showed the error toast
+        const body = {
+          items: cart.map(i => ({
+            product_id: i.product_id,
+            product_name: i.product_name,
+            quantity: i.quantity,
+            unit_price: i.unit_price,
+            original_price: i.original_price || i.unit_price,
+          })),
+          customer_id: customerId ? parseInt(customerId) : null,
+          // Rounded to the cent, the figure the screen showed and the server
+          // will charge.
+          discount: discountAmount(),
+          tax_rate: taxRate,
+          payment_method: paymentMethod,
+          amount_given: paymentMethod === 'cash' && amountGiven ? amountGiven : null,
+          // Must be the id the holds were synced under, or this cart's own
+          // hold counts against it and the sale blocks itself.
+          cart_id: getCartId(),
+        };
+        // withBusy() is the button's own guard and busy label. The outcome is
+        // classified here rather than in withBusy's catch-all toast, because
+        // "refused" and "no answer" now lead to very different places.
+        const outcome = await withBusy(trigger, async () => {
+          // Written down BEFORE the request leaves, so there is no moment in
+          // which the sale could land without the till knowing to ask about it.
+          setPendingSale(body);
+          try {
+            return { ok: true, data: await api('/api/pos/bill', { method: 'POST', body }) };
+          } catch (err) {
+            return { ok: false, err };
+          }
+        }, 'Processing...');
 
-        // The server answers in one shape for both outcomes, and `replayed`
-        // is the ONLY thing that tells them apart. true means: this request was
-        // a retry of a sale that is already on the books, so NOTHING NEW WAS
-        // WRITTEN and the bill below is the earlier one. Saying "Bill created
-        // successfully" over that is how a lost sale went unnoticed at the
-        // counter, so the wording, the modal title and the toast all change.
-        // A normal sale's wording is untouched.
-        const replayed = result.replayed === true;
-        const tokenLabel = `Token #${String(result.token_number).padStart(3,'0')}`;
-
-        // Show receipt
-        document.getElementById('receipt-token').textContent = tokenLabel;
-        document.getElementById('receipt-total').textContent = formatCurrency(result.total);
-        document.getElementById('receipt-text').textContent = result.receipt_text;
-        lastReceiptText = result.receipt_text;
-        lastKitchenText = result.kitchen_text || '';
-
-        // Set BOTH branches every time — the modal is reused, so a stale notice
-        // from an earlier replay must never sit over a genuine new sale.
-        const notice = document.getElementById('receipt-replay-notice');
-        const title = document.getElementById('receipt-modal-title');
-        if (replayed) {
-          title.textContent = 'Already Recorded — No New Bill';
-          notice.innerHTML =
-            `<strong>This sale was already recorded as ${tokenLabel}.</strong><br>` +
-            `That request was a retry, so no new bill was created and the customer has not been charged again. ` +
-            `The slip below is that original bill — print it if they need a copy.`;
-          notice.classList.remove('d-none');
+        if (!outcome) {
+          // withBusy() refused to re-enter: nothing was sent.
+        } else if (outcome.ok && outcome.data && outcome.data.id != null) {
+          clearPendingSale();
+          await completeSale(outcome.data, { recovered: false, resetCart: true });
+        } else if (!outcome.ok && isClearRefusal(outcome.err)) {
+          // The server answered no (out of stock, closed shift, bad discount):
+          // nothing was written, so this attempt is over and the cart stays.
+          clearPendingSale();
+          showToast('Failed to create bill: ' + outcome.err.message, 'error');
         } else {
-          title.textContent = 'Bill Created';
-          notice.textContent = '';
-          notice.classList.add('d-none');
+          // No clear answer. The sale may be on the books. Keep it written
+          // down and ask before anything else can be paid.
+          needsCheck = true;
+          showToast('No answer from the server — the sale may or may not have been saved. Checking before anything else can be paid.', 'warning');
         }
-
-        new bootstrap.Modal(document.getElementById('receiptModal')).show();
-        if (replayed) {
-          showToast(
-            `Already recorded — no new bill. This sale is ${tokenLabel}, ${formatCurrency(result.total)}, saved earlier.`,
-            'warning'
-          );
-        } else {
-          showToast('Bill created successfully!');
-        }
-
-        // Reset cart and refresh token. The sale released this cart's holds
-        // inside its own transaction, so there is nothing to release here — just
-        // move on to a fresh id, and re-read the grid now that the stock moved.
-        //
-        // A REPLAY resets too, and that matters: the sale in this cart is on the
-        // books either way, and rotating to a fresh cart id is what stops the
-        // till sitting on a stale id and posting the NEXT customer's sale under
-        // it — the exact sequence that used to swallow a real bill.
-        resetCartState();
-        startNewCart();
-        clearPersistedCart();
-        refreshAvailability();
-        try {
-          const token = await api('/api/pos/token');
-          document.getElementById('token-badge').textContent = `Token #${String(token.next_token).padStart(3,'0')}`;
-        } catch {}
       } finally {
         checkoutInProgress = false;
-        updateShiftUI(); // restores the buttons, shift rule included
+        refreshPayButtons(); // pendingSale (if any) keeps them locked
+      }
+      if (needsCheck) await checkPendingSale();
+      else resumeSyncRetry();
+    }
+
+    // Ask the server whether the written-down sale went through. Also the
+    // "Check again" button, the automatic retry, and the first thing a reload
+    // does when a pending sale is stored.
+    async function checkPendingSale() {
+      if (!pendingSale || saleCheckRunning) return;
+      clearTimeout(saleCheckTimer);
+      saleCheckTimer = null;
+      const attempt = pendingSale;
+      saleCheckRunning = true;
+      refreshPayButtons();
+      let unreachable = false;
+      try {
+        const res = await api('/api/pos/bill/status', { method: 'POST', body: attempt.body });
+        if (res && res.found === true && res.id != null) {
+          // Reset only the cart that made this sale. After a reload the screen
+          // is still on that cart's id (it cannot rotate while the cart is
+          // locked); if it somehow is not, the cart on screen is a different
+          // sale and must not be thrown away.
+          const sameCart = getCartId() === String(attempt.body.cart_id || '');
+          clearPendingSale();
+          saleCheckRunning = false;
+          await completeSale(res, { recovered: true, resetCart: sameCart });
+        } else if (res && res.found === false) {
+          clearPendingSale();
+          showToast('The last sale did NOT go through — nothing was recorded. Take the payment again.', 'warning');
+          // A restored cart skips its hold sync while the answer is unknown, so
+          // take the holds now. A full replace: harmless if they already stood.
+          if (cart.length) queueCartSync();
+        } else {
+          unreachable = true;
+        }
+      } catch (err) {
+        if (isClearRefusal(err)) {
+          // The stored body itself is refused — the bill route would refuse
+          // it the same way, so it can never have been recorded.
+          clearPendingSale();
+          showToast('The last sale was not recorded: ' + err.message, 'warning');
+        } else {
+          unreachable = true;
+        }
+      } finally {
+        saleCheckRunning = false;
+        // Still no answer: keep asking by itself, as well as on "Check again".
+        if (unreachable && pendingSale) saleCheckTimer = setTimeout(checkPendingSale, SALE_CHECK_RETRY_MS);
+        refreshPayButtons();
+        if (!pendingSale) resumeSyncRetry();
       }
     }
 
+    // A sale is on the books: show its receipt and move the till on. One path
+    // for a fresh sale, a server replay, and a lost response recovered by
+    // checkPendingSale() — so "already recorded" resets the till exactly as a
+    // successful sale does.
+    async function completeSale(result, opts) {
+      const recovered = !!(opts && opts.recovered);
+      const resetCart = !opts || opts.resetCart !== false;
+      // The server answers in one shape for both outcomes, and `replayed`
+      // is the ONLY thing that tells them apart. true means: this request was
+      // a retry of a sale that is already on the books, so NOTHING NEW WAS
+      // WRITTEN and the bill below is the earlier one. Saying "Bill created
+      // successfully" over that is how a lost sale went unnoticed at the
+      // counter, so the wording, the modal title and the toast all change.
+      // A normal sale's wording is untouched.
+      const replayed = result.replayed === true;
+      const tokenLabel = `Token #${String(result.token_number).padStart(3,'0')}`;
+
+      // Show receipt
+      document.getElementById('receipt-token').textContent = tokenLabel;
+      document.getElementById('receipt-total').textContent = formatCurrency(result.total);
+      document.getElementById('receipt-text').textContent = result.receipt_text;
+      lastReceiptText = result.receipt_text;
+      lastKitchenText = result.kitchen_text || '';
+
+      // Set EVERY branch every time — the modal is reused, so a stale notice
+      // from an earlier replay must never sit over a genuine new sale.
+      const notice = document.getElementById('receipt-replay-notice');
+      const title = document.getElementById('receipt-modal-title');
+      if (recovered) {
+        title.textContent = 'Already Recorded — No New Bill';
+        notice.innerHTML =
+          `<strong>This sale was already recorded — ${tokenLabel}.</strong><br>` +
+          `The connection dropped before the till heard back, but the server had saved the sale. ` +
+          `Nothing was charged twice. The slip below is that bill — print it if the customer needs a copy.`;
+        notice.classList.remove('d-none');
+      } else if (replayed) {
+        title.textContent = 'Already Recorded — No New Bill';
+        notice.innerHTML =
+          `<strong>This sale was already recorded as ${tokenLabel}.</strong><br>` +
+          `That request was a retry, so no new bill was created and the customer has not been charged again. ` +
+          `The slip below is that original bill — print it if they need a copy.`;
+        notice.classList.remove('d-none');
+      } else {
+        title.textContent = 'Bill Created';
+        notice.textContent = '';
+        notice.classList.add('d-none');
+      }
+
+      new bootstrap.Modal(document.getElementById('receiptModal')).show();
+      if (recovered) {
+        showToast(`This sale was already recorded — ${tokenLabel}, ${formatCurrency(result.total)}.`, 'warning');
+      } else if (replayed) {
+        showToast(
+          `Already recorded — no new bill. This sale is ${tokenLabel}, ${formatCurrency(result.total)}, saved earlier.`,
+          'warning'
+        );
+      } else {
+        showToast('Bill created successfully!');
+      }
+
+      // Reset cart and refresh token. The sale released this cart's holds
+      // inside its own transaction, so there is nothing to release here — just
+      // move on to a fresh id, and re-read the grid now that the stock moved.
+      //
+      // A REPLAY resets too, and that matters: the sale in this cart is on the
+      // books either way, and rotating to a fresh cart id is what stops the
+      // till sitting on a stale id and posting the NEXT customer's sale under
+      // it — the exact sequence that used to swallow a real bill.
+      if (resetCart) {
+        resetCartState();
+        startNewCart();
+        clearPersistedCart();
+      }
+      refreshAvailability();
+      try {
+        const token = await api('/api/pos/token');
+        document.getElementById('token-badge').textContent = `Token #${String(token.next_token).padStart(3,'0')}`;
+      } catch {}
+    }
+
     // Print the bill BEFORE payment: hand the slip over, collect the money, then
-    // press Cash/Card/UPI as usual. Nothing is saved server-side and nothing is
+    // press Cash/Card/LankaQR as usual. Nothing is saved server-side and nothing is
     // reset here — the cart, the discount and the chosen customer all stay put,
     // which is the entire point of the feature.
     //
     // Relationship to the checkout guard: this is not a payment action, so it
-    // neither sets checkoutInProgress nor calls lockPaymentButtons() — the
+    // neither sets checkoutInProgress nor locks the payment buttons — the
     // cashier must still be able to hit Cash the moment the money is in hand.
     // It only *reads* checkoutInProgress, to refuse while a bill is being
     // created: that cart is already on its way to becoming a real receipt, and a
     // proforma printed in that window would jump the queue on the same printer
     // and describe a sale that is seconds from being complete. #print-proforma
-    // is likewise absent from PAYMENT_BUTTON_IDS, so checkout()'s lock/release
-    // (via updateShiftUI) never touches it and never fights syncProformaButton().
+    // is likewise absent from PAYMENT_BUTTON_IDS, so refreshPayButtons() never
+    // touches it and never fights syncProformaButton().
     async function printProforma(btn) {
       if (checkoutInProgress) { showToast('Finishing the current sale — try again in a moment', 'warning'); return; }
+      // A slip for a cart whose sale may already be on the books would be a
+      // second piece of paper for money already taken.
+      if (pendingSale) { showToast('Checking whether the last sale went through — try again once the till knows.', 'warning'); return; }
       if (cart.length === 0) { showToast('Cart is empty', 'warning'); return; }
+      if (cartTotals().discountTooBig) { showToast('The discount is more than the subtotal — reduce it first.', 'warning'); return; }
 
-      const discount = parseFloat(document.getElementById('discount-input').value) || 0;
+      const discount = discountAmount();
       const customerId = document.getElementById('customer-id').value || null;
 
       // Same body shape as checkout() — the server reuses the bill route's parsing.
@@ -1851,7 +2408,7 @@
       syncProformaButton();
       if (!result) return; // failed — withBusy already showed the error toast
 
-      showToast('Bill printed. Collect payment, then press Cash/Card/UPI.');
+      showToast('Bill printed. Collect payment, then press Cash/Card/LankaQR.');
       // Browser fallback for shops with no thermal printer. No logo: the proforma
       // text carries the shop name itself (the thermal copy has no image at all),
       // and a logo-topped slip looks exactly like a paid receipt — which this
@@ -2108,6 +2665,22 @@
     let poDraft = null;
     let poPickingCustomer = false;
 
+    // ...and the detour EXPIRES. It used to live forever: abandon it (close the
+    // customer search without picking anyone, ring up a sale instead) and the
+    // next customer picked for ANY reason reopened the Pre-order dialog with
+    // the old lines — and saving that could convert and clear a cart that had
+    // nothing to do with it. So it ends, and the draft is thrown away, the
+    // moment the cashier does anything else: leaves the customer box without
+    // picking, cancels the new-customer dialog, starts a sale (adds an item,
+    // pays, resumes a parked bill), presses Clear, or opens Pre-order afresh.
+    function poExpireDetour(silent) {
+      if (!poDraft && !poPickingCustomer) return; // no detour in progress
+      poDraft = null;
+      poLines = [];
+      poPickingCustomer = false;
+      if (!silent) showToast('The unfinished pre-order was discarded. Press Pre-order to start it again.', 'warning');
+    }
+
     function poShowError(msg) {
       const el = document.getElementById('po-error');
       el.textContent = msg; // server wording included, so textContent - never innerHTML
@@ -2204,7 +2777,7 @@
               <td><input type="number" class="form-control form-control-sm text-end" min="1" step="1"
                          value="${escapeHtml(String(l.quantity))}"
                          oninput="poSetLine(${i}, 'quantity', this.value)"></td>
-              <td><input type="number" class="form-control form-control-sm text-end" min="0" step="0.01"
+              <td><input type="number" class="form-control form-control-sm text-end" min="0" step="any"
                          value="${escapeHtml(String(l.unit_price))}" placeholder="0.00"
                          oninput="poSetLine(${i}, 'unit_price', this.value)"></td>
               <td class="text-end fw-bold" id="po-line-total-${i}">-</td>
@@ -2280,7 +2853,17 @@
       }
     }
 
+    // The Pre-order button: always a fresh order, never a leftover detour.
+    function openPreorderFresh() {
+      if (refuseIfLocked()) return;
+      poExpireDetour(true);
+      openPreorder();
+    }
+
+    // Also the way BACK from the customer detour (selectCustomer()), which is
+    // the one caller that keeps poDraft.
     function openPreorder() {
+      if (refuseIfLocked()) return;
       poPickingCustomer = false;
       poHideError();
       if (poDraft) {
@@ -2323,8 +2906,10 @@
       poHideError();
       // A sale is mid-flight on this cart: converting it now would clear the
       // cart and release the holds under a bill that is still being written.
-      if (checkoutInProgress) {
-        poShowError('Finishing the current sale - try again in a moment.');
+      if (cartLocked()) {
+        poShowError(checkoutInProgress
+          ? 'Finishing the current sale - try again in a moment.'
+          : 'The till is still checking whether the last sale went through - try again once it knows.');
         return;
       }
 
@@ -2390,7 +2975,7 @@
         // shift rule it applies to a sale. Say so here rather than losing the
         // whole order to a 400: the order itself needs no open shift.
         if (method === 'cash' && shiftBlocked) {
-          poShowError('A cash deposit cannot be recorded while the cash drawer is closed. Open the shift on the Cash screen, take the deposit by card/UPI, or save the order without a deposit.');
+          poShowError('A cash deposit cannot be recorded while the cash drawer is closed. Open the shift on the Cash screen, take the deposit by card/LankaQR, or save the order without a deposit.');
           return;
         }
         deposit = { amount: depositAmount, payment_method: method, paid_on: todayISO() };
@@ -2501,14 +3086,26 @@
     // Keyboard shortcuts
     document.addEventListener('keydown', (e) => {
       // Holding a key makes the OS auto-repeat it ~30x/sec. On F10/F11 that was
-      // one bill per repeat; on F9/Escape it re-opened the modal / re-cleared the
-      // cart continuously. One guard covers every shortcut below.
+      // one bill per repeat; on F9 it re-opened the modal continuously. One
+      // guard covers every shortcut below.
       if (e.repeat) return;
+      // Escape NEVER touches the cart. It used to call clearCart(): the key a
+      // cashier presses to close any dialog threw away the whole order, holds
+      // and all. It now only closes what is open — Bootstrap closes its own
+      // modals, and this closes the customer dropdown.
+      if (e.key === 'Escape') {
+        const dd = document.getElementById('customer-dropdown');
+        if (dd && dd.style.display !== 'none') dd.style.display = 'none';
+        return;
+      }
       if (e.key === 'F2') { e.preventDefault(); document.getElementById('product-search').focus(); }
-      if (e.key === 'F9') { e.preventDefault(); openCashModal(); }
-      if (e.key === 'F10') { e.preventDefault(); checkout('card'); }
-      if (e.key === 'F11') { e.preventDefault(); checkout('upi'); }
-      if (e.key === 'Escape') { clearCart(); }
+      // The payment keys do nothing while a dialog is up: F10 over an open cash
+      // dialog must not start a card sale behind it.
+      const dialogOpen = !!document.querySelector('.modal.show');
+      if (e.key === 'F9') { e.preventDefault(); if (!dialogOpen) openCashModal(); }
+      // F10/F11 open the "approved?" question; they never record a sale alone.
+      if (e.key === 'F10') { e.preventDefault(); if (!dialogOpen) confirmPayment('card'); }
+      if (e.key === 'F11') { e.preventDefault(); if (!dialogOpen) confirmPayment('upi'); }
     });
   </script>
 </body>
