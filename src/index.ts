@@ -7,6 +7,7 @@ import { runMigrations, seedDefaults } from "./db/migrations";
 import { authMiddleware } from "./middleware/auth";
 import { getDb } from "./db/database";
 import { ensureBillReplayIndex } from "./services/billing";
+import { startBackupSchedule } from "./services/backup";
 import authRoutes from "./routes/auth";
 import dashboardRoutes from "./routes/dashboard";
 import posRoutes from "./routes/pos";
@@ -35,6 +36,9 @@ runMigrations();
 // ensureBillReplayIndex() in src/services/billing.ts.
 ensureBillReplayIndex();
 seedDefaults();
+// Daily on-volume snapshot: one now if today has none, then an hourly check.
+// Never throws. See src/services/backup.ts for why it is not a nightly timer.
+startBackupSchedule();
 
 const app = new Hono();
 

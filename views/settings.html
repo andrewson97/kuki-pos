@@ -53,6 +53,11 @@
           <div class="table-container p-4 mt-4">
             <h6 class="fw-bold mb-3">Data Management</h6>
             <a href="/api/settings/backup" class="btn btn-outline-secondary" download>Download Database Backup</a>
+            <div class="text-muted small mt-1">A complete copy of everything up to this moment. Keep it somewhere off this machine (Google Drive, a USB stick).</div>
+
+            <h6 class="fw-bold mt-4 mb-2">Automatic Daily Snapshots</h6>
+            <p class="text-muted small mb-2">The server keeps one snapshot per business day for the last 14 days, taken when the system first runs that day. They are stored on the same server as the live data, so still download a backup above from time to time.</p>
+            <div id="backup-list"><p class="text-muted small mb-0">Loading...</p></div>
           </div>
 
           <div class="table-container p-4 mt-4">
@@ -106,6 +111,47 @@
           <div class="text-muted" style="font-size:0.75rem;">${formatDateTime(l.created_at)}</div>
         </div>`
       ).join('') || '<p class="text-muted">No activity yet</p>';
+
+      loadBackupList();
+    }
+
+    // On its own, and not awaited above: a failure listing snapshots must not
+    // stop the rest of the settings page from loading. The filenames come from
+    // the server's strict shop-YYYY-MM-DD.db pattern, so they are safe to put
+    // in markup; encodeURIComponent is belt and braces for the link.
+    async function loadBackupList() {
+      const el = document.getElementById('backup-list');
+      try {
+        const snaps = await api('/api/settings/backups');
+        if (!snaps.length) {
+          el.innerHTML = '<p class="text-muted small mb-0">No snapshots yet. The first one is taken automatically when the server starts.</p>';
+          return;
+        }
+        el.innerHTML = `<table class="table table-sm mb-0">
+          <thead><tr><th>Business day</th><th>Taken</th><th class="text-end">Size</th><th></th></tr></thead>
+          <tbody>${snaps.map(s => `<tr>
+            <td>${formatSnapshotDay(s.date)}</td>
+            <td class="text-muted">${formatDateTime(s.created_at)}</td>
+            <td class="text-end">${formatBytes(s.size)}</td>
+            <td class="text-end"><a href="/api/settings/backups/${encodeURIComponent(s.file)}" download="${s.file}">Download</a></td>
+          </tr>`).join('')}</tbody>
+        </table>`;
+      } catch (err) {
+        el.innerHTML = `<p class="text-danger small mb-0">Could not load snapshots: ${err.message}</p>`;
+      }
+    }
+
+    // s.date is a bare business date (YYYY-MM-DD). formatDate() would read it as
+    // a DB timestamp and produce "Invalid Date", so format it as the calendar day
+    // it already is - in UTC, so no timezone shift can move it a day.
+    function formatSnapshotDay(d) {
+      return new Date(`${d}T00:00:00Z`).toLocaleDateString('en-LK', { timeZone: 'UTC', year: 'numeric', month: 'short', day: 'numeric' });
+    }
+
+    function formatBytes(n) {
+      if (n < 1024) return `${n} B`;
+      if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
+      return `${(n / 1024 / 1024).toFixed(1)} MB`;
     }
 
     async function saveSettings(btn) {
