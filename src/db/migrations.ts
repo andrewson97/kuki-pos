@@ -545,6 +545,18 @@ export function runMigrations(): void {
   } catch {
     // Silent — fine if products table is empty or anything odd.
   }
+
+  // ── fix/labels-inputs ──────────────────────────────────────────────────────
+  // One-shot: the shop trades in LKR, but seedDefaults() used to seed the
+  // currency symbol as the Indian rupee sign. Existing installs got that wrong
+  // default, so swap it for "Rs." — but only when it is still exactly the old
+  // seeded value, never overwriting a symbol the owner chose in Settings.
+  // Idempotent: once converted the WHERE no longer matches.
+  try {
+    db.query("UPDATE settings SET value = 'Rs.' WHERE key = 'currency_symbol' AND value = '₹'").run();
+  } catch {
+    // Silent — settings table always exists by now; nothing to recover anyway.
+  }
 }
 
 export function seedDefaults(): void {
@@ -577,7 +589,7 @@ export function seedDefaults(): void {
     shop_address: "",
     shop_phone: "",
     tax_rate: "0",
-    currency_symbol: "₹",
+    currency_symbol: "Rs.",
     printer_type: "none",
     printer_address: "",
     enforce_cash_shift: "1",

@@ -38,7 +38,7 @@
               </table>
               <div class="d-flex gap-2 mb-3">
                 <select class="form-select" id="add-ingredient" style="width:200px;"></select>
-                <input type="number" class="form-control" id="add-qty" placeholder="Qty" step="0.01" style="width:100px;">
+                <input type="number" class="form-control" id="add-qty" placeholder="Qty" step="any" min="0" style="width:100px;">
                 <button class="btn btn-outline-primary" onclick="addIngredient()">Add</button>
               </div>
               <button class="btn btn-primary" onclick="saveRecipe(this)">Save Recipe</button>
@@ -108,7 +108,7 @@
       document.getElementById('recipe-items').innerHTML = recipeIngredients.map((i, idx) => `
         <tr>
           <td>${i.name}</td>
-          <td><input type="number" class="form-control form-control-sm" value="${i.quantity_needed}" step="0.01"
+          <td><input type="number" class="form-control form-control-sm" value="${i.quantity_needed}" step="any" min="0"
             onchange="recipeIngredients[${idx}].quantity_needed = parseFloat(this.value)" style="width:100px;"></td>
           <td>${i.unit}</td>
           <td>${formatCurrency(i.quantity_needed * i.cost_per_unit)}</td>
