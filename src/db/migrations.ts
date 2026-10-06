@@ -691,6 +691,14 @@ export function runMigrations(): void {
   //     only the balance under the bill's own day and method.
   addColumn("bills", "refund_restocked", "INTEGER NOT NULL DEFAULT 0");
   addColumn("bills", "paid_in_advance", "REAL NOT NULL DEFAULT 0");
+
+  // --- fix/post-merge ------------------------------------------------------
+  // 1 when the bill moved no stock at all: createBill() was called with
+  // skip_stock (a pre-order collection; pre-ordered goods are never stock).
+  // Stock History reads it so such a bill never shows as stock leaving. Every
+  // existing row gets 0, which is right: before skip_stock existed, collections
+  // went through the ordinary stock deduction like any other sale.
+  addColumn("bills", "stock_skipped", "INTEGER NOT NULL DEFAULT 0");
 }
 
 export function seedDefaults(): void {

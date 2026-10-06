@@ -574,8 +574,8 @@ export function createBill(params: CreateBillParams): CreatedBill {
   const changeGiven = amount_given != null ? round2(Math.max(0, amount_given - total)) : null;
 
   const insertBill = db.query(`
-    INSERT INTO bills (token_number, bill_date, customer_id, subtotal, discount, tax_rate, tax_amount, total, payment_method, status, user_id, amount_given, change_given, cart_id, cart_fingerprint)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'completed', ?, ?, ?, ?, ?)
+    INSERT INTO bills (token_number, bill_date, customer_id, subtotal, discount, tax_rate, tax_amount, total, payment_method, status, user_id, amount_given, change_given, cart_id, cart_fingerprint, stock_skipped)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'completed', ?, ?, ?, ?, ?, ?)
   `);
 
   const insertItem = db.query(`
@@ -676,7 +676,12 @@ export function createBill(params: CreateBillParams): CreatedBill {
       // keeps the (cart_id, cart_fingerprint) uniqueness effective, since a row
       // with a NULL fingerprint sits outside it. NULL only for keyless bills,
       // which are not deduped at all, and for rows that predate the column.
-      fingerprint || null
+      fingerprint || null,
+      // Recorded on the bill so Stock History can tell a sale that took stock
+      // from one that never did (a pre-order collection, see skip_stock). It
+      // cannot be inferred from the cart id: collections rung up before
+      // skip_stock existed DID deduct stock, and their history must stay.
+      params.skip_stock ? 1 : 0
     );
     const billId = Number(result.lastInsertRowid);
 

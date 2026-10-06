@@ -212,6 +212,9 @@ const PAID_IN_ADVANCE = `
  *   + bills sold on their bill_date: total - paid_in_advance, under the bill's method
  *   + pre-order deposits on the business date of created_at, under their own method
  *   - refunds on their refund day, under the refunded bill's method
+ *   - deposits paid back when a pre-order was cancelled, on the business date
+ *     of deposit_settled_at, under the method they were paid back by (a kept
+ *     deposit moves no money, so only 'refunded' outcomes count)
  *
  * Consequently these rows do not sum to the sales total on a day with deposits
  * or collections, and the pages label them "Money received by method".
@@ -236,6 +239,16 @@ export function moneyReceivedByMethod(start: string, end: string): MoneyReceived
     WHERE ${IN_REFUND_WINDOW}
     GROUP BY b.payment_method
   `).all(start, end) as { method: string; n: number; amount: number }[];
+  // A cancelled order's deposit handed back is money leaving by that method,
+  // exactly like a bill refund — it is counted with the refunds so the cash row
+  // here agrees with the drawer (cash.ts subtracts it from expected cash too).
+  const depositRefunds = db.query(`
+    SELECT deposit_refund_method AS method, COUNT(*) AS n, COALESCE(SUM(deposit_settled_amount), 0) AS amount
+    FROM pre_orders
+    WHERE deposit_outcome = 'refunded' AND deposit_settled_at IS NOT NULL
+      AND ${BIZ_DATE("deposit_settled_at")} >= ? AND ${BIZ_DATE("deposit_settled_at")} <= ?
+    GROUP BY deposit_refund_method
+  `).all(start, end) as { method: string; n: number; amount: number }[];
 
   const byMethod = new Map<string, MoneyReceivedRow>();
   const row = (method: string) => {
@@ -257,7 +270,7 @@ export function moneyReceivedByMethod(start: string, end: string): MoneyReceived
     r.deposit_count += d.n;
     r.deposits = money(r.deposits + d.amount);
   }
-  for (const f of refunds) {
+  for (const f of [...refunds, ...depositRefunds]) {
     const r = row(f.method);
     r.refund_count += f.n;
     r.refunds = money(r.refunds + f.amount);

@@ -89,7 +89,10 @@ const BIZ_DATE = (col: string) => `date(${col}, '+30 minutes')`;
 // and refunded bills whose refund did NOT put the items back. A refund that
 // restocked (refund_restocked = 1, including every refund from before the
 // choice existed — see the backfill in src/db/migrations.ts) cancels its sale.
-const SALE_STILL_OUT = "(b.status = 'completed' OR (b.status = 'refunded' AND b.refund_restocked = 0))";
+// A bill rung up with skip_stock (a pre-order collection — pre-ordered goods are
+// never stock) moved nothing at all, so it is never a stock movement here.
+const SALE_STILL_OUT =
+  "(b.stock_skipped = 0 AND (b.status = 'completed' OR (b.status = 'refunded' AND b.refund_restocked = 0)))";
 
 // One SELECT per source, all sharing the same column list. Column names come
 // from the first branch, but every branch is aliased so the shape is obvious.
