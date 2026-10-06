@@ -545,6 +545,14 @@ export function runMigrations(): void {
   } catch {
     // Silent — fine if products table is empty or anything odd.
   }
+
+  // --- fix/cash-reports ----------------------------------------------------
+  // Coins in the drawer. The count only ever had Rs 20–5000 note rows, so every
+  // coin in the till was either left out of the count (a phantom shortage at
+  // close) or folded into a note row by guesswork. One running total rather
+  // than a row per coin: nobody counts Rs 1 coins one by one at closing time,
+  // they bag or weigh them. Counts saved before this had no coins, hence 0.
+  addColumn("cash_counts", "coins_total", "REAL NOT NULL DEFAULT 0");
 }
 
 export function seedDefaults(): void {

@@ -7,8 +7,55 @@ const cash = new Hono();
 
 const DENOMINATIONS = [20, 50, 100, 500, 1000, 2000, 5000] as const;
 
-function computeTotal(notes: Record<string, number>): number {
-  return DENOMINATIONS.reduce((sum, d) => sum + (notes[`notes_${d}`] || 0) * d, 0);
+// Every drawer figure is money, and money is kept to the cent. Summing floats
+// leaves tails like 4999.999999999 which, compared with `=== 0` or shown as a
+// variance, turned an exact count into "short by Rs. 0.00".
+function money(n: number): number {
+  return Math.round((Number(n) || 0) * 100) / 100;
+}
+
+type DrawerCount = { notes: Record<`notes_${(typeof DENOMINATIONS)[number]}`, number>; coins_total: number };
+
+/**
+ * Validates one open/close count from the request body, or says why it cannot
+ * be saved.
+ *
+ * Note rows are COUNTS of notes: a whole number, never negative. Before this
+ * the server multiplied whatever arrived — "-3" fifties or 2.5 thousands went
+ * straight into total_amount, and from there into the stored variance. A
+ * missing or empty field still means 0, which is what a blank row means on the
+ * counting screen.
+ *
+ * coins_total is the one money field (Rs 1/2/5/10 coins, counted as a total):
+ * any finite amount >= 0, kept to the cent.
+ */
+function parseCount(body: any): DrawerCount | string {
+  const notes = {} as DrawerCount["notes"];
+  for (const d of DENOMINATIONS) {
+    const raw = body?.[`notes_${d}`];
+    if (raw === undefined || raw === null || raw === "") {
+      notes[`notes_${d}`] = 0;
+      continue;
+    }
+    const n = Number(raw);
+    if (!Number.isInteger(n) || n < 0) {
+      return `Rs ${d} notes must be a whole number of notes, 0 or more.`;
+    }
+    notes[`notes_${d}`] = n;
+  }
+  const rawCoins = body?.coins_total;
+  let coins = 0;
+  if (rawCoins !== undefined && rawCoins !== null && rawCoins !== "") {
+    coins = Number(rawCoins);
+    if (!Number.isFinite(coins) || coins < 0) return "Coins total must be an amount of 0 or more.";
+  }
+  return { notes, coins_total: money(coins) };
+}
+
+function computeTotal(count: DrawerCount): number {
+  return money(
+    DENOMINATIONS.reduce((sum, d) => sum + count.notes[`notes_${d}`] * d, 0) + count.coins_total
+  );
 }
 
 // Returns the currently OPEN shift across all dates — i.e. the latest 'open'
@@ -191,8 +238,13 @@ cash.get("/today", (c) => {
   // What a close right now would expect to find in the drawer. Returned so the
   // close screen can show the running figure and its parts without having to
   // re-derive the formula in the browser.
+  //
+  // This is THE expected figure for the live close screen: cash.html and
+  // m-cash.html show it as-is and work the variance out from it, so the screen
+  // can never again quote a different "expected" from the one the close stores
+  // (they used to re-add the parts in the browser and leave the deposits out).
   const expected_now = open
-    ? (open.total_amount || 0) + cash_sales - cash_refunds - cash_expenses + deposits_taken - deposits_applied
+    ? money((open.total_amount || 0) + cash_sales - cash_refunds - cash_expenses + deposits_taken - deposits_applied)
     : 0;
 
   // Surface whether the open shift is from a prior day (cashier must close it
@@ -226,17 +278,19 @@ cash.post("/open", async (c) => {
     return c.json({ error: "A shift is already open (possibly from a previous day). Close it before starting a new one." }, 400);
   }
 
-  const total = computeTotal(body);
+  const count = parseCount(body);
+  if (typeof count === "string") return c.json({ error: count }, 400);
+  const n = count.notes;
+  const total = computeTotal(count);
   db.query(`
-    INSERT INTO cash_counts (count_type, count_date, user_id, notes_20, notes_50, notes_100, notes_500, notes_1000, notes_2000, notes_5000, total_amount, notes)
-    VALUES ('open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO cash_counts (count_type, count_date, user_id, notes_20, notes_50, notes_100, notes_500, notes_1000, notes_2000, notes_5000, coins_total, total_amount, notes)
+    VALUES ('open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     date, user.id,
-    body.notes_20 || 0, body.notes_50 || 0, body.notes_100 || 0,
-    body.notes_500 || 0, body.notes_1000 || 0, body.notes_2000 || 0, body.notes_5000 || 0,
-    total, body.notes || null
+    n.notes_20, n.notes_50, n.notes_100, n.notes_500, n.notes_1000, n.notes_2000, n.notes_5000,
+    count.coins_total, total, body.notes || null
   );
-  return c.json({ success: true, total_amount: total });
+  return c.json({ success: true, total_amount: total, coins_total: count.coins_total });
 });
 
 cash.post("/close", async (c) => {
@@ -247,6 +301,9 @@ cash.post("/close", async (c) => {
 
   const openRow = getCurrentOpenShift();
   if (!openRow) return c.json({ error: "No open shift to close." }, 400);
+
+  const count = parseCount(body);
+  if (typeof count === "string") return c.json({ error: count }, 400);
 
   const since = openRow.created_at;
   const pending = getPendingExpenseCountSince(since);
@@ -273,18 +330,20 @@ cash.post("/close", async (c) => {
   // total, which is exactly what the drawer received.
   const depositsTaken = getDepositsTakenSince(since);
   const depositsApplied = getDepositsAppliedSince(since);
-  const expected = opening + cashSales - cashRefunds - cashExpenses + depositsTaken - depositsApplied;
-  const counted = computeTotal(body);
-  const variance = counted - expected;
+  // Rounded to the cent, as are counted and variance, so the stored figures are
+  // exactly the ones the close screen shows and an exact count stores 0.
+  const expected = money(opening + cashSales - cashRefunds - cashExpenses + depositsTaken - depositsApplied);
+  const counted = computeTotal(count);
+  const variance = money(counted - expected);
+  const n = count.notes;
 
   db.query(`
-    INSERT INTO cash_counts (count_type, count_date, user_id, notes_20, notes_50, notes_100, notes_500, notes_1000, notes_2000, notes_5000, total_amount, expected_amount, variance, notes)
-    VALUES ('close', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO cash_counts (count_type, count_date, user_id, notes_20, notes_50, notes_100, notes_500, notes_1000, notes_2000, notes_5000, coins_total, total_amount, expected_amount, variance, notes)
+    VALUES ('close', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     date, user.id,
-    body.notes_20 || 0, body.notes_50 || 0, body.notes_100 || 0,
-    body.notes_500 || 0, body.notes_1000 || 0, body.notes_2000 || 0, body.notes_5000 || 0,
-    counted, expected, variance, body.notes || null
+    n.notes_20, n.notes_50, n.notes_100, n.notes_500, n.notes_1000, n.notes_2000, n.notes_5000,
+    count.coins_total, counted, expected, variance, body.notes || null
   );
   // The breakdown comes back so the close screen can show WHY expected is what
   // it is. expected_amount / variance keep their existing meaning and are the
@@ -292,6 +351,7 @@ cash.post("/close", async (c) => {
   return c.json({
     success: true,
     total_amount: counted,
+    coins_total: count.coins_total,
     expected_amount: expected,
     variance,
     breakdown: {
