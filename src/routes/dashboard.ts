@@ -3,6 +3,7 @@ import { getDb } from "../db/database";
 import { getUser } from "../middleware/auth";
 import { todayDate } from "../utils/helpers";
 import { getStockAlerts } from "../services/stock";
+import { costOfGoods, money, moneyReceivedByMethod, salesSummary } from "../services/sales";
 
 const dashboard = new Hono();
 
@@ -19,10 +20,10 @@ dashboard.get("/stats", (c) => {
   const user = getUser(c);
   const isAdmin = user?.role === "admin";
 
-  const todaySales = db.query(`
-    SELECT COUNT(*) as bill_count, COALESCE(SUM(total), 0) as total_sales
-    FROM bills WHERE bill_date = ? AND status = 'completed'
-  `).get(today) as any;
+  // Same figures as /api/reports/daily for today (../services/sales): gross
+  // sales on the sale day, refunds on the refund day, net = gross - refunds.
+  // bill_count is every bill sold today, refunded since or not.
+  const todaySales = salesSummary(today, today);
 
   const todayExpenses = isAdmin ? db.query(`
     SELECT COALESCE(SUM(amount), 0) as total
@@ -48,25 +49,29 @@ dashboard.get("/stats", (c) => {
   // low_stock_count is exactly what the list shows.
   const { low_stock_items, out_of_stock_earlier } = getStockAlerts(today);
 
-  const todayCost = isAdmin ? db.query(`
-    SELECT COALESCE(SUM(bi.cost_price * bi.quantity), 0) as total_cost
-    FROM bill_items bi
-    JOIN bills b ON bi.bill_id = b.id
-    WHERE b.bill_date = ? AND b.status = 'completed'
-  `).get(today) as any : null;
+  const todayCost = isAdmin ? costOfGoods(today, today) : null;
 
   // Omitted, not nulled: a missing key is the only answer a caller cannot
   // mistake for a figure, and `null` would reach formatCurrency() as "Rs. 0.00"
   // — a wrong number is worse than no number. The view drops the money tiles
   // for a cashier, so nothing is left reading `today.sales`.
+  //
+  // `sales` stays the headline figure, and is now NET of refunds handed back
+  // today; gross_sales and refunds are the two halves of it. by_payment is money
+  // RECEIVED today by method (deposits included, refunds subtracted), so it does
+  // not have to add up to `sales`.
   const todayStats = isAdmin
     ? {
-        sales: todaySales.total_sales,
+        sales: todaySales.net_sales,
+        gross_sales: todaySales.total_sales,
+        refunds: todaySales.total_refunds,
+        refund_count: todaySales.refund_count,
         bill_count: todaySales.bill_count,
-        cost_of_goods: todayCost.total_cost,
-        gross_profit: todaySales.total_sales - todayCost.total_cost,
+        cost_of_goods: todayCost!.total_cost,
+        gross_profit: money(todaySales.net_sales - todayCost!.total_cost),
         expenses: todayExpenses.total,
-        net_profit: todaySales.total_sales - todayCost.total_cost - todayExpenses.total,
+        net_profit: money(todaySales.net_sales - todayCost!.total_cost - todayExpenses.total),
+        by_payment: moneyReceivedByMethod(today, today),
       }
     : { bill_count: todaySales.bill_count };
 

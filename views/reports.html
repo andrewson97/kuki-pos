@@ -35,7 +35,7 @@
           <button class="btn btn-primary" onclick="loadMonthly()">Generate</button>
         </div>
         <div class="row g-4 mb-4">
-          <div class="col-md-2"><div class="stat-card"><div class="stat-label">Total Sales</div><div class="stat-value" id="m-sales">-</div></div></div>
+          <div class="col-md-2"><div class="stat-card"><div class="stat-label">Net Sales</div><div class="stat-value" id="m-sales">-</div><div class="small text-muted" id="m-sales-note"></div></div></div>
           <div class="col-md-2"><div class="stat-card"><div class="stat-label">Cost of Goods</div><div class="stat-value" id="m-cost">-</div></div></div>
           <div class="col-md-2"><div class="stat-card"><div class="stat-label">Gross Profit</div><div class="stat-value" id="m-gross">-</div></div></div>
           <div class="col-md-2"><div class="stat-card"><div class="stat-label">Expenses</div><div class="stat-value" id="m-expenses">-</div></div></div>
@@ -44,7 +44,10 @@
         </div>
         <div class="row g-4 mb-4">
           <div class="col-md-8"><div class="table-container p-3"><canvas id="chart-daily-sales" height="200"></canvas></div></div>
-          <div class="col-md-4"><div class="table-container p-3"><h6 class="fw-bold mb-3">Expenses by Category</h6><div id="m-exp-cats"></div></div></div>
+          <div class="col-md-4">
+            <div class="table-container p-3"><h6 class="fw-bold mb-3">Expenses by Category</h6><div id="m-exp-cats"></div></div>
+            <div class="table-container p-3 mt-3"><h6 class="fw-bold mb-1">Money received by method</h6><div id="m-payments"></div></div>
+          </div>
         </div>
         <div class="row g-4">
           <div class="col-12"><div class="table-container p-3"><h6 class="fw-bold mb-3">Products Sold</h6><div id="m-products"></div></div></div>
@@ -58,13 +61,13 @@
           <button class="btn btn-primary" onclick="loadDaily()">Generate</button>
         </div>
         <div class="row g-4 mb-4">
-          <div class="col-md-3"><div class="stat-card"><div class="stat-label">Sales</div><div class="stat-value" id="d-sales">-</div></div></div>
+          <div class="col-md-3"><div class="stat-card"><div class="stat-label">Net Sales</div><div class="stat-value" id="d-sales">-</div><div class="small text-muted" id="d-sales-note"></div></div></div>
           <div class="col-md-3"><div class="stat-card"><div class="stat-label">Bills</div><div class="stat-value" id="d-bills">-</div></div></div>
           <div class="col-md-3"><div class="stat-card"><div class="stat-label">Expenses</div><div class="stat-value" id="d-expenses">-</div></div></div>
           <div class="col-md-3"><div class="stat-card"><div class="stat-label">Profit</div><div class="stat-value" id="d-profit">-</div></div></div>
         </div>
         <div class="row g-4">
-          <div class="col-md-4"><div class="table-container p-3"><h6 class="fw-bold mb-3">Payment Methods</h6><div id="d-payments"></div></div></div>
+          <div class="col-md-4"><div class="table-container p-3"><h6 class="fw-bold mb-1">Money received by method</h6><div id="d-payments"></div></div></div>
           <div class="col-md-8"><div class="table-container p-3"><h6 class="fw-bold mb-3">Products Sold</h6><div id="d-products"></div></div></div>
         </div>
       </div>
@@ -86,7 +89,7 @@
         <h6 class="fw-bold mb-3" id="r-header">-</h6>
         <div class="row g-4 mb-4">
           <div class="col-md-3"><div class="stat-card"><div class="stat-label">Bills</div><div class="stat-value" id="r-bills">-</div></div></div>
-          <div class="col-md-3"><div class="stat-card"><div class="stat-label">Total Sales</div><div class="stat-value" id="r-sales">-</div></div></div>
+          <div class="col-md-3"><div class="stat-card"><div class="stat-label">Net Sales</div><div class="stat-value" id="r-sales">-</div><div class="small text-muted" id="r-sales-note"></div></div></div>
           <div class="col-md-3"><div class="stat-card"><div class="stat-label">Cost of Goods</div><div class="stat-value" id="r-cost">-</div></div></div>
           <div class="col-md-3"><div class="stat-card"><div class="stat-label">Gross Profit</div><div class="stat-value" id="r-gross">-</div></div></div>
           <div class="col-md-3"><div class="stat-card"><div class="stat-label">Expenses</div><div class="stat-value" id="r-expenses">-</div></div></div>
@@ -94,11 +97,11 @@
           <div class="col-md-3"><div class="stat-card"><div class="stat-label">Disposal Loss</div><div class="stat-value" id="r-disposal">-</div></div></div>
           <div class="col-md-3"><div class="stat-card"><div class="stat-label">Net Profit</div><div class="stat-value" id="r-profit">-</div></div></div>
         </div>
-        <div id="r-empty" class="table-container p-5 text-center text-muted" style="display:none;">No sales recorded in this date range.</div>
+        <div id="r-empty" class="table-container p-5 text-center text-muted" style="display:none;">No sales or refunds recorded in this date range.</div>
         <div id="r-results" style="display:none;">
           <div class="row g-4 mb-4">
             <div class="col-md-8"><div class="table-container p-3"><canvas id="chart-range-sales" height="200"></canvas></div></div>
-            <div class="col-md-4"><div class="table-container p-3"><h6 class="fw-bold mb-3">Payment Methods</h6><div id="r-payments"></div></div></div>
+            <div class="col-md-4"><div class="table-container p-3"><h6 class="fw-bold mb-1">Money received by method</h6><div id="r-payments"></div></div></div>
           </div>
           <div class="row g-4">
             <div class="col-md-4"><div class="table-container p-3"><h6 class="fw-bold mb-3">Expenses by Category</h6><div id="r-exp-cats"></div></div></div>
@@ -148,6 +151,51 @@
       return String(s == null ? '' : s).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
     }
 
+    // 'upi' is what the database stores; the customer pays with LankaQR, so that
+    // is what the owner reads.
+    function payLabel(m) {
+      const v = String(m || '').toLowerCase();
+      return v === 'upi' ? 'LankaQR' : v.toUpperCase();
+    }
+
+    // Under every "Net Sales" figure: how it is made. Refunds are counted on the
+    // day the money went back, not taken off the day of the original sale.
+    function salesNote(sales) {
+      const gross = (sales && sales.total_sales) || 0;
+      const refunds = (sales && sales.total_refunds) || 0;
+      const n = (sales && sales.refund_count) || 0;
+      return `Gross ${formatCurrency(gross)} · Refunds &minus;${formatCurrency(refunds)}${n ? ` (${n})` : ''}`;
+    }
+
+    // by_payment is money RECEIVED by method, not sales by method: a pre-order
+    // deposit counts on the day and by the method it was paid, the balance on
+    // collection day, and a refund comes off on the day it was handed back. So
+    // on a day with deposits or collections these rows need not add up to sales.
+    function renderMoneyReceived(elId, rows) {
+      const el = document.getElementById(elId);
+      if (!el) return;
+      const list = Array.isArray(rows) ? rows : [];
+      const intro = '<div class="small text-muted mb-2">Deposits on the day they were paid, refunds on the day they were given back &mdash; need not add up to sales.</div>';
+      if (!list.length) { el.innerHTML = intro + '<p class="text-muted mb-0">No money received</p>'; return; }
+      const sum = list.reduce((s, p) => s + Number(p.total || 0), 0);
+      el.innerHTML = intro + `
+        <table class="table table-sm mb-0">
+          <thead><tr><th>Method</th><th class="text-end">Received</th></tr></thead>
+          <tbody>
+            ${list.map(p => {
+              const parts = [`${p.count || 0} bill${p.count === 1 ? '' : 's'} ${formatCurrency(p.sales || 0)}`];
+              if (Number(p.deposits)) parts.push(`+ deposits ${formatCurrency(p.deposits)}`);
+              if (Number(p.refunds)) parts.push(`&minus; refunds ${formatCurrency(p.refunds)}`);
+              return `<tr>
+                <td>${escapeHtml(payLabel(p.payment_method))}<br><small class="text-muted">${parts.join(' ')}</small></td>
+                <td class="text-end fw-bold">${formatCurrency(p.total)}</td>
+              </tr>`;
+            }).join('')}
+          </tbody>
+          <tfoot class="fw-bold"><tr class="border-top"><td>Total received</td><td class="text-end">${formatCurrency(sum)}</td></tr></tfoot>
+        </table>`;
+    }
+
     initApp('/reports', () => {
       // Populate month/year selectors
       const months = ['January','February','March','April','May','June','July','August','September','October','November','December'];
@@ -189,7 +237,9 @@
     // recon (optional) = { discount, tax, totalSales } taken from the report's bill-level
     // totals. When supplied, a reconciliation block is drawn under the table showing how
     // the gross product value (SUM of bill_items.total, i.e. before discount and tax)
-    // turns into the headline "Total Sales" figure (SUM of bills.total).
+    // turns into GROSS sales (SUM of bills.total for every bill sold, including ones
+    // refunded later). Products are listed by sale day, like gross sales; refunds are a
+    // separate figure on their own day, so they are not part of this reconciliation.
     // Top Products has no bill totals in its payload, so it passes no recon.
     function renderProductsTable(prefix, products, recon) {
       const el = document.getElementById(prefix + '-products');
@@ -266,7 +316,7 @@
       renderRecon(prefix, q !== '');
     }
 
-    // Reconciliation between the products table and the headline "Total Sales" card.
+    // Reconciliation between the products table and the gross sales figure.
     // Always computed over the FULL product list - never the filtered subset, because
     // reconciling part of the products against whole-period bill totals is meaningless.
     // While a filter is active the block stays put and says so explicitly.
@@ -287,7 +337,7 @@
       const line = (label, value, cls, attrs) =>
         `<div class="d-flex justify-content-between gap-3 ${cls}"${attrs || ''}><span>${label}</span><span>${value}</span></div>`;
 
-      const mismatchTitle = ` title="Could not reconcile: ${formatCurrency(gross)} gross value less ${formatCurrency(discount)} discount plus ${formatCurrency(tax)} tax comes to ${formatCurrency(computed)}, but Total Sales reports ${formatCurrency(totalSales)}."`;
+      const mismatchTitle = ` title="Could not reconcile: ${formatCurrency(gross)} gross value less ${formatCurrency(discount)} discount plus ${formatCurrency(tax)} tax comes to ${formatCurrency(computed)}, but Gross Sales reports ${formatCurrency(totalSales)}."`;
 
       host.innerHTML = `
         <div class="small ms-auto" style="max-width:360px;">
@@ -295,7 +345,7 @@
           ${line('Gross product value', formatCurrency(gross), 'text-muted')}
           ${discount !== 0 ? line('less discounts', '&minus; ' + formatCurrency(discount), 'text-muted') : ''}
           ${tax !== 0 ? line('plus tax', '+ ' + formatCurrency(tax), 'text-muted') : ''}
-          ${line('= Total Sales', formatCurrency(totalSales), 'fw-bold border-top mt-1 pt-1' + (reconciles ? '' : ' text-danger'), reconciles ? '' : mismatchTitle)}
+          ${line('= Gross Sales', formatCurrency(totalSales), 'fw-bold border-top mt-1 pt-1' + (reconciles ? '' : ' text-danger'), reconciles ? '' : mismatchTitle)}
         </div>`;
     }
 
@@ -327,7 +377,8 @@
       const month = document.getElementById('report-month').value;
       const year = document.getElementById('report-year').value;
       const data = await api(`/api/reports/monthly?month=${month}&year=${year}`);
-      document.getElementById('m-sales').textContent = formatCurrency(data.sales.total_sales);
+      document.getElementById('m-sales').textContent = formatCurrency(data.sales.net_sales);
+      document.getElementById('m-sales-note').innerHTML = salesNote(data.sales);
       document.getElementById('m-cost').textContent = formatCurrency(data.cost_of_goods);
       document.getElementById('m-gross').textContent = formatCurrency(data.gross_profit);
       document.getElementById('m-gross').style.color = data.gross_profit >= 0 ? '#28a745' : '#dc3545';
@@ -352,6 +403,8 @@
         `<div class="d-flex justify-content-between py-1 border-bottom"><span>${escapeHtml(c.category)}</span><strong>${formatCurrency(c.total)}</strong></div>`
       ).join('') || '<p class="text-muted">No expenses</p>';
 
+      renderMoneyReceived('m-payments', data.by_payment);
+
       // Every product sold this month
       renderProductsTable('m', data.top_products, {
         discount: data.sales.total_discount,
@@ -366,7 +419,8 @@
         type: 'bar',
         data: {
           labels: data.daily_sales.map(d => d.bill_date.substring(5)),
-          datasets: [{ label: 'Daily Sales', data: data.daily_sales.map(d => d.total_sales), backgroundColor: '#e83e8c' }],
+          // Net of refunds handed back that day, so a refund-only day dips below zero.
+          datasets: [{ label: 'Net Sales', data: data.daily_sales.map(d => d.net_sales), backgroundColor: '#e83e8c' }],
         },
         options: { responsive: true, plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true } } },
       });
@@ -377,14 +431,13 @@
     async function loadDaily() {
       const date = document.getElementById('daily-date').value;
       const data = await api(`/api/reports/daily?date=${date}`);
-      document.getElementById('d-sales').textContent = formatCurrency(data.sales.total_sales);
+      document.getElementById('d-sales').textContent = formatCurrency(data.sales.net_sales);
+      document.getElementById('d-sales-note').innerHTML = salesNote(data.sales);
       document.getElementById('d-bills').textContent = data.sales.bill_count;
       document.getElementById('d-expenses').textContent = formatCurrency(data.expenses);
-      document.getElementById('d-profit').textContent = formatCurrency(data.sales.total_sales - data.expenses);
+      document.getElementById('d-profit').textContent = formatCurrency(data.sales.net_sales - data.expenses);
 
-      document.getElementById('d-payments').innerHTML = data.by_payment.map(p =>
-        `<div class="d-flex justify-content-between py-1 border-bottom"><span>${escapeHtml(String(p.payment_method || '').toUpperCase())} (${p.count} bills)</span><strong>${formatCurrency(p.total)}</strong></div>`
-      ).join('') || '<p class="text-muted">No sales</p>';
+      renderMoneyReceived('d-payments', data.by_payment);
 
       renderProductsTable('d', data.top_products, {
         discount: data.sales.total_discount,
@@ -448,7 +501,8 @@
         `${fmtISODate(data.start_date || start)} - ${fmtISODate(data.end_date || end)} · ${days} day${days === 1 ? '' : 's'}`;
 
       document.getElementById('r-bills').textContent = data.sales.bill_count;
-      document.getElementById('r-sales').textContent = formatCurrency(data.sales.total_sales);
+      document.getElementById('r-sales').textContent = formatCurrency(data.sales.net_sales);
+      document.getElementById('r-sales-note').innerHTML = salesNote(data.sales);
       document.getElementById('r-cost').textContent = formatCurrency(data.cost_of_goods);
       const grossEl = document.getElementById('r-gross');
       grossEl.textContent = formatCurrency(data.gross_profit);
@@ -461,7 +515,8 @@
       netEl.textContent = formatCurrency(data.net_profit);
       netEl.style.color = data.net_profit >= 0 ? '#28a745' : '#dc3545';
 
-      const hasSales = (data.sales.bill_count || 0) > 0;
+      // A range holding only a refund (of a bill sold before it) still has a figure to show.
+      const hasSales = (data.sales.bill_count || 0) > 0 || (data.sales.refund_count || 0) > 0;
       document.getElementById('r-empty').style.display = hasSales ? 'none' : 'block';
       document.getElementById('r-results').style.display = hasSales ? 'block' : 'none';
       if (!hasSales) {
@@ -469,18 +524,7 @@
         return;
       }
 
-      // Payment methods
-      document.getElementById('r-payments').innerHTML = `
-        <table class="table table-sm mb-0">
-          <thead><tr><th>Method</th><th class="text-end">Bills</th><th class="text-end">Total</th></tr></thead>
-          <tbody>
-            ${data.by_payment.map(p => `<tr>
-              <td>${escapeHtml(String(p.payment_method || '').toUpperCase())}</td>
-              <td class="text-end">${p.count}</td>
-              <td class="text-end fw-bold">${formatCurrency(p.total)}</td>
-            </tr>`).join('') || '<tr><td colspan="3" class="text-muted text-center py-3">No payments</td></tr>'}
-          </tbody>
-        </table>`;
+      renderMoneyReceived('r-payments', data.by_payment);
 
       // Expenses by category
       document.getElementById('r-exp-cats').innerHTML = `
@@ -510,8 +554,8 @@
         data: {
           labels: data.daily_sales.map(d => d.bill_date.substring(5)),
           datasets: [{
-            label: 'Daily Sales',
-            data: data.daily_sales.map(d => d.total_sales),
+            label: 'Net Sales',
+            data: data.daily_sales.map(d => d.net_sales),
             borderColor: '#e83e8c',
             backgroundColor: 'rgba(232,62,140,0.15)',
             fill: true,
@@ -523,6 +567,7 @@
     }
 
     // ---------- Top products ----------
+    // Sold by sale day, refunded later or not (see the note in src/routes/reports.ts).
 
     async function loadTopProducts() {
       const days = document.getElementById('top-period').value;

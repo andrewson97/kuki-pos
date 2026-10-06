@@ -22,6 +22,12 @@
           <div class="table-container p-3">
             <h6 class="fw-bold mb-3" id="form-title">Opening Float</h6>
             <div id="denominations"></div>
+            <div class="row align-items-center mb-2">
+              <div class="col-3"><strong>Coins</strong></div>
+              <div class="col-4"><input type="number" min="0" step="any" class="form-control" id="coins_total" value="0" oninput="recalc()" aria-label="Coins total (Rs)"></div>
+              <div class="col-2 text-muted text-center small">total (Rs)</div>
+              <div class="col-3 text-end" id="line_coins">Rs. 0.00</div>
+            </div>
             <hr>
             <div class="d-flex justify-content-between fs-5"><span>Counted Total:</span><strong id="counted-total">Rs. 0.00</strong></div>
             <div id="expected-block" class="mt-2" style="display:none;">
@@ -29,6 +35,9 @@
               <div class="d-flex justify-content-between"><span class="text-muted">+ Cash Sales:</span><span id="sales-amt">-</span></div>
               <div class="d-flex justify-content-between"><span class="text-muted">- Cash Refunds:</span><span id="refunds-amt">-</span></div>
               <div class="d-flex justify-content-between"><span class="text-muted">- Cash Expenses:</span><span id="expenses-amt">-</span></div>
+              <div class="d-flex justify-content-between"><span class="text-muted">+ Deposits taken (cash):</span><span id="deposits-taken-amt">-</span></div>
+              <div class="d-flex justify-content-between"><span class="text-muted">- Deposits applied at collection:</span><span id="deposits-applied-amt">-</span></div>
+              <div class="justify-content-between d-none" id="deposits-refunded-row"><span class="text-muted">- Deposits refunded (cash):</span><span id="deposits-refunded-amt">-</span></div>
               <div class="d-flex justify-content-between fw-bold"><span>Expected:</span><span id="expected-amt">-</span></div>
               <div class="d-flex justify-content-between fs-5 mt-2"><span>Variance:</span><strong id="variance-amt">-</strong></div>
             </div>
@@ -74,6 +83,18 @@
       document.getElementById('denominations').innerHTML = html;
     }
 
+    // Money is compared to the cent. Floats summed in the browser leave tails
+    // like 4999.999999, so `variance === 0` called an exact count "short".
+    function money(n) { return Math.round((Number(n) || 0) * 100) / 100; }
+    function isNil(v) { return Math.abs(Number(v) || 0) < 0.005; }
+    function varianceClass(v) { return isNil(v) ? 'text-success' : (v > 0 ? 'text-warning' : 'text-danger'); }
+    function signedCurrency(v) { return isNil(v) ? formatCurrency(0) : (v > 0 ? '+' : '') + formatCurrency(v); }
+
+    function coinsValue() {
+      const v = parseFloat(document.getElementById('coins_total').value);
+      return Number.isFinite(v) && v > 0 ? money(v) : 0;
+    }
+
     function recalc() {
       let total = 0;
       DENOMS.forEach(d => {
@@ -82,14 +103,19 @@
         total += line;
         document.getElementById(`line_${d}`).textContent = formatCurrency(line);
       });
+      const coins = coinsValue();
+      document.getElementById('line_coins').textContent = formatCurrency(coins);
+      total = money(total + coins);
       document.getElementById('counted-total').textContent = formatCurrency(total);
 
+      // Variance against the SERVER's expected figure (expected_now), never one
+      // re-derived here: the browser used to leave the pre-order deposits out,
+      // so the screen and the stored close disagreed on any day with a deposit.
       if (mode === 'close' && todayData) {
-        const expected = (todayData.open?.total_amount || 0) + (todayData.cash_sales || 0) - (todayData.cash_refunds || 0) - (todayData.cash_expenses || 0);
-        const variance = total - expected;
+        const variance = money(total - (todayData.expected_now || 0));
         const vEl = document.getElementById('variance-amt');
-        vEl.textContent = (variance > 0 ? '+' : '') + formatCurrency(variance);
-        vEl.className = variance === 0 ? 'text-success' : (variance > 0 ? 'text-warning' : 'text-danger');
+        vEl.textContent = signedCurrency(variance);
+        vEl.className = varianceClass(variance);
       }
     }
 
@@ -101,6 +127,7 @@
 
       submitBtn.style.display = 'block';
       document.querySelectorAll('.denom-input').forEach(i => { i.disabled = false; i.value = 0; });
+      document.getElementById('coins_total').value = 0;
       document.getElementById('count-notes').disabled = false;
       document.getElementById('count-notes').value = '';
 
@@ -116,8 +143,17 @@
         document.getElementById('sales-amt').textContent = formatCurrency(todayData.cash_sales || 0);
         document.getElementById('refunds-amt').textContent = formatCurrency(todayData.cash_refunds || 0);
         document.getElementById('expenses-amt').textContent = formatCurrency(todayData.cash_expenses || 0);
-        const expected = (todayData.open?.total_amount || 0) + (todayData.cash_sales || 0) - (todayData.cash_refunds || 0) - (todayData.cash_expenses || 0);
-        document.getElementById('expected-amt').textContent = formatCurrency(expected);
+        document.getElementById('deposits-taken-amt').textContent = formatCurrency(todayData.deposits_taken || 0);
+        document.getElementById('deposits-applied-amt').textContent = formatCurrency(todayData.deposits_applied || 0);
+        // Only shown when the server reports it (cash handed back for a
+        // cancelled pre-order). Either way it is already inside expected_now.
+        const hasRefunded = todayData.deposits_refunded !== undefined && todayData.deposits_refunded !== null;
+        document.getElementById('deposits-refunded-row').classList.toggle('d-none', !hasRefunded);
+        document.getElementById('deposits-refunded-row').classList.toggle('d-flex', hasRefunded);
+        if (hasRefunded) document.getElementById('deposits-refunded-amt').textContent = formatCurrency(todayData.deposits_refunded);
+        // The server's figure, shown as-is: the lines above explain it, they are
+        // not added up again here.
+        document.getElementById('expected-amt').textContent = formatCurrency(todayData.expected_now || 0);
       }
       updateSubmitState();
       recalc();
@@ -160,7 +196,7 @@
           <td><span class="badge bg-${h.count_type === 'open' ? 'primary' : 'success'}">${h.count_type}</span></td>
           <td>${h.user_name || '-'}</td>
           <td class="text-end">${formatCurrency(h.total_amount)}</td>
-          <td class="text-end ${h.variance == null ? '' : (h.variance === 0 ? 'text-success' : (h.variance > 0 ? 'text-warning' : 'text-danger'))}">${h.variance == null ? '-' : ((h.variance > 0 ? '+' : '') + formatCurrency(h.variance))}</td>
+          <td class="text-end ${h.variance == null ? '' : varianceClass(h.variance)}">${h.variance == null ? '-' : signedCurrency(h.variance)}</td>
         </tr>
       `).join('') || '<tr><td colspan="5" class="text-center text-muted py-3">No records yet</td></tr>';
     }
@@ -174,19 +210,31 @@
       } else if (todayData.shift_open) {
         status.innerHTML = `<div class="alert alert-warning">Shift in progress — opening float of <strong>${formatCurrency(todayData.open.total_amount)}</strong> recorded by ${todayData.open.user_name} at ${formatTime(todayData.open.created_at)}. Count cash again to close this shift.</div>`;
       } else {
-        const v = todayData.close.variance;
-        const cls = v === 0 ? 'success' : (v > 0 ? 'warning' : 'danger');
-        const word = v === 0 ? 'matched exactly' : (v > 0 ? 'over by' : 'short by');
-        status.innerHTML = `<div class="alert alert-${cls}">Last shift closed at ${formatTime(todayData.close.created_at)} — counted ${formatCurrency(todayData.close.total_amount)}, ${word} ${formatCurrency(Math.abs(v))}. You can open a new shift below if needed.</div>`;
+        // The STORED close: expected_amount and variance exactly as the server
+        // worked them out when the shift was closed.
+        const v = Number(todayData.close.variance) || 0;
+        const cls = isNil(v) ? 'success' : (v > 0 ? 'warning' : 'danger');
+        const word = isNil(v) ? 'matched exactly' : `${v > 0 ? 'over by' : 'short by'} ${formatCurrency(Math.abs(v))}`;
+        const expectedTxt = todayData.close.expected_amount == null ? '' : ` against ${formatCurrency(todayData.close.expected_amount)} expected`;
+        status.innerHTML = `<div class="alert alert-${cls}">Last shift closed at ${formatTime(todayData.close.created_at)} — counted ${formatCurrency(todayData.close.total_amount)}${expectedTxt}, ${word}. You can open a new shift below if needed.</div>`;
       }
     }
 
     async function submitCount(btn) {
       const body = { notes: document.getElementById('count-notes').value };
       DENOMS.forEach(d => body[`notes_${d}`] = parseInt(document.getElementById(`notes_${d}`).value) || 0);
+      body.coins_total = coinsValue();
       await withBusy(btn, async () => {
-        await api(`/api/cash/${mode}`, { method: 'POST', body });
-        showToast(mode === 'open' ? 'Opening float saved' : 'Closing count saved');
+        const res = await api(`/api/cash/${mode}`, { method: 'POST', body });
+        if (mode === 'open') {
+          showToast('Opening float saved');
+        } else {
+          // Quote the close the server stored, not the figure on screen a moment
+          // ago: a sale rung up while the drawer was being counted moves it.
+          const v = Number(res.variance) || 0;
+          showToast(`Closing count saved — expected ${formatCurrency(res.expected_amount)}, ` +
+            (isNil(v) ? 'matched exactly' : `${v > 0 ? 'over' : 'short'} by ${formatCurrency(Math.abs(v))}`));
+        }
         await loadCash();
       }, 'Saving...');
 

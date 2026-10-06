@@ -55,9 +55,10 @@
     <div class="card">
       <h2 id="report-title">Daily Summary</h2>
       <div id="range-meta" style="display:none;font-size:0.82rem;color:var(--ink-soft);"></div>
-      <div id="range-empty" class="empty" style="display:none;">No sales in this range</div>
+      <div id="range-empty" class="empty" style="display:none;">No sales or refunds in this range</div>
       <div class="stat-grid">
-        <div class="stat-tile"><div class="label">Sales</div><div class="val" id="r-sales">…</div></div>
+        <div class="stat-tile"><div class="label">Net sales</div><div class="val" id="r-sales">…</div><div id="r-gross-sales" style="font-size:0.72rem;color:var(--ink-soft);margin-top:2px;"></div></div>
+        <div class="stat-tile"><div class="label">Refunds</div><div class="val red" id="r-refunds">…</div></div>
         <div class="stat-tile"><div class="label">Bills</div><div class="val" id="r-bills">…</div></div>
         <div class="stat-tile"><div class="label">Cost of goods</div><div class="val" id="r-cost">…</div></div>
         <div class="stat-tile"><div class="label">Gross profit</div><div class="val green" id="r-gross">…</div></div>
@@ -74,7 +75,8 @@
     </div>
 
     <div class="card">
-      <h2>By payment method</h2>
+      <h2>Money received by method</h2>
+      <div style="font-size:0.75rem;color:var(--ink-soft);margin:-4px 0 6px;">Deposits on the day they were paid, refunds on the day they were given back — need not add up to sales.</div>
       <div id="r-payment"><div class="empty">Loading…</div></div>
     </div>
 
@@ -154,17 +156,40 @@
       return Number.isInteger(v) ? String(v) : v.toFixed(2);
     }
 
+    // 'upi' is what the database stores; the customer pays with LankaQR.
+    function payLabel(m) {
+      const v = String(m || '').toLowerCase();
+      return v === 'upi' ? 'LankaQR' : v.toUpperCase();
+    }
+
+    // Net sales and the two halves of it. Refunds count on the day the money
+    // went back, never taken off the day of the original sale.
+    function renderSalesTiles(sales) {
+      const s = sales || {};
+      $('r-sales').textContent = fmt(s.net_sales);
+      $('r-gross-sales').textContent = 'Gross ' + fmt(s.total_sales);
+      $('r-refunds').textContent = (Number(s.total_refunds) ? '−' : '') + fmt(s.total_refunds) + (s.refund_count ? ` · ${s.refund_count}` : '');
+    }
+
+    // by_payment is money RECEIVED by method, not sales by method: a pre-order
+    // deposit counts on the day and by the method it was paid, the balance on
+    // collection day, and a refund comes off on the day it was handed back.
     function renderPayment(rows) {
       const list = rows || [];
       if (!list.length) {
-        $('r-payment').innerHTML = '<div class="empty">No sales</div>';
+        $('r-payment').innerHTML = '<div class="empty">No money received</div>';
         return;
       }
-      $('r-payment').innerHTML = list.map(p => `
-        <div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--line);">
-          <span>${(p.payment_method || '').toUpperCase()} <span style="color:var(--ink-soft);font-size:0.85rem;">· ${p.count} bills</span></span>
-          <strong>${fmt(p.total)}</strong>
-        </div>`).join('');
+      $('r-payment').innerHTML = list.map(p => {
+        const parts = [`${p.count || 0} bill${p.count === 1 ? '' : 's'} ${fmt(p.sales)}`];
+        if (Number(p.deposits)) parts.push(`+ deposits ${fmt(p.deposits)}`);
+        if (Number(p.refunds)) parts.push(`− refunds ${fmt(p.refunds)}`);
+        return `
+        <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px;padding:6px 0;border-bottom:1px solid var(--line);">
+          <span>${escapeHtml(payLabel(p.payment_method))}<span style="display:block;color:var(--ink-soft);font-size:0.75rem;">${escapeHtml(parts.join(' '))}</span></span>
+          <strong style="white-space:nowrap;">${fmt(p.total)}</strong>
+        </div>`;
+      }).join('');
     }
 
     /* recon = { discount, tax, totalSales } — bill-level figures the product list cannot show */
@@ -217,7 +242,8 @@
       }
     }
 
-    /* Reconciles the product list (subtotal only) with the Sales tile (subtotal - discount + tax).
+    /* Reconciles the product list (subtotal only) with GROSS sales (subtotal - discount + tax).
+       Products are listed by sale day, as gross sales are; refunds are their own figure.
        Always reflects the full product list — the Show all / Show less toggle never touches it. */
     function drawRecon(gross) {
       const box = $('r-top-recon');
@@ -244,7 +270,7 @@
       }
       html += `
         <div style="display:flex;justify-content:space-between;align-items:baseline;gap:10px;margin-top:6px;padding-top:7px;border-top:1px solid var(--line);font-size:0.92rem;font-weight:700;${mismatch ? 'color:var(--red);' : ''}">
-          <span>= Total sales</span><span style="white-space:nowrap;">${fmt(totalSales)}</span>
+          <span>= Gross sales</span><span style="white-space:nowrap;">${fmt(totalSales)}</span>
         </div>`;
       if (mismatch) {
         html += `
@@ -263,7 +289,7 @@
         $('range-empty').style.display = 'none';
         $('tile-other').style.display = 'none';
         const r = await api(`/api/reports/daily?date=${date}`);
-        $('r-sales').textContent = fmt(r.sales.total_sales);
+        renderSalesTiles(r.sales);
         $('r-bills').textContent = r.sales.bill_count;
         $('r-cost').textContent = fmt(r.cost_of_goods);
         $('r-gross').textContent = fmt(r.gross_profit);
@@ -315,7 +341,7 @@
 
         const sales = r.sales || {};
         const expenses = (r.expenses && r.expenses.total) || 0;
-        $('r-sales').textContent = fmt(sales.total_sales);
+        renderSalesTiles(sales);
         $('r-bills').textContent = sales.bill_count || 0;
         $('r-cost').textContent = fmt(r.cost_of_goods);
         $('r-gross').textContent = fmt(r.gross_profit);
@@ -326,8 +352,8 @@
         $('r-net').className = 'val ' + (r.net_profit >= 0 ? 'green' : 'red');
         $('r-disposal').textContent = fmt(r.disposal_loss || 0) + (r.disposal_count ? ` · ${r.disposal_count}` : '');
 
-        $('range-empty').textContent = `No sales between ${from} and ${to}`;
-        $('range-empty').style.display = (sales.bill_count || 0) ? 'none' : 'block';
+        $('range-empty').textContent = `No sales or refunds between ${from} and ${to}`;
+        $('range-empty').style.display = (sales.bill_count || 0) || (sales.refund_count || 0) ? 'none' : 'block';
 
         renderPayment(r.by_payment);
         renderProducts(r.top_products, {
