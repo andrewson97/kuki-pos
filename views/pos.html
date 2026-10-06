@@ -427,24 +427,39 @@
 
     async function checkShiftState() {
       const enforce = (appSettings.enforce_cash_shift ?? '1') === '1';
-      if (!enforce) { shiftBlocked = false; updateShiftUI(); return; }
+      // enforce_cash_shift = '0': no shift concept at all, so this returns
+      // without even asking the server. There is then no "the shop is trading"
+      // signal to key off, and the keepalive below deliberately stays off --
+      // see syncShiftKeepalive().
+      if (!enforce) { shiftBlocked = false; shiftDrawerOpen = false; updateShiftUI(); syncShiftKeepalive(); return; }
       try {
         const data = await api('/api/cash/today');
         if (data.shift_from_prior_day) {
+          // Yesterday's shift is still open: billing is blocked, so nothing is
+          // being sold here and the machine is free to sleep.
+          shiftDrawerOpen = false;
           shiftBlocked = true;
           shiftBlockReason = `A shift from ${data.open.count_date} is still open. <a href="/cash" class="alert-link">Close it</a> before taking new sales today.`;
         } else if (!data.shift_open) {
+          shiftDrawerOpen = false;
           shiftBlocked = true;
           shiftBlockReason = data.open
             ? 'Cash shift is closed. <a href="/cash" class="alert-link">Open a new shift</a> to continue billing.'
             : 'Cash drawer not opened today. <a href="/cash" class="alert-link">Open the drawer</a> before taking sales.';
         } else {
+          shiftDrawerOpen = true;
           shiftBlocked = false;
         }
       } catch {
         shiftBlocked = false; // network error — let server enforce
+        // shiftDrawerOpen is left exactly as it was: one failed read is no
+        // evidence the drawer closed, and a beat that keeps trying is both
+        // harmless and self-healing.
       }
       updateShiftUI();
+      // The check is also the keepalive's heartbeat, so every run re-decides
+      // whether the beat should be running.
+      syncShiftKeepalive();
     }
 
     function updateShiftUI() {
@@ -461,6 +476,72 @@
         [cashBtn, cardBtn, upiBtn].forEach(b => { if (b) { b.disabled = false; b.style.opacity = ''; b.style.cursor = ''; } });
       }
     }
+
+    // ===== Machine keepalive (only while the shop is trading) =====
+    // This app runs on a fly.io machine with auto_stop_machines = "stop" and
+    // min_machines_running = 0: it shuts down when idle, and the next request
+    // pays a 3.6s cold start. That is the slowness behind the checkout
+    // responses that went missing and stranded a cart id. The owner does not
+    // want to pay for an always-on machine, so the till keeps the machine awake
+    // only while the shop is actually trading -- and the signal for that is the
+    // cash drawer being open.
+    //
+    // Is the drawer open right now? Set only by checkShiftState() above, which
+    // is the one place that asks. This is NOT a second way of asking.
+    let shiftDrawerOpen = false;
+    // Production logs show fly autostopping after about 5.5 minutes idle
+    // (machine started 16:35:29, autostopped 16:41:04). The existing 5-minute
+    // claim heartbeat sits right on that boundary, so it sometimes holds the
+    // machine up and sometimes misses by seconds. Two minutes fits comfortably
+    // inside the window with room for a dropped beat: beats land at 2, 4, 6...
+    // minutes, so even one lost to a flaky connection leaves a 4-minute gap,
+    // still ~1.5 minutes clear of the autostop. It is also far above the ~1s
+    // floor browsers apply to timers in a foreground tab, so a visible till is
+    // not throttled below the rate it needs. Cost: 30 tiny reads an hour per
+    // till, and only while the drawer is open.
+    const SHIFT_KEEPALIVE_MS = 2 * 60 * 1000;
+    let shiftKeepaliveTimer = null;
+
+    // The ping IS the existing shift check. Re-running checkShiftState() is a
+    // cheap /api/cash/today read -- enough on its own to keep the machine up --
+    // and it keeps shiftBlocked / updateShiftUI() honest if another till opens
+    // or closes the drawer. Fire-and-forget: checkShiftState() already swallows
+    // its own network failures, and the guard here means even an unexpected
+    // throw cannot surface to the cashier or kill the beat. It touches nothing
+    // but the shift banner and the payment buttons that check already owns --
+    // never the cart, its holds, checkoutInProgress, parked bills or claims.
+    function pingShiftKeepalive() {
+      try {
+        const p = checkShiftState();
+        if (p && typeof p.catch === 'function') p.catch(() => {});
+      } catch {}
+    }
+
+    // Starts the beat when the drawer is open and this tab is in front; stops
+    // it otherwise. Stopping when the drawer closes is the whole point: the
+    // owner pays by the second, so a till at a shut shop must let the machine
+    // sleep. With enforce_cash_shift = '0' shiftDrawerOpen is never true, so
+    // the beat never runs at all -- without a drawer there is no way to tell
+    // trading from idle, and pinging regardless would hold the machine up 24/7
+    // and bill the owner for exactly what they declined.
+    function syncShiftKeepalive() {
+      const wanted = shiftDrawerOpen && !document.hidden;
+      if (wanted === !!shiftKeepaliveTimer) return; // already in the right state
+      if (!wanted) { clearInterval(shiftKeepaliveTimer); shiftKeepaliveTimer = null; return; }
+      shiftKeepaliveTimer = setInterval(pingShiftKeepalive, SHIFT_KEEPALIVE_MS);
+    }
+
+    // Browsers throttle timers hard in a hidden tab (and freeze them outright
+    // on a sleeping tablet), so a backgrounded till cannot be relied on to hold
+    // the machine up. Rather than fight that: a till nobody is looking at does
+    // not need the machine warm, so the beat stops on hide. On show it runs the
+    // check once immediately, which both refreshes the banner and restarts the
+    // beat if the drawer is still open -- that is also how a till picks the
+    // drawer up again after someone reopens it elsewhere.
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) { syncShiftKeepalive(); return; }
+      pingShiftKeepalive();
+    });
 
     // Out-of-stock tracked products are hidden from the POS entirely. Also
     // hidden: composite products whose tracked components can't cover a single
