@@ -43,19 +43,31 @@
     <div id="holds-list"></div>
   </div>
 
-  <div class="sheet" id="restock-sheet" onclick="if(event.target===this)closeSheet('restock-sheet')">
+  <!-- Adjust stock (tracked products) - same sheet as on the mobile Products
+       page. Every change to a tracked product's count goes through
+       POST /api/products/:id/stock-adjust and shows in Stock History. -->
+  <div class="sheet" id="adj-sheet" onclick="if(event.target===this)closeSheet('adj-sheet')">
     <div class="sheet-inner">
       <div class="sheet-handle"></div>
-      <h3 id="restock-title">Add stock</h3>
-      <input type="hidden" id="restock-id">
-      <div class="field"><label>Current quantity</label><input type="text" id="restock-current" readonly></div>
-      <div class="field"><label>Add (units)</label><input type="number" id="restock-add" min="0" step="1" inputmode="numeric"></div>
-      <div class="field"><label>Note (optional)</label><input type="text" id="restock-note" placeholder="supplier, batch, etc."></div>
-      <div class="btn-row">
-        <button class="btn btn-outline" onclick="closeSheet('restock-sheet')">Cancel</button>
-        <button class="btn btn-success" onclick="submitRestock(this)">Add to stock</button>
+      <h3 id="adj-title">Adjust stock</h3>
+      <input type="hidden" id="adj-id">
+      <div style="font-size:0.9rem;margin-bottom:10px;">On hand now: <strong id="adj-onhand">0</strong></div>
+      <div class="field">
+        <label>What happened?</label>
+        <select id="adj-type" onchange="onAdjustTypeChange()">
+          <option value="received">Received / baked — adds</option>
+          <option value="waste">Waste — removes</option>
+          <option value="count">Count — sets to what you counted</option>
+        </select>
+        <div id="adj-help" style="color:var(--ink-soft);font-size:0.76rem;margin-top:4px;"></div>
       </div>
-      <button class="btn btn-danger" style="margin-top:8px;" onclick="disposeFromSheet(this)">Dispose expired…</button>
+      <div class="field"><label id="adj-qty-label">How many?</label><input type="number" id="adj-qty" min="0" step="1" inputmode="numeric" oninput="updateAdjustPreview()"></div>
+      <div class="field"><label id="adj-reason-label">Reason</label><input type="text" id="adj-reason"></div>
+      <div id="adj-preview" style="font-weight:700;font-size:0.9rem;margin-bottom:8px;"></div>
+      <div class="btn-row">
+        <button class="btn btn-outline" onclick="closeSheet('adj-sheet')">Cancel</button>
+        <button class="btn btn-primary" onclick="saveAdjust(this)">Save</button>
+      </div>
     </div>
   </div>
 
@@ -172,55 +184,81 @@
         const out = p.stock_quantity <= 0;
         const low = !out && p.stock_reorder_level > 0 && p.stock_quantity <= p.stock_reorder_level;
         const status = out ? '<span class="badge danger">OUT</span>' : low ? '<span class="badge warning">LOW</span>' : '';
-        return `<div class="list-item" onclick="openRestock(${p.id})">
+        return `<div class="list-item" onclick="openAdjust(${p.id})">
           <div class="list-head">
             <span class="list-title">${escapeHtml(p.name)} ${status}</span>
             <span class="list-amount" style="color:${out ? 'var(--red)' : (low ? '#92400e' : 'var(--ink)')};">${p.stock_quantity}</span>
           </div>
-          <div class="list-meta">${escapeHtml(p.category || '-')} · min ${p.stock_reorder_level} · tap to add stock</div>
+          <div class="list-meta">${escapeHtml(p.category || '-')} · min ${p.stock_reorder_level} · tap to add, dispose or count</div>
         </div>`;
       }).join('');
     }
 
-    function openRestock(id) {
+    // ===== Adjust stock (tracked products) =====
+    // Same flow and wording as the Adjust stock sheet on the mobile Products page.
+    const ADJUST_TEXT = {
+      received: { help: 'Freshly baked or delivered. Adds to what is on hand.', qty: 'How many came in?', reason: 'Note (optional)', placeholder: 'e.g., morning bake' },
+      waste: { help: 'Thrown away (expired, damaged). Removes from on hand; counted as a loss at cost price in the reports.', qty: 'How many were thrown away?', reason: 'Reason (required)', placeholder: 'e.g., expired' },
+      count: { help: 'You counted the shelf. On hand is SET to your count; the difference is recorded.', qty: 'How many did you count?', reason: 'Reason (required)', placeholder: 'e.g., end-of-day count' },
+    };
+
+    function adjProduct() {
+      return tracked.find(x => x.id === parseInt($('adj-id').value));
+    }
+
+    function openAdjust(id) {
       const p = tracked.find(x => x.id === id);
       if (!p) return;
-      $('restock-title').textContent = p.name;
-      $('restock-id').value = id;
-      $('restock-current').value = p.stock_quantity;
-      $('restock-add').value = '';
-      $('restock-note').value = '';
-      openSheet('restock-sheet');
+      if (currentUser.role !== 'admin') { toast('Admin needed to change stock', 'error'); return; }
+      $('adj-id').value = p.id;
+      $('adj-title').textContent = 'Adjust stock · ' + p.name;
+      $('adj-onhand').textContent = p.stock_quantity || 0;
+      $('adj-type').value = 'received';
+      $('adj-qty').value = '';
+      $('adj-reason').value = '';
+      onAdjustTypeChange();
+      openSheet('adj-sheet');
     }
 
-    async function submitRestock(btn) {
-      const id = $('restock-id').value;
-      const qty = parseFloat($('restock-add').value);
-      if (!qty || qty <= 0) { toast('Enter a quantity', 'error'); return; }
-      await withBusy(btn, async () => {
-        await api(`/api/products/${id}/restock`, { method: 'POST', body: { quantity: qty, note: $('restock-note').value.trim() } });
-        closeSheet('restock-sheet');
-        toast(`Added ${qty} to stock`);
-        load();
-      }, 'Adding…');
+    function onAdjustTypeChange() {
+      const t = ADJUST_TEXT[$('adj-type').value];
+      $('adj-help').textContent = t.help;
+      $('adj-qty-label').textContent = t.qty;
+      $('adj-reason-label').textContent = t.reason;
+      $('adj-reason').placeholder = t.placeholder;
+      updateAdjustPreview();
     }
 
-    async function disposeFromSheet(btn) {
-      const id = $('restock-id').value;
-      const p = tracked.find(x => x.id === parseInt(id));
+    function updateAdjustPreview() {
+      const p = adjProduct();
+      const el = $('adj-preview');
+      const raw = $('adj-qty').value;
+      const qty = parseFloat(raw);
+      if (!p || raw === '' || !Number.isFinite(qty)) { el.textContent = ''; return; }
+      const onHand = p.stock_quantity || 0;
+      const type = $('adj-type').value;
+      const next = type === 'received' ? onHand + qty : type === 'waste' ? onHand - qty : qty;
+      el.style.color = next < 0 ? 'var(--red)' : 'var(--ink)';
+      el.textContent = next < 0 ? `Only ${onHand} on hand — cannot throw away ${qty}.` : `On hand: ${onHand} → ${next}`;
+    }
+
+    async function saveAdjust(btn) {
+      const p = adjProduct();
       if (!p) return;
-      const qtyStr = prompt(`Dispose how many units of "${p.name}"?`, '1');
-      if (qtyStr === null) return;
-      const qty = parseFloat(qtyStr);
-      if (!qty || qty <= 0) { toast('Invalid quantity', 'error'); return; }
-      const reason = prompt('Reason (e.g., expired, damaged)?', 'expired');
-      if (reason === null) return;
+      const type = $('adj-type').value;
+      const raw = $('adj-qty').value;
+      const qty = parseFloat(raw);
+      const reason = $('adj-reason').value.trim();
+      if (raw === '' || !Number.isFinite(qty)) { toast('Enter a quantity', 'error'); return; }
+      if (type !== 'count' && qty <= 0) { toast('Quantity must be greater than zero', 'error'); return; }
+      if (qty < 0) { toast('The count cannot be negative', 'error'); return; }
+      if (type !== 'received' && !reason) { toast('Enter a reason', 'error'); return; }
       await withBusy(btn, async () => {
-        const r = await api(`/api/products/${id}/dispose`, { method: 'POST', body: { quantity: qty, reason } });
-        closeSheet('restock-sheet');
-        toast(`Disposed ${qty} — loss ${fmt(r.cost_loss)}`);
+        const r = await api(`/api/products/${p.id}/stock-adjust`, { method: 'POST', body: { type, quantity: qty, reason } });
+        closeSheet('adj-sheet');
+        toast(`Stock ${r.previous} → ${r.stock_quantity}${r.cost_loss ? ` — loss ${fmt(r.cost_loss)}` : ''}`);
         load();
-      }, 'Disposing…');
+      }, 'Saving…');
     }
 
     function render() {

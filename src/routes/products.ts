@@ -356,18 +356,34 @@ products.post("/:id/dispose", adminOnly, async (c) => {
   const costLoss = qty * (product.cost_price || 0);
   const businessDate = todayDate();
 
-  db.transaction(() => {
-    if (product.track_stock) {
-      // Subtract from stock (allow going negative — admin's call)
-      db.query("UPDATE products SET stock_quantity = stock_quantity - ?, stock_updated_at = datetime('now') WHERE id = ?").run(qty, id);
-    }
-    db.query(
-      "INSERT INTO product_disposals (product_id, quantity, cost_loss, reason, business_date, user_id) VALUES (?, ?, ?, ?, ?, ?)"
-    ).run(id, qty, costLoss, reason, businessDate, user.id);
-    db.query("INSERT INTO activity_log (user_id, action, details) VALUES (?, 'disposed_product', ?)").run(
-      user.id, JSON.stringify({ product_id: id, name: product.name, quantity: qty, cost_loss: costLoss, reason })
-    );
-  })();
+  // Same rule as waste in POST /:id/stock-adjust: disposing of more than is on
+  // hand is refused, so a tracked product's count can never go negative here
+  // either (this used to allow it as "admin's call", which is how counts went
+  // below zero). The stock screens now use stock-adjust; this endpoint stays
+  // working for anything else that calls it. Untracked products have no count,
+  // so for them the disposal is only recorded, as before.
+  try {
+    db.transaction(() => {
+      if (product.track_stock) {
+        // Re-read under the write lock: a sale may have landed since the read above.
+        const fresh = db.query("SELECT stock_quantity FROM products WHERE id = ?").get(product.id) as any;
+        const onHand = Number(fresh?.stock_quantity) || 0;
+        if (qty > onHand) {
+          throw new AdjustError(`Only ${onHand} of ${product.name} on hand — cannot dispose of ${qty}. Count the stock first if the figure is wrong.`);
+        }
+        db.query("UPDATE products SET stock_quantity = stock_quantity - ?, stock_updated_at = datetime('now') WHERE id = ?").run(qty, id);
+      }
+      db.query(
+        "INSERT INTO product_disposals (product_id, quantity, cost_loss, reason, business_date, user_id) VALUES (?, ?, ?, ?, ?, ?)"
+      ).run(id, qty, costLoss, reason, businessDate, user.id);
+      db.query("INSERT INTO activity_log (user_id, action, details) VALUES (?, 'disposed_product', ?)").run(
+        user.id, JSON.stringify({ product_id: id, name: product.name, quantity: qty, cost_loss: costLoss, reason })
+      );
+    }).immediate();
+  } catch (err: any) {
+    if (err instanceof AdjustError) return c.json({ error: err.message }, err.status);
+    throw err;
+  }
 
   return c.json({ success: true, cost_loss: costLoss, business_date: businessDate });
 });

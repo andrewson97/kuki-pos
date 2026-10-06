@@ -61,16 +61,16 @@
         </table>
       </div>
 
-      <!-- Tracked products: quick restock -->
+      <!-- Tracked products: Add / Dispose / Count, all through Adjust stock -->
       <div class="table-container mt-4" id="tracked-products-panel">
         <div class="d-flex align-items-center justify-content-between px-3 pt-3 mb-2 flex-wrap gap-2">
-          <h6 class="fw-bold mb-0" style="color:#6b5a4a;">Tracked Finished Products <small class="text-muted fw-normal">&mdash; from your product list; add stock or dispose expired</small></h6>
+          <h6 class="fw-bold mb-0" style="color:#6b5a4a;">Tracked Finished Products <small class="text-muted fw-normal">&mdash; from your product list; every change goes through Adjust stock and shows in Stock History</small></h6>
           <select class="form-select form-select-sm" id="product-cat-filter" style="width:200px;" onchange="renderTrackedProducts()">
             <option value="">All product categories</option>
           </select>
         </div>
         <table class="table table-hover mb-0">
-          <thead><tr><th>Product</th><th>Category</th><th>On Hand</th><th>Reorder Level</th><th>Add to Stock</th><th>Actions</th></tr></thead>
+          <thead><tr><th>Product</th><th>Category</th><th>On Hand</th><th>Reorder Level</th><th>Actions</th></tr></thead>
           <tbody id="tracked-products-table"></tbody>
         </table>
       </div>
@@ -145,6 +145,46 @@
           <div id="txn-preview" class="fw-bold" style="font-size:0.9rem;"></div>
         </div>
         <div class="modal-footer"><button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button><button class="btn btn-primary" onclick="saveTransaction(this)">Save</button></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Adjust stock (tracked products) - same dialog as on the Products page.
+       The only way to change a tracked product's count; each type is recorded
+       where Stock History shows it. -->
+  <div class="modal fade" id="adjustModal" tabindex="-1">
+    <div class="modal-dialog">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title">Adjust stock &mdash; <span id="adj-name"></span></h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body">
+          <input type="hidden" id="adj-id">
+          <p class="mb-3">On hand now: <strong id="adj-onhand">0</strong></p>
+          <div class="btn-group w-100 mb-1" role="group">
+            <input type="radio" class="btn-check" name="adj-type" id="adj-type-received" value="received" checked onchange="onAdjustTypeChange()">
+            <label class="btn btn-outline-success" for="adj-type-received">Received / baked<br><small>adds</small></label>
+            <input type="radio" class="btn-check" name="adj-type" id="adj-type-waste" value="waste" onchange="onAdjustTypeChange()">
+            <label class="btn btn-outline-danger" for="adj-type-waste">Waste<br><small>removes</small></label>
+            <input type="radio" class="btn-check" name="adj-type" id="adj-type-count" value="count" onchange="onAdjustTypeChange()">
+            <label class="btn btn-outline-primary" for="adj-type-count">Count<br><small>sets to counted</small></label>
+          </div>
+          <div class="text-muted mb-3" id="adj-help" style="font-size:0.8rem;"></div>
+          <div class="mb-3">
+            <label class="form-label" id="adj-qty-label">How many?</label>
+            <input type="number" class="form-control" id="adj-qty" step="1" min="0" oninput="updateAdjustPreview()">
+          </div>
+          <div class="mb-2">
+            <label class="form-label" id="adj-reason-label">Reason</label>
+            <input type="text" class="form-control" id="adj-reason">
+          </div>
+          <div id="adj-preview" class="fw-bold" style="font-size:0.9rem;"></div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button class="btn btn-primary" id="adj-save" onclick="saveAdjust(this)">Save</button>
+        </div>
       </div>
     </div>
   </div>
@@ -235,7 +275,7 @@
       }
       panel.style.display = 'block';
       if (!list.length) {
-        tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-3">No matches</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted py-3">No matches</td></tr>';
         return;
       }
       tbody.innerHTML = list.map(p => {
@@ -250,12 +290,10 @@
           <td class="${out ? 'text-danger' : (low ? 'text-warning' : '')} fw-bold">${p.stock_quantity}</td>
           <td>${p.stock_reorder_level}</td>
           <td>
-            <div class="d-flex gap-1" style="max-width:200px;">
-              <input type="number" class="form-control form-control-sm" id="restock-qty-${p.id}" min="0" step="1" placeholder="qty">
-              <button class="btn btn-sm btn-success" onclick="restock(${p.id}, this)">Add</button>
-            </div>
+            <button class="btn btn-sm btn-success" onclick="showAdjust(${p.id}, 'received')">Add</button>
+            <button class="btn btn-sm btn-outline-danger" onclick="showAdjust(${p.id}, 'waste')" title="Dispose expired or damaged">Dispose</button>
+            <button class="btn btn-sm btn-outline-primary" onclick="showAdjust(${p.id}, 'count')">Count</button>
           </td>
-          <td><button class="btn btn-sm btn-outline-danger" onclick="dispose(${p.id}, this)" title="Dispose expired">Dispose</button></td>
         </tr>`;
       }).join('');
     }
@@ -264,32 +302,93 @@
       return String(s == null ? '' : s).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
     }
 
-    async function restock(id, btn) {
-      const input = document.getElementById('restock-qty-' + id);
-      const qty = parseFloat(input.value);
-      if (!qty || qty <= 0) { showToast('Enter a quantity', 'warning'); return; }
-      const note = prompt('Optional note (supplier, batch, etc):') || '';
-      await withBusy(btn, async () => {
-        await api(`/api/products/${id}/restock`, { method: 'POST', body: { quantity: qty, note } });
-        showToast(`Added ${qty} to stock`);
-        await loadStock();
-      }, 'Adding...');
+    // ===== Adjust stock (tracked products) =====
+    // Same flow and wording as the Adjust stock dialog on the Products page:
+    // every change to a tracked product's count goes through
+    // POST /api/products/:id/stock-adjust, which is logged and shows in Stock
+    // History. Add / Dispose / Count only pick the starting type.
+    const ADJUST_TEXT = {
+      received: {
+        help: 'Freshly baked or delivered units. Adds to what is on hand.',
+        qty: 'How many came in?',
+        reason: 'Note (optional)',
+        placeholder: 'e.g., morning bake, supplier delivery',
+      },
+      waste: {
+        help: 'Units thrown away (expired, damaged, dropped). Removes from what is on hand and is counted as a loss at cost price in the reports.',
+        qty: 'How many were thrown away?',
+        reason: 'Reason (required)',
+        placeholder: 'e.g., expired, damaged',
+      },
+      count: {
+        help: 'You counted the shelf. On hand is SET to the number you counted; the difference is recorded.',
+        qty: 'How many did you count?',
+        reason: 'Reason (required)',
+        placeholder: 'e.g., end-of-day count',
+      },
+    };
+
+    function adjustType() {
+      return document.querySelector('input[name="adj-type"]:checked').value;
     }
 
-    async function dispose(id, btn) {
+    function showAdjust(id, type) {
       const p = trackedProducts.find(x => x.id === id);
       if (!p) return;
-      const qtyStr = prompt(`Dispose how many units of "${p.name}"?`, '1');
-      if (qtyStr === null) return;
-      const qty = parseFloat(qtyStr);
-      if (!qty || qty <= 0) { showToast('Invalid quantity', 'error'); return; }
-      const reason = prompt('Reason (e.g., expired, damaged)?', 'expired');
-      if (reason === null) return;
+      document.getElementById('adj-id').value = p.id;
+      document.getElementById('adj-name').textContent = p.name;
+      document.getElementById('adj-onhand').textContent = p.stock_quantity || 0;
+      document.getElementById('adj-type-' + (type || 'received')).checked = true;
+      document.getElementById('adj-qty').value = '';
+      document.getElementById('adj-reason').value = '';
+      onAdjustTypeChange();
+      new bootstrap.Modal(document.getElementById('adjustModal')).show();
+    }
+
+    function onAdjustTypeChange() {
+      const t = ADJUST_TEXT[adjustType()];
+      document.getElementById('adj-help').textContent = t.help;
+      document.getElementById('adj-qty-label').textContent = t.qty;
+      document.getElementById('adj-reason-label').textContent = t.reason;
+      document.getElementById('adj-reason').placeholder = t.placeholder;
+      updateAdjustPreview();
+    }
+
+    function updateAdjustPreview() {
+      const p = trackedProducts.find(x => x.id === parseInt(document.getElementById('adj-id').value));
+      const el = document.getElementById('adj-preview');
+      const raw = document.getElementById('adj-qty').value;
+      const qty = parseFloat(raw);
+      if (!p || raw === '' || !Number.isFinite(qty)) { el.textContent = ''; el.className = 'fw-bold'; return; }
+      const onHand = p.stock_quantity || 0;
+      const type = adjustType();
+      const next = type === 'received' ? onHand + qty : type === 'waste' ? onHand - qty : qty;
+      if (next < 0) {
+        el.className = 'fw-bold text-danger';
+        el.textContent = `Only ${onHand} on hand — you cannot throw away ${qty}.`;
+        return;
+      }
+      el.className = 'fw-bold';
+      el.textContent = `On hand: ${onHand} → ${next}`;
+    }
+
+    async function saveAdjust(btn) {
+      const id = document.getElementById('adj-id').value;
+      const type = adjustType();
+      const raw = document.getElementById('adj-qty').value;
+      const reason = document.getElementById('adj-reason').value.trim();
       await withBusy(btn, async () => {
-        const r = await api(`/api/products/${id}/dispose`, { method: 'POST', body: { quantity: qty, reason } });
-        showToast(`Disposed ${qty} — loss ${formatCurrency(r.cost_loss)}`);
+        const qty = parseFloat(raw);
+        if (raw === '' || !Number.isFinite(qty)) throw new Error('Enter a quantity');
+        if (type !== 'count' && qty <= 0) throw new Error('Quantity must be greater than zero');
+        if (qty < 0) throw new Error('The count cannot be negative');
+        if (type !== 'received' && !reason) throw new Error('Enter a reason');
+        const r = await api(`/api/products/${id}/stock-adjust`, { method: 'POST', body: { type, quantity: qty, reason } });
+        bootstrap.Modal.getInstance(document.getElementById('adjustModal')).hide();
+        const extra = r.cost_loss ? ` — loss ${formatCurrency(r.cost_loss)}` : '';
+        showToast(`Stock ${r.previous} → ${r.stock_quantity}${extra}`);
         await loadStock();
-      }, 'Disposing...');
+      }, 'Saving...');
     }
 
     function renderCategoryOptions() {
