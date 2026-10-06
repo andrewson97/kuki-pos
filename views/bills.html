@@ -58,6 +58,19 @@
       loadBills();
     });
 
+    // The stored value stays 'upi' (the database CHECK allows only cash/card/upi);
+    // in Sri Lanka the QR payment is LankaQR, so that is what the screen says.
+    function payLabel(m) {
+      return ({ cash: 'Cash', card: 'Card', upi: 'LankaQR' })[m] || (m || '-');
+    }
+
+    // A bill made by collecting a pre-order never took anything out of stock,
+    // so its refund can never put anything back (the server ignores the choice
+    // for these too).
+    function isPreorderBill(bill) {
+      return String(bill.cart_id || '').startsWith('preorder-');
+    }
+
     async function loadBills() {
       const date = document.getElementById('bill-date').value;
       const search = document.getElementById('bill-search').value;
@@ -74,7 +87,7 @@
           <td>${b.customer_name || '-'}</td>
           <td>-</td>
           <td class="fw-bold">${formatCurrency(b.total)}</td>
-          <td><span class="badge bg-info">${b.payment_method}</span></td>
+          <td><span class="badge bg-info">${payLabel(b.payment_method)}</span></td>
           <td><span class="badge bg-${b.status === 'completed' ? 'success' : (b.status === 'refunded' ? 'warning text-dark' : 'danger')}">${b.status}</span></td>
           <td>${b.cashier_name || '-'}</td>
           <td><button class="btn btn-sm btn-outline-primary" onclick="viewBill(${b.id})">View</button></td>
@@ -91,7 +104,7 @@
             <p><strong>Date:</strong> ${formatDate(bill.bill_date)}<br>
             <strong>Time:</strong> ${formatDateTime(bill.created_at)}<br>
             <strong>Customer:</strong> ${bill.customer_name || 'Walk-in'}<br>
-            <strong>Payment:</strong> ${bill.payment_method.toUpperCase()}<br>
+            <strong>Payment:</strong> ${payLabel(bill.payment_method)}<br>
             <strong>Cashier:</strong> ${bill.cashier_name}</p>
           </div>
           <div class="col-md-6 text-end">
@@ -101,7 +114,8 @@
         ${bill.status === 'refunded' ? `
           <div class="alert alert-warning py-2 mb-3">
             <strong>Refunded</strong> by ${bill.refunded_by_name || '-'} on ${formatDateTime(bill.refunded_at) || '-'}<br>
-            <strong>Reason:</strong> ${bill.refund_reason || '-'}
+            <strong>Reason:</strong> ${bill.refund_reason || '-'}<br>
+            <strong>Stock:</strong> ${bill.refund_restocked ? 'items were put back into stock' : 'items were NOT put back into stock'}
           </div>` : ''}
         <table class="table table-sm">
           <thead><tr><th>Product</th><th>Qty</th><th>Price</th><th>Total</th></tr></thead>
@@ -115,6 +129,24 @@
             <tr class="fw-bold"><td colspan="3" class="text-end">Total</td><td>${formatCurrency(bill.total)}</td></tr>
           </tfoot>
         </table>
+        ${bill.status === 'completed' ? `
+          <div id="refund-panel" class="border border-danger rounded p-3 mt-3 d-none">
+            <h6 class="fw-bold text-danger mb-2">Refund ${formatCurrency(bill.total)}</h6>
+            <div class="mb-2">
+              <label class="form-label" for="refund-reason">Reason (required)</label>
+              <input type="text" class="form-control" id="refund-reason" placeholder="e.g., cake damaged, wrong order">
+            </div>
+            ${isPreorderBill(bill) ? `
+              <div class="small text-muted mb-2">This bill came from collecting a pre-order. Collecting never took anything out of stock, so refunding it puts nothing back.</div>
+            ` : `
+              <div class="form-check mb-2">
+                <input class="form-check-input" type="checkbox" id="refund-restock">
+                <label class="form-check-label" for="refund-restock">Put items back into stock</label>
+                <div class="text-muted" style="font-size:0.8rem;">Tick only if the items are going back on the shelf to be sold again. Leave it off for returned, damaged or eaten items.</div>
+              </div>
+            `}
+            <button class="btn btn-danger" id="btn-refund-confirm">Confirm refund</button>
+          </div>` : ''}
       `;
 
       const refundBtn = document.getElementById('btn-refund-bill');
@@ -125,15 +157,23 @@
       refundBtn.textContent = 'Refund Bill';
       if (bill.status === 'completed') {
         refundBtn.classList.remove('d-none');
-        refundBtn.onclick = async () => {
-          const reason = prompt('Refund reason (required):');
-          if (reason === null) return;
-          const trimmed = reason.trim();
+        // The footer button only opens the refund panel in the modal body; the
+        // panel's own button does the refund, after the reason and the restock
+        // choice have been seen.
+        refundBtn.onclick = () => {
+          document.getElementById('refund-panel').classList.remove('d-none');
+          document.getElementById('refund-reason').focus();
+        };
+        const confirmBtn = document.getElementById('btn-refund-confirm');
+        confirmBtn.onclick = async () => {
+          const trimmed = document.getElementById('refund-reason').value.trim();
           if (!trimmed) { showToast('Reason is required', 'error'); return; }
-          if (!confirm(`Refund this bill for ${formatCurrency(bill.total)}?\nStock will be restored. This cannot be undone.`)) return;
-          await withBusy(refundBtn, async () => {
-            await api(`/api/pos/bills/${id}/refund`, { method: 'POST', body: { reason: trimmed } });
-            showToast('Bill refunded — stock restored');
+          const restockBox = document.getElementById('refund-restock');
+          const restock = !!(restockBox && restockBox.checked);
+          if (!confirm(`Refund this bill for ${formatCurrency(bill.total)}?\n${restock ? 'The items WILL be put back into stock.' : 'The items will NOT be put back into stock.'}\nThis cannot be undone.`)) return;
+          await withBusy(confirmBtn, async () => {
+            const r = await api(`/api/pos/bills/${id}/refund`, { method: 'POST', body: { reason: trimmed, restock } });
+            showToast(r.restocked ? 'Bill refunded — items put back into stock' : 'Bill refunded — stock unchanged');
             bootstrap.Modal.getInstance(document.getElementById('billDetailModal')).hide();
             await loadBills();
           }, 'Refunding...');

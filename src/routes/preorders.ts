@@ -1,8 +1,15 @@
 import { Hono } from "hono";
 import { getDb } from "../db/database";
 import { adminOnly, getUser } from "../middleware/auth";
-import { createBill, findBillByCartId } from "../services/billing";
-import { buildKitchenTicket, buildReceiptText, getSettings, queuePrint } from "../services/printer";
+import { createBill, findBillByCartId, type CreatedBill } from "../services/billing";
+import {
+  buildDepositSlipText,
+  buildKitchenTicket,
+  buildPreorderSettlementBlock,
+  buildReceiptText,
+  getSettings,
+  queuePrint,
+} from "../services/printer";
 import { formatDateTime, todayDate } from "../utils/helpers";
 import { cashShiftBlockReason } from "./cash";
 
@@ -13,11 +20,15 @@ import { cashShiftBlockReason } from "./cash";
 //
 // Two rules shape everything in this file:
 //
-//   1. A PRE-ORDER RESERVES NO STOCK. Nothing here writes to
-//      stock_reservations and nothing here touches products.stock_quantity. A
-//      cake due next Saturday must not lock today's shelf. Stock moves exactly
-//      once, at collection, because collection goes through the ordinary
-//      createBill() — the same code path as any walk-in sale.
+//   1. A PRE-ORDER NEVER TOUCHES STOCK. Nothing here writes to
+//      stock_reservations and nothing here touches products.stock_quantity —
+//      not when the order is taken (a cake due next Saturday must not lock
+//      today's shelf) and not when it is collected either: the owner never
+//      enters pre-ordered goods as stock, because they are baked or bought in
+//      for that customer. Collection still goes through the ordinary
+//      createBill() — the same code path as any walk-in sale — but with
+//      skip_stock, so a catalogue line whose product tracks stock is neither
+//      refused for "out of stock" nor allowed to drive the shelf negative.
 //
 //   2. MONEY IS NEVER TAKEN FROM THE CLIENT. The order total is always
 //      recomputed as SUM(quantity * unit_price) over the stored lines, and the
@@ -49,10 +60,13 @@ type PaymentMethod = (typeof PAYMENT_METHODS)[number];
  *               customer's name on it. This is the one state the KITCHEN sets
  *               rather than the till, and it is the whole point of the
  *               production view: "what still has to be baked for today" is
- *               collection_date = today AND status = 'taken'.
- *   collected — sold. A bill exists (bill_id), stock has moved, the money is
- *               settled. Terminal.
- *   cancelled — the order will not happen. Terminal.
+ *               collection_date <= today AND status = 'taken' (today's orders
+ *               plus overdue ones nobody made yet).
+ *   collected — sold. A bill exists (bill_id) and the money is settled. (No
+ *               stock moves — see rule 1 above.) Terminal.
+ *   cancelled — the order will not happen. Terminal. Any deposit was settled
+ *               at the moment of cancelling — refunded or kept — and that
+ *               outcome is recorded on the row (deposit_outcome).
  *
  * Deliberately NOT modelled as separate states:
  *   * "paid" / "deposit taken" — payment is not a stage of an order, it is a
@@ -73,6 +87,41 @@ type Status = (typeof STATUSES)[number];
 
 /** The two statuses that mean "the shop still owes this customer a cake". */
 const OPEN_STATUSES: Status[] = ["taken", "ready"];
+
+// ---------------------------------------------------------------------------
+// READ THE BODY, THEN CHECK INSIDE THE WRITE
+// ---------------------------------------------------------------------------
+// Every route here that changes an order used to check the order's status and
+// THEN `await c.req.json()`. That await yields: another request runs in the
+// gap, and the check is stale by the time the write happens. Two Collects
+// pressed at two tills with different payment methods both saw 'ready', both
+// wrote a bill (different fingerprints, so the duplicate-bill gate could not
+// match them), and the shop had two sales for one cake. Edits and cancels had
+// the same hole on a smaller scale.
+//
+// So each such route now:
+//   1. reads and validates the body first — the only await;
+//   2. then, in ONE BEGIN IMMEDIATE transaction, re-loads the order, checks its
+//      status, and writes. Everything after step 1 is synchronous, so in this
+//      single-process server nothing can run between the check and the write,
+//      and the immediate lock covers a second process too.
+// A refusal discovered inside the transaction is THROWN as Refused, which also
+// rolls back anything already written in it (collect may have written a bill
+// by then), and the route turns it into the response.
+class Refused extends Error {
+  constructor(
+    public status: 400 | 404 | 409 | 500,
+    public body: Record<string, unknown>
+  ) {
+    super(String(body.error ?? "Refused"));
+  }
+}
+
+/** Run `fn` as one BEGIN IMMEDIATE transaction: the write lock is taken before
+ *  the first read, so the checks in `fn` cannot go stale before its writes. */
+function writeTx<T>(fn: () => T): T {
+  return getDb().transaction(fn).immediate();
+}
 
 function isBusinessDate(v: unknown): v is string {
   if (typeof v !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(v)) return false;
@@ -117,9 +166,13 @@ interface NormalisedLine {
  *               is no catalogue price to fall back on, so a missing price is a
  *               mistake, never a zero.
  *
+ * `alreadyOrdered` is the set of product ids the order ALREADY has lines for
+ * (empty for a new order). A discontinued product in that set is let through:
+ * see the discontinued check below.
+ *
  * Throws with a cashier-readable message; the caller turns that into a 400.
  */
-function normaliseLines(raw: unknown): NormalisedLine[] {
+function normaliseLines(raw: unknown, alreadyOrdered: ReadonlySet<number> = new Set()): NormalisedLine[] {
   if (!Array.isArray(raw) || raw.length === 0) {
     throw new Error("A pre-order needs at least one line.");
   }
@@ -163,7 +216,13 @@ function normaliseLines(raw: unknown): NormalisedLine[] {
       // promise the shop has decided not to keep. is_active = 0 ("temporarily
       // off the menu") is deliberately still allowed: made-to-order bulk items
       // are often hidden from the shelf grid but perfectly orderable ahead.
-      if (product.is_discontinued) {
+      //
+      // EXCEPT a line the order already had. The promise was made before the
+      // product was discontinued and the shop still means to keep it; and the
+      // editor always sends every line (items is a full replace), so refusing
+      // here made the whole order uneditable — not even the collection time
+      // could be changed. Only ADDING a discontinued product is refused.
+      if (product.is_discontinued && !alreadyOrdered.has(productId)) {
         throw new Error(`${at}: ${product.name} is discontinued and cannot be pre-ordered.`);
       }
       if (!description) description = product.name;
@@ -270,6 +329,47 @@ function loadOrder(id: number): any | null {
     balance: money(total - paid),
     bill,
   };
+}
+
+/**
+ * The slip for a deposit or top-up that has JUST been recorded, built from the
+ * order as it now stands (so "Total Paid" includes this payment), and queued on
+ * the shop printer the same fire-and-forget way as receipts. The text is also
+ * returned so the screen can show it and print it in the browser, exactly as
+ * it does a collection receipt.
+ */
+function depositSlip(order: any, payment: { amount: number; payment_method: string }, cashierName: string | null): string {
+  const settings = getSettings();
+  const text = buildDepositSlipText({
+    shopName: settings.shop_name || "My Cake Shop",
+    shopAddress: settings.shop_address || "",
+    shopPhone: settings.shop_phone || "",
+    preOrderId: order.id,
+    printedAt: formatDateTime(new Date().toISOString()),
+    customerName: order.customer_name || "",
+    customerPhone: order.customer_phone || null,
+    collectionDate: order.collection_date,
+    collectionTime: order.collection_time || null,
+    items: (order.items || []).map((i: any) => ({
+      qty: i.quantity,
+      name: i.description,
+      total: money(i.quantity * i.unit_price),
+    })),
+    orderTotal: order.total,
+    paymentAmount: payment.amount,
+    paymentMethod: payment.payment_method,
+    totalPaid: order.amount_paid,
+    balanceDue: order.balance,
+    cashierName,
+  });
+  queuePrint(text)
+    .then((r) => {
+      if (!r.success) console.error(`[print] pre-order #${order.id} deposit slip: ${r.error}`);
+    })
+    .catch((err: any) => {
+      console.error(`[print] pre-order #${order.id} deposit slip: ${err?.message || err}`);
+    });
+  return text;
 }
 
 // ---------------------------------------------------------------------------
@@ -434,8 +534,12 @@ preorders.get("/summary", (c) => {
   const readyToday = db
     .query("SELECT COUNT(*) AS n FROM pre_orders WHERE collection_date = ? AND status = 'ready'")
     .get(today) as { n: number };
+  // "Still to bake" includes OVERDUE orders that were never made: a cake that
+  // was due on Friday and is still 'taken' has to come out of the oven today
+  // just as much as one due today, and leaving it out made the kitchen's count
+  // smaller than the list it is meant to summarise.
   const toBake = db
-    .query("SELECT COUNT(*) AS n FROM pre_orders WHERE collection_date = ? AND status = 'taken'")
+    .query("SELECT COUNT(*) AS n FROM pre_orders WHERE collection_date <= ? AND status = 'taken'")
     .get(today) as { n: number };
   const upcoming = db
     .query(`SELECT COUNT(*) AS n FROM pre_orders WHERE collection_date > ? AND status IN (${open})`)
@@ -574,7 +678,12 @@ preorders.post("/", async (c) => {
     return id;
   })();
 
-  return c.json(loadOrder(newId), 201);
+  const created = loadOrder(newId);
+  // A deposit taken with the order gets its slip, printed now, while the
+  // customer is still at the counter. slip_text is null when no money changed
+  // hands, so the till knows there is nothing to print.
+  const slipText = deposit ? depositSlip(created, deposit, user.full_name ?? null) : null;
+  return c.json({ ...created, slip_text: slipText }, 201);
 });
 
 // ---------------------------------------------------------------------------
@@ -587,6 +696,10 @@ preorders.post("/", async (c) => {
 //     history, and history is not editable here;
 //   * the new total may never fall below what has already been paid, or the
 //     order would owe the customer money and no refund has been made.
+//
+// The body is read FIRST and the order is checked INSIDE the write
+// transaction, never the other way round — see "READ THE BODY, THEN CHECK
+// INSIDE THE WRITE" above.
 // ---------------------------------------------------------------------------
 preorders.put("/:id", async (c) => {
   const user = getUser(c)!;
@@ -594,39 +707,35 @@ preorders.put("/:id", async (c) => {
   if (id === null) return c.json({ error: "Not found" }, 404);
   const db = getDb();
 
-  const existing = db.query("SELECT * FROM pre_orders WHERE id = ?").get(id) as any;
-  if (!existing) return c.json({ error: "Not found" }, 404);
-  if (!(OPEN_STATUSES as string[]).includes(existing.status)) {
-    return c.json({ error: `This order is ${existing.status} and can no longer be changed.` }, 400);
-  }
-
   const body = await c.req.json().catch(() => null);
   if (!body || typeof body !== "object") return c.json({ error: "Invalid request body." }, 400);
 
-  let collectionDate = existing.collection_date;
+  // Everything that depends only on the body is validated before the lock.
+  // `undefined` means "not sent, keep what the order has".
+  let newDate: string | undefined;
   if (body.collection_date !== undefined) {
     const d = resolveDate(body.collection_date);
     if (!d) return c.json({ error: "collection_date must be a date in YYYY-MM-DD form." }, 400);
-    collectionDate = d;
+    newDate = d;
   }
 
-  let collectionTime = existing.collection_time;
+  let newTime: string | null | undefined;
   if (body.collection_time !== undefined) {
-    collectionTime =
+    newTime =
       typeof body.collection_time === "string" && body.collection_time.trim()
         ? body.collection_time.trim().slice(0, 50)
         : null;
   }
 
-  let notes = existing.notes;
+  let newNotes: string | null | undefined;
   if (body.notes !== undefined) {
-    notes = typeof body.notes === "string" && body.notes.trim() ? body.notes.trim().slice(0, 2000) : null;
+    newNotes = typeof body.notes === "string" && body.notes.trim() ? body.notes.trim().slice(0, 2000) : null;
   }
 
   // Status may only be nudged between taken and ready here. Collecting writes
   // a bill and cancelling releases a promise; both have their own route, so
   // neither can be reached by PUTting a string.
-  let status: Status = existing.status;
+  let newStatus: Status | undefined;
   if (body.status !== undefined) {
     if (!(OPEN_STATUSES as string[]).includes(body.status)) {
       return c.json(
@@ -634,28 +743,7 @@ preorders.put("/:id", async (c) => {
         400
       );
     }
-    status = body.status;
-  }
-
-  // Lines are replaced wholesale when present, never diffed: the screen holds
-  // the whole order, and a diff drifts the moment one request is lost.
-  let lines: NormalisedLine[] | null = null;
-  if (body.items !== undefined) {
-    try {
-      lines = normaliseLines(body.items);
-    } catch (err: any) {
-      return c.json({ error: err?.message || "Invalid order lines." }, 400);
-    }
-    const newTotal = sumLines(lines);
-    const paid = amountPaid(id);
-    if (newTotal < paid - CENT) {
-      return c.json(
-        {
-          error: `The new total (${newTotal}) is less than the ${paid} already paid on this order. Refund the difference first, or keep the total at or above ${paid}.`,
-        },
-        400
-      );
-    }
+    newStatus = body.status;
   }
 
   const deleteItems = db.query("DELETE FROM pre_order_items WHERE pre_order_id = ?");
@@ -663,22 +751,64 @@ preorders.put("/:id", async (c) => {
     "INSERT INTO pre_order_items (pre_order_id, product_id, description, quantity, unit_price) VALUES (?, ?, ?, ?, ?)"
   );
 
-  db.transaction(() => {
-    db.query(
-      `UPDATE pre_orders SET collection_date = ?, collection_time = ?, notes = ?, status = ?,
-              updated_at = datetime('now')
-       WHERE id = ? AND status IN ('taken', 'ready')`
-    ).run(collectionDate, collectionTime, notes, status, id);
-    if (lines) {
-      deleteItems.run(id);
-      for (const l of lines) insertItem.run(id, l.product_id, l.description, l.quantity, l.unit_price);
-      recacheTotal(id);
-    }
-    db.query("INSERT INTO activity_log (user_id, action, details) VALUES (?, 'updated_pre_order', ?)").run(
-      user.id,
-      JSON.stringify({ pre_order_id: id, collection_date: collectionDate, status, lines_replaced: !!lines })
-    );
-  })();
+  try {
+    writeTx(() => {
+      const existing = db.query("SELECT * FROM pre_orders WHERE id = ?").get(id) as any;
+      if (!existing) throw new Refused(404, { error: "Not found" });
+      if (!(OPEN_STATUSES as string[]).includes(existing.status)) {
+        throw new Refused(400, { error: `This order is ${existing.status} and can no longer be changed.` });
+      }
+      const collectionDate = newDate ?? existing.collection_date;
+      const collectionTime = newTime !== undefined ? newTime : existing.collection_time;
+      const notes = newNotes !== undefined ? newNotes : existing.notes;
+      const status: Status = newStatus ?? existing.status;
+
+      // Lines are replaced wholesale when present, never diffed: the screen
+      // holds the whole order, and a diff drifts the moment one request is
+      // lost. Normalised in here because what is allowed depends on the lines
+      // the order has right now (a discontinued product it already had).
+      let lines: NormalisedLine[] | null = null;
+      if (body.items !== undefined) {
+        const had = new Set<number>(
+          (
+            db
+              .query("SELECT DISTINCT product_id FROM pre_order_items WHERE pre_order_id = ? AND product_id IS NOT NULL")
+              .all(id) as { product_id: number }[]
+          ).map((r) => r.product_id)
+        );
+        try {
+          lines = normaliseLines(body.items, had);
+        } catch (err: any) {
+          throw new Refused(400, { error: err?.message || "Invalid order lines." });
+        }
+        const newTotal = sumLines(lines);
+        const paid = amountPaid(id);
+        if (newTotal < paid - CENT) {
+          throw new Refused(400, {
+            error: `The new total (${newTotal}) is less than the ${paid} already paid on this order. Refund the difference first, or keep the total at or above ${paid}.`,
+          });
+        }
+      }
+
+      db.query(
+        `UPDATE pre_orders SET collection_date = ?, collection_time = ?, notes = ?, status = ?,
+                updated_at = datetime('now')
+         WHERE id = ? AND status IN ('taken', 'ready')`
+      ).run(collectionDate, collectionTime, notes, status, id);
+      if (lines) {
+        deleteItems.run(id);
+        for (const l of lines) insertItem.run(id, l.product_id, l.description, l.quantity, l.unit_price);
+        recacheTotal(id);
+      }
+      db.query("INSERT INTO activity_log (user_id, action, details) VALUES (?, 'updated_pre_order', ?)").run(
+        user.id,
+        JSON.stringify({ pre_order_id: id, collection_date: collectionDate, status, lines_replaced: !!lines })
+      );
+    });
+  } catch (err) {
+    if (err instanceof Refused) return c.json(err.body, err.status);
+    throw err;
+  }
 
   return c.json(loadOrder(id));
 });
@@ -695,26 +825,31 @@ preorders.post("/:id/status", async (c) => {
   if (id === null) return c.json({ error: "Not found" }, 404);
   const db = getDb();
 
-  const existing = db.query("SELECT id, status FROM pre_orders WHERE id = ?").get(id) as any;
-  if (!existing) return c.json({ error: "Not found" }, 404);
-  if (!(OPEN_STATUSES as string[]).includes(existing.status)) {
-    return c.json({ error: `This order is ${existing.status}; its status is settled.` }, 400);
-  }
-
   const body = await c.req.json().catch(() => null);
   const status = body?.status;
   if (!(OPEN_STATUSES as string[]).includes(status)) {
     return c.json({ error: "status must be 'taken' or 'ready'." }, 400);
   }
 
-  db.query("UPDATE pre_orders SET status = ?, updated_at = datetime('now') WHERE id = ? AND status IN ('taken', 'ready')").run(
-    status,
-    id
-  );
-  db.query("INSERT INTO activity_log (user_id, action, details) VALUES (?, 'pre_order_status', ?)").run(
-    user.id,
-    JSON.stringify({ pre_order_id: id, from: existing.status, to: status })
-  );
+  try {
+    writeTx(() => {
+      const existing = db.query("SELECT id, status FROM pre_orders WHERE id = ?").get(id) as any;
+      if (!existing) throw new Refused(404, { error: "Not found" });
+      if (!(OPEN_STATUSES as string[]).includes(existing.status)) {
+        throw new Refused(400, { error: `This order is ${existing.status}; its status is settled.` });
+      }
+      db.query(
+        "UPDATE pre_orders SET status = ?, updated_at = datetime('now') WHERE id = ? AND status IN ('taken', 'ready')"
+      ).run(status, id);
+      db.query("INSERT INTO activity_log (user_id, action, details) VALUES (?, 'pre_order_status', ?)").run(
+        user.id,
+        JSON.stringify({ pre_order_id: id, from: existing.status, to: status })
+      );
+    });
+  } catch (err) {
+    if (err instanceof Refused) return c.json(err.body, err.status);
+    throw err;
+  }
   return c.json(loadOrder(id));
 });
 
@@ -722,20 +857,17 @@ preorders.post("/:id/status", async (c) => {
 // POST /api/preorders/:id/payments — take a deposit or a top-up.
 //
 // Not adminOnly: taking the deposit is the other half of taking the order.
+//
+// Body first, then the status and balance checks inside the write (see "READ
+// THE BODY, THEN CHECK INSIDE THE WRITE"): two top-ups typed at once must not
+// both pass a balance check that only one of them can satisfy, and money must
+// never land on an order that was collected or cancelled in the meantime.
 // ---------------------------------------------------------------------------
 preorders.post("/:id/payments", async (c) => {
   const user = getUser(c)!;
   const id = finiteNumber(c.req.param("id"));
   if (id === null) return c.json({ error: "Not found" }, 404);
   const db = getDb();
-
-  const existing = db.query("SELECT id, status FROM pre_orders WHERE id = ?").get(id) as any;
-  if (!existing) return c.json({ error: "Not found" }, 404);
-  if (!(OPEN_STATUSES as string[]).includes(existing.status)) {
-    // A collected order's money is settled by its bill; a cancelled order
-    // should not be taking more money.
-    return c.json({ error: `This order is ${existing.status}; no further payment can be recorded against it.` }, 400);
-  }
 
   const body = await c.req.json().catch(() => null);
   const amount = finiteNumber(body?.amount);
@@ -747,40 +879,60 @@ preorders.post("/:id/payments", async (c) => {
   const paidOn = body?.paid_on ? resolveDate(body.paid_on) : todayDate();
   if (!paidOn) return c.json({ error: "paid_on must be a date in YYYY-MM-DD form." }, 400);
 
-  // Never more than the balance. An overpayment would have to be refunded, and
-  // there is no refund path for pre-orders — so it is refused at the door
-  // instead of being stored as a negative balance nobody notices.
-  const total = recacheTotal(id);
-  const paid = amountPaid(id);
-  const balance = money(total - paid);
-  if (money(amount) > balance + CENT) {
-    return c.json(
-      { error: `Only ${balance} is outstanding on this order; ${money(amount)} would overpay it.` },
-      400
-    );
+  try {
+    writeTx(() => {
+      const existing = db.query("SELECT id, status FROM pre_orders WHERE id = ?").get(id) as any;
+      if (!existing) throw new Refused(404, { error: "Not found" });
+      if (!(OPEN_STATUSES as string[]).includes(existing.status)) {
+        // A collected order's money is settled by its bill; a cancelled order
+        // should not be taking more money.
+        throw new Refused(400, {
+          error: `This order is ${existing.status}; no further payment can be recorded against it.`,
+        });
+      }
+
+      // Never more than the balance. An overpayment would have to be refunded,
+      // and there is no refund path for an open pre-order — so it is refused at
+      // the door instead of being stored as a negative balance nobody notices.
+      const total = recacheTotal(id);
+      const paid = amountPaid(id);
+      const balance = money(total - paid);
+      if (money(amount) > balance + CENT) {
+        throw new Refused(400, {
+          error: `Only ${balance} is outstanding on this order; ${money(amount)} would overpay it.`,
+        });
+      }
+
+      if (method === "cash") {
+        const blocked = cashShiftBlockReason();
+        if (blocked) throw new Refused(400, { error: blocked });
+      }
+
+      const res = db
+        .query(
+          "INSERT INTO pre_order_payments (pre_order_id, amount, payment_method, paid_on, user_id) VALUES (?, ?, ?, ?, ?)"
+        )
+        .run(id, money(amount), method, paidOn, user.id);
+      db.query("INSERT INTO activity_log (user_id, action, details) VALUES (?, 'pre_order_payment', ?)").run(
+        user.id,
+        JSON.stringify({
+          pre_order_id: id,
+          payment_id: Number(res.lastInsertRowid),
+          amount: money(amount),
+          payment_method: method,
+          paid_on: paidOn,
+        })
+      );
+    });
+  } catch (err) {
+    if (err instanceof Refused) return c.json(err.body, err.status);
+    throw err;
   }
 
-  if (method === "cash") {
-    const blocked = cashShiftBlockReason();
-    if (blocked) return c.json({ error: blocked }, 400);
-  }
-
-  const res = db
-    .query(
-      "INSERT INTO pre_order_payments (pre_order_id, amount, payment_method, paid_on, user_id) VALUES (?, ?, ?, ?, ?)"
-    )
-    .run(id, money(amount), method, paidOn, user.id);
-  db.query("INSERT INTO activity_log (user_id, action, details) VALUES (?, 'pre_order_payment', ?)").run(
-    user.id,
-    JSON.stringify({
-      pre_order_id: id,
-      payment_id: Number(res.lastInsertRowid),
-      amount: money(amount),
-      payment_method: method,
-      paid_on: paidOn,
-    })
-  );
-  return c.json(loadOrder(id), 201);
+  const order = loadOrder(id);
+  // The customer's proof of this payment, printed now (see depositSlip()).
+  const slipText = depositSlip(order, { amount: money(amount), payment_method: method }, user.full_name ?? null);
+  return c.json({ ...order, slip_text: slipText }, 201);
 });
 
 // ---------------------------------------------------------------------------
@@ -798,10 +950,20 @@ preorders.delete("/:id/payments/:paymentId", adminOnly, (c) => {
   if (id === null || paymentId === null) return c.json({ error: "Not found" }, 404);
   const db = getDb();
 
-  const order = db.query("SELECT id, status FROM pre_orders WHERE id = ?").get(id) as any;
+  const order = db.query("SELECT id, status, deposit_outcome FROM pre_orders WHERE id = ?").get(id) as any;
   if (!order) return c.json({ error: "Not found" }, 404);
   if (order.status === "collected") {
     return c.json({ error: "This order has been collected and billed; its payments cannot be altered." }, 400);
+  }
+  // A cancelled order whose deposit was settled (refunded or kept) is closed
+  // the same way: deposit_settled_amount, the drawer's refund figure and any
+  // income row were all written from these payments, and deleting one now
+  // would leave them describing money the order no longer shows.
+  if (order.status === "cancelled" && order.deposit_outcome) {
+    return c.json(
+      { error: `This order was cancelled and its deposit was ${order.deposit_outcome}; its payments cannot be altered.` },
+      400
+    );
   }
   const payment = db
     .query("SELECT * FROM pre_order_payments WHERE id = ? AND pre_order_id = ?")
@@ -832,11 +994,31 @@ preorders.delete("/:id/payments/:paymentId", adminOnly, (c) => {
 // only action by which a cashier could make an inconvenient order vanish from
 // the book after taking money for it.
 //
-// Cancelling does NOT refund and does NOT delete the deposit rows. Those rows
-// are the record of cash that really did enter the drawer on a day that has
-// already been reconciled; deleting them would retroactively falsify that
-// close. The response reports refund_due so the owner can pay it out through
-// the existing cash-expense path.
+// Cancelling never deletes the deposit rows. Those rows are the record of
+// money that really did arrive, possibly on a day that has already been
+// reconciled; deleting them would retroactively falsify that close.
+//
+// Instead, an order WITH payments cannot be cancelled without saying what
+// happens to that money (body.deposit_action), and the answer is recorded on
+// the order in the same transaction as the cancel:
+//
+//   'refund' + refund_method (cash | card | upi) — the customer gets it back.
+//       This is NOT an expense (it was never the shop's money to spend, and
+//       booking it as one cut the profit by a sale that never happened) and NOT
+//       negative income. A CASH refund is money leaving the drawer, so the cash
+//       shift subtracts it (getDepositsRefundedSince in src/routes/cash.ts), and
+//       like any cash movement it needs an open shift. Card / LankaQR refunds
+//       are made outside the drawer and only recorded here.
+//
+//   'keep' — the customer forfeits it (a no-show, a late cancellation). Now it
+//       IS the shop's income: one row goes into the income table, dated today,
+//       so the existing income and profit reports pick it up unchanged. No
+//       drawer movement — the cash came in when the deposit was taken and has
+//       already been counted then.
+//
+// An order with no payments cancels exactly as before; deposit_action is
+// ignored. A cancelled order holds no deposit in /summary either way, because
+// deposits_held only sums OPEN orders.
 // ---------------------------------------------------------------------------
 preorders.post("/:id/cancel", adminOnly, async (c) => {
   const user = getUser(c)!;
@@ -844,42 +1026,99 @@ preorders.post("/:id/cancel", adminOnly, async (c) => {
   if (id === null) return c.json({ error: "Not found" }, 404);
   const db = getDb();
 
-  const existing = db.query("SELECT * FROM pre_orders WHERE id = ?").get(id) as any;
-  if (!existing) return c.json({ error: "Not found" }, 404);
-  if (existing.status === "collected") {
-    return c.json(
-      { error: `This order was collected on bill #${existing.bill_id}. Refund the bill instead of cancelling the order.` },
-      400
-    );
-  }
-  if (existing.status === "cancelled") {
-    return c.json({ error: "This order is already cancelled." }, 400);
-  }
-
   const body = await c.req.json().catch(() => ({}));
   const reason = typeof body?.reason === "string" ? body.reason.trim().slice(0, 500) : "";
-  const paid = amountPaid(id);
+  const action = body?.deposit_action;
+  if (action != null && action !== "refund" && action !== "keep") {
+    return c.json({ error: "deposit_action must be 'refund' or 'keep'." }, 400);
+  }
+  const refundMethod = body?.refund_method;
+  if (action === "refund" && !PAYMENT_METHODS.includes(refundMethod)) {
+    return c.json({ error: "Choose how the deposit is refunded: cash, card or LankaQR." }, 400);
+  }
 
-  db.transaction(() => {
-    // The reason is appended to notes rather than given a column of its own:
-    // it is read by a human on the order screen and nothing aggregates it.
-    const note = reason ? `${existing.notes ? existing.notes + "\n" : ""}[Cancelled] ${reason}` : existing.notes;
-    db.query(
-      "UPDATE pre_orders SET status = 'cancelled', notes = ?, updated_at = datetime('now') WHERE id = ? AND status IN ('taken', 'ready')"
-    ).run(note, id);
-    db.query("INSERT INTO activity_log (user_id, action, details) VALUES (?, 'cancelled_pre_order', ?)").run(
-      user.id,
-      JSON.stringify({ pre_order_id: id, reason, refund_due: paid })
-    );
-  })();
+  let settled: { outcome: "refunded" | "kept"; amount: number } | null = null;
+  try {
+    settled = writeTx(() => {
+      const existing = db
+        .query("SELECT po.*, c.name AS customer_name FROM pre_orders po JOIN customers c ON c.id = po.customer_id WHERE po.id = ?")
+        .get(id) as any;
+      if (!existing) throw new Refused(404, { error: "Not found" });
+      if (existing.status === "collected") {
+        throw new Refused(400, {
+          error: `This order was collected on bill #${existing.bill_id}. Refund the bill instead of cancelling the order.`,
+        });
+      }
+      if (existing.status === "cancelled") {
+        throw new Refused(400, { error: "This order is already cancelled." });
+      }
 
-  return c.json({
-    ...loadOrder(id),
-    // Money already taken that the shop now owes back. Reported, not acted on:
-    // the owner pays it out as a cash expense, which is what the drawer and the
-    // books already understand.
-    refund_due: paid,
-  });
+      const paid = amountPaid(id);
+      const hasDeposit = paid > CENT;
+      if (hasDeposit && !action) {
+        throw new Refused(400, {
+          error: `${paid} has been paid on this order. Choose whether the deposit is refunded or kept before cancelling.`,
+          deposit_required: true,
+          amount_paid: paid,
+        });
+      }
+      if (hasDeposit && action === "refund" && refundMethod === "cash") {
+        const blocked = cashShiftBlockReason();
+        if (blocked) {
+          throw new Refused(400, { error: `A cash refund comes out of the drawer. ${blocked}` });
+        }
+      }
+
+      // The reason is appended to notes rather than given a column of its own:
+      // it is read by a human on the order screen and nothing aggregates it.
+      const note = reason ? `${existing.notes ? existing.notes + "\n" : ""}[Cancelled] ${reason}` : existing.notes;
+      const outcome = !hasDeposit ? null : action === "refund" ? "refunded" : "kept";
+      db.query(
+        `UPDATE pre_orders SET status = 'cancelled', notes = ?, updated_at = datetime('now'),
+                deposit_outcome = ?, deposit_settled_amount = ?, deposit_refund_method = ?,
+                deposit_settled_at = CASE WHEN ? IS NULL THEN NULL ELSE datetime('now') END,
+                deposit_settled_by = ?
+         WHERE id = ? AND status IN ('taken', 'ready')`
+      ).run(
+        note,
+        outcome,
+        outcome ? paid : null,
+        outcome === "refunded" ? refundMethod : null,
+        outcome,
+        outcome ? user.id : null,
+        id
+      );
+
+      if (outcome === "kept") {
+        db.query(
+          "INSERT INTO income (source, amount, description, income_date, user_id) VALUES (?, ?, ?, ?, ?)"
+        ).run(
+          "Kept pre-order deposit",
+          paid,
+          `Pre-order #${id} for ${existing.customer_name} was cancelled and the deposit kept${reason ? ` (${reason})` : ""}.`,
+          todayDate(),
+          user.id
+        );
+      }
+
+      db.query("INSERT INTO activity_log (user_id, action, details) VALUES (?, 'cancelled_pre_order', ?)").run(
+        user.id,
+        JSON.stringify({
+          pre_order_id: id,
+          reason,
+          amount_paid: paid,
+          deposit_outcome: outcome,
+          refund_method: outcome === "refunded" ? refundMethod : null,
+        })
+      );
+      return outcome ? { outcome, amount: paid } : null;
+    });
+  } catch (err) {
+    if (err instanceof Refused) return c.json(err.body, err.status);
+    throw err;
+  }
+
+  return c.json({ ...loadOrder(id), deposit_settled: settled });
 });
 
 // ---------------------------------------------------------------------------
@@ -920,51 +1159,6 @@ preorders.delete("/:id", adminOnly, (c) => {
   return c.json({ success: true, deleted_id: id });
 });
 
-/**
- * The extra block printed under a pre-order's receipt.
- *
- * buildReceiptText() knows nothing about deposits (it describes one bill paid
- * in one go), so the breakdown the customer needs — what the cake cost, what
- * they had already paid, what they handed over today — is appended here. Same
- * width and the same label/value alignment as the receipt it is glued to, so it
- * comes off the thermal printer as one slip.
- */
-function settlementBlock(args: {
-  preOrderId: number;
-  billTotal: number;
-  depositApplied: number;
-  cashToCollect: number;
-  cashReceived: number | null;
-  changeDue: number | null;
-}): string | null {
-  // Nothing to add when the order was paid in full at the counter like any
-  // other sale and no change was worked out: the receipt above already says it
-  // all, and a block reading "Paid in Advance -0.00" is noise that invites the
-  // customer to ask what it means.
-  if (args.depositApplied <= CENT && args.cashReceived == null) return null;
-  const w = 28;
-  const center = (t: string) => " ".repeat(Math.max(0, Math.floor((w - t.length) / 2))) + t;
-  const line = (label: string, value: number, neg = false) =>
-    `${label.padEnd(17)} ${(neg ? "-" : "") + value.toFixed(2)}`.padEnd(w);
-
-  const lines: string[] = [];
-  lines.push("");
-  lines.push("=".repeat(w));
-  lines.push(center(`PRE-ORDER #${args.preOrderId}`));
-  lines.push("-".repeat(w));
-  lines.push(line("Bill Total", args.billTotal));
-  if (args.depositApplied > CENT) {
-    lines.push(line("Paid in Advance", args.depositApplied, true));
-    lines.push(line("Balance Due Now", args.cashToCollect));
-  }
-  if (args.cashReceived != null) {
-    lines.push(line("Cash Given", args.cashReceived));
-    lines.push(line("Change", args.changeDue ?? 0));
-  }
-  lines.push("=".repeat(w));
-  return "\n" + lines.join("\n");
-}
-
 // ---------------------------------------------------------------------------
 // POST /api/preorders/:id/collect — the customer is at the counter.
 //
@@ -974,19 +1168,20 @@ function settlementBlock(args: {
 //
 //   1. It writes a REAL BILL through the ordinary createBill(). Not a special
 //      "pre-order sale" path — the same function the walk-in till uses. That is
-//      what makes the token, the receipt, the stock deduction, the duplicate
-//      guard, the activity log, the day's sales total and every report behave
-//      identically to any other sale. The day's takings are only correct
-//      because this is not special-cased.
+//      what makes the token, the receipt, the activity log, the day's sales
+//      total and every report behave identically to any other sale. The day's
+//      takings are only correct because this is not special-cased. The one
+//      difference is skip_stock: pre-ordered goods are never entered as stock
+//      (rule 1 in the header), so collecting checks and deducts nothing — not
+//      even for a catalogue line whose product tracks stock. The bill's
+//      cart_id is 'preorder-<id>', which is how anything downstream (a refund
+//      deciding whether to put stock back, say) can tell such a bill apart.
 //
 //   2. CUSTOM FREE-TEXT LINES reach the bill with product_id = NULL and the
 //      customer's own description as product_name. bill_items.product_id is
 //      nullable and bill_items.product_name is the text every report groups on,
 //      so a custom cake appears in the day's sales, in top products and on the
-//      receipt with its real revenue. computeStockNeeds() looks a line's
-//      product up by id, finds nothing for a NULL, and so moves no stock —
-//      which is right: a custom cake has no catalogue row, no recipe and no
-//      stock count. Its cost_price lands as 0 for the same reason (there is no
+//      receipt with its real revenue. Its cost_price lands as 0 (there is no
 //      product to read a cost from), so it shows as pure margin; that is a
 //      known limitation of selling an off-catalogue item, not a pre-order bug.
 //
@@ -999,14 +1194,26 @@ function settlementBlock(args: {
 //      (cash_to_collect), and the close-of-day reconciliation subtracts that
 //      already-paid amount back out of today's expected cash for cash bills
 //      (see getDepositsAppliedSince in src/routes/cash.ts), because the full
-//      bill total it counts as cash sales did not all arrive today.
+//      bill total it counts as cash sales did not all arrive today. The same
+//      already-paid figure is stored on the bill as bills.paid_in_advance, so
+//      the bill can later say on its own how much of it changed hands at the
+//      till (reprints print it; reports split takings with it).
 //
-//   4. Idempotency comes free. The bill's cart_id is always the deterministic
-//      'preorder-<id>', which the UNIQUE index on bills(cart_id) and the gate
-//      inside createBill() already protect: a double-tapped Collect replays the
-//      first bill instead of writing a second, burning a second token, or
-//      deducting stock twice. A client-supplied cart_id is deliberately
-//      ignored, since accepting one would defeat exactly that guard.
+//   4. ONE TRANSACTION, CHECKED INSIDE. The body is read first; then the order
+//      is re-loaded, its status checked, the bill written and the order linked
+//      and marked collected in a single BEGIN IMMEDIATE transaction (createBill
+//      nests inside it as a savepoint — see its note). Consequences:
+//        * two Collects at once — a double tap, or two tills with different
+//          payment methods, which hash to different fingerprints and so would
+//          sail past createBill()'s own duplicate gate — cannot both bill: the
+//          second finds the order already 'collected' and gets the 409 below
+//          carrying the first bill;
+//        * nothing half-done can persist: if anything fails after the bill is
+//          written, the bill rolls back with it. There is no longer such a
+//          thing as a bill no order points at.
+//      The bill's cart_id is still the deterministic 'preorder-<id>' and a
+//      client-supplied one is ignored: one order, one cart, permanently (see
+//      findBillByCartId).
 // ---------------------------------------------------------------------------
 preorders.post("/:id/collect", async (c) => {
   const user = getUser(c)!;
@@ -1014,30 +1221,7 @@ preorders.post("/:id/collect", async (c) => {
   if (id === null) return c.json({ error: "Not found" }, 404);
   const db = getDb();
 
-  const order = loadOrder(id);
-  if (!order) return c.json({ error: "Not found" }, 404);
-
-  if (order.status === "cancelled") {
-    return c.json({ error: "This order was cancelled and cannot be collected." }, 400);
-  }
-  if (order.status === "collected") {
-    // 409, not 400: the request is not malformed, it has already happened. The
-    // existing bill comes back so the till can show/reprint it rather than
-    // leaving the cashier wondering whether to ring it up again.
-    return c.json(
-      {
-        error: `This order was already collected on bill #${order.bill_id} (token #${order.bill?.token_number}).`,
-        already_collected: true,
-        pre_order: order,
-        bill: order.bill,
-      },
-      409
-    );
-  }
-  if (order.items.length === 0) {
-    return c.json({ error: "This order has no lines to bill." }, 400);
-  }
-
+  // --- 1. The body, and everything that depends on it alone ----------------
   const body = await c.req.json().catch(() => ({}));
   const settings = getSettings();
 
@@ -1046,146 +1230,170 @@ preorders.post("/:id/collect", async (c) => {
 
   const discount = money(finiteNumber(body?.discount) ?? 0);
   if (discount < 0) return c.json({ error: "Discount cannot be negative." }, 400);
-  if (discount > order.total + CENT) {
-    return c.json({ error: `Discount (${discount}) is more than the order total (${order.total}).` }, 400);
-  }
 
   const taxRate = finiteNumber(body?.tax_rate) ?? (parseFloat(settings.tax_rate || "0") || 0);
   if (taxRate < 0) return c.json({ error: "Tax rate cannot be negative." }, 400);
 
-  // The same arithmetic createBill() will do, worked out here so the balance
-  // can be checked and reported BEFORE any money or stock moves.
-  const subtotal = order.total;
-  const taxable = subtotal - discount;
-  const taxAmount = money(taxable * (taxRate / 100));
-  const billTotal = money(taxable + taxAmount);
-  const depositApplied = order.amount_paid;
-
-  if (depositApplied > billTotal + CENT) {
-    return c.json(
-      {
-        error: `${depositApplied} has already been paid on this order but the bill would only come to ${billTotal}. Reduce the discount, or refund the difference before collecting.`,
-      },
-      400
-    );
-  }
-  const cashToCollect = money(billTotal - depositApplied);
-
   const cashReceived = finiteNumber(body?.cash_received);
-  if (cashReceived !== null) {
-    if (cashReceived < 0) return c.json({ error: "Cash received cannot be negative." }, 400);
-    if (cashReceived < cashToCollect - CENT) {
-      return c.json(
-        { error: `${cashToCollect} is still due on this order; ${money(cashReceived)} is not enough to collect it.` },
-        400
-      );
-    }
+  if (cashReceived !== null && cashReceived < 0) {
+    return c.json({ error: "Cash received cannot be negative." }, 400);
   }
-  const changeDue = cashReceived === null ? null : money(cashReceived - cashToCollect);
 
-  // Deterministic and server-chosen — see note 4 in the header above.
+  // Deterministic and server-chosen — see note 4 above.
   const cartId = `preorder-${id}`;
-  const knownReplay = findBillByCartId(cartId) !== null;
 
-  // Same exemption as POST /api/pos/bill: a resubmission of a sale that is
-  // already on disk writes nothing, so a policy gate must not turn it into an
-  // error that reads to the cashier as "the sale failed".
-  if (!knownReplay) {
-    const blocked = cashShiftBlockReason();
-    if (blocked) return c.json({ error: blocked }, 400);
-  }
-
-  let bill;
+  // --- 2. Check and write, atomically --------------------------------------
+  let outcome: {
+    order: any;
+    bill: CreatedBill;
+    subtotal: number;
+    depositApplied: number;
+    cashToCollect: number;
+    changeDue: number | null;
+  };
   try {
-    bill = createBill({
-      items: order.items.map((l: any) => ({
-        // NULL for a custom line. bill_items.product_id is nullable and
-        // createBill()/computeStockNeeds() both handle a missing product by
-        // moving no stock, which is exactly the required behaviour. The cast is
-        // only to satisfy the BillItem signature, which was written for the
-        // walk-in till where every line is a catalogue product.
-        product_id: (l.product_id ?? null) as unknown as number,
-        // The customer's own words become the bill line, and therefore the
-        // receipt line and the reporting key.
-        product_name: l.description,
-        quantity: l.quantity,
-        unit_price: l.unit_price,
-      })),
-      customer_id: order.customer_id,
-      discount,
-      tax_rate: taxRate,
-      payment_method: method,
-      user_id: user.id,
-      // Deliberately null. bills.amount_given means "cash handed over for this
-      // bill at this till", and part of this bill was paid days ago — writing
-      // the sum of both there would put a number in the drawer record that was
-      // never handed over today. The till gets cash_to_collect / change_due in
-      // this response, and the printed slip carries the real breakdown.
-      amount_given: null,
-      cart_id: cartId,
+    outcome = writeTx(() => {
+      const order = loadOrder(id);
+      if (!order) throw new Refused(404, { error: "Not found" });
+
+      if (order.status === "cancelled") {
+        throw new Refused(400, { error: "This order was cancelled and cannot be collected." });
+      }
+      if (order.status === "collected") {
+        // 409, not 400: the request is not malformed, it has already happened.
+        // The existing bill comes back so the till can show/reprint it rather
+        // than leaving the cashier wondering whether to ring it up again.
+        throw new Refused(409, {
+          error: `This order was already collected on bill #${order.bill_id} (token #${order.bill?.token_number}).`,
+          already_collected: true,
+          pre_order: order,
+          bill: order.bill,
+        });
+      }
+      if (order.items.length === 0) {
+        throw new Refused(400, { error: "This order has no lines to bill." });
+      }
+
+      // A bill already under this order's cart id while the order is still
+      // open can only be left over from before collect was one transaction (a
+      // crash between "bill written" and "order marked collected"). Billing
+      // again would sell the cake twice, so stop and hand it to the owner.
+      const stray = findBillByCartId(cartId);
+      if (stray) {
+        throw new Refused(409, {
+          error: `Bill #${stray.id} (token #${stray.token_number}) was already written for this pre-order, but the order was never marked collected. Do NOT bill it again — show this to the owner.`,
+          bill: stray,
+        });
+      }
+
+      if (discount > order.total + CENT) {
+        throw new Refused(400, { error: `Discount (${discount}) is more than the order total (${order.total}).` });
+      }
+
+      // The same arithmetic createBill() will do, worked out here so the
+      // balance can be checked and reported BEFORE any money moves.
+      const subtotal = order.total;
+      const taxable = subtotal - discount;
+      const taxAmount = money(taxable * (taxRate / 100));
+      const billTotal = money(taxable + taxAmount);
+      const depositApplied = order.amount_paid;
+
+      if (depositApplied > billTotal + CENT) {
+        throw new Refused(400, {
+          error: `${depositApplied} has already been paid on this order but the bill would only come to ${billTotal}. Reduce the discount, or refund the difference before collecting.`,
+        });
+      }
+      const cashToCollect = money(billTotal - depositApplied);
+
+      if (cashReceived !== null && cashReceived < cashToCollect - CENT) {
+        throw new Refused(400, {
+          error: `${cashToCollect} is still due on this order; ${money(cashReceived)} is not enough to collect it.`,
+        });
+      }
+      const changeDue = cashReceived === null ? null : money(cashReceived - cashToCollect);
+
+      // Same rule as POST /api/pos/bill. No replay exemption is needed any
+      // more: an order that reaches this line has no bill yet (checked just
+      // above), so this request is always a new sale.
+      const blocked = cashShiftBlockReason();
+      if (blocked) throw new Refused(400, { error: blocked });
+
+      let bill: CreatedBill;
+      try {
+        bill = createBill({
+          items: order.items.map((l: any) => ({
+            // NULL for a custom line. bill_items.product_id is nullable. The
+            // cast is only to satisfy the BillItem signature, which was written
+            // for the walk-in till where every line is a catalogue product.
+            product_id: (l.product_id ?? null) as unknown as number,
+            // The customer's own words become the bill line, and therefore the
+            // receipt line and the reporting key.
+            product_name: l.description,
+            quantity: l.quantity,
+            unit_price: l.unit_price,
+          })),
+          customer_id: order.customer_id,
+          discount,
+          tax_rate: taxRate,
+          payment_method: method,
+          user_id: user.id,
+          // Deliberately null. bills.amount_given means "cash handed over for
+          // this bill at this till", and part of this bill was paid days ago —
+          // writing the sum of both there would put a number in the drawer
+          // record that was never handed over today. The till gets
+          // cash_to_collect / change_due in this response, and the printed slip
+          // carries the real breakdown.
+          amount_given: null,
+          cart_id: cartId,
+          // Pre-ordered goods are never stock: see note 1 above.
+          skip_stock: true,
+        });
+      } catch (err: any) {
+        throw new Refused(400, { error: err?.message || "Failed to bill this order." });
+      }
+
+      // Link and close the order, in the same transaction as the bill. The
+      // status guard cannot miss while this transaction holds the write lock,
+      // but if it ever did, throwing here takes the bill back out with it.
+      const linked = db
+        .query(
+          `UPDATE pre_orders SET status = 'collected', bill_id = ?, updated_at = datetime('now')
+           WHERE id = ? AND status IN ('taken', 'ready')`
+        )
+        .run(bill.id, id);
+      if (Number(linked.changes || 0) !== 1) {
+        throw new Refused(500, { error: "This pre-order could not be marked collected. Nothing was billed; try again." });
+      }
+      db.query("UPDATE bills SET paid_in_advance = ? WHERE id = ?").run(depositApplied, bill.id);
+
+      db.query("INSERT INTO activity_log (user_id, action, details) VALUES (?, 'collected_pre_order', ?)").run(
+        user.id,
+        JSON.stringify({
+          pre_order_id: id,
+          bill_id: bill.id,
+          token: bill.token_number,
+          bill_total: bill.total,
+          deposit_applied: depositApplied,
+          cash_to_collect: cashToCollect,
+        })
+      );
+      return { order, bill, subtotal, depositApplied, cashToCollect, changeDue };
     });
-  } catch (err: any) {
-    return c.json({ error: err?.message || "Failed to bill this order." }, 400);
+  } catch (err) {
+    if (err instanceof Refused) return c.json(err.body, err.status);
+    throw err;
   }
+  const { order, bill, subtotal, depositApplied, cashToCollect, changeDue } = outcome;
 
-  const isReplay = bill.replayed === true;
-
-  // Link and close the order. Guarded on the open statuses so two simultaneous
-  // Collects cannot both claim it: the loser matches no row, and since
-  // createBill() handed it the SAME bill, the order is already pointing where
-  // it should.
-  const linked = db
-    .query(
-      `UPDATE pre_orders SET status = 'collected', bill_id = ?, updated_at = datetime('now')
-       WHERE id = ? AND status IN ('taken', 'ready')`
-    )
-    .run(bill.id, id);
-  if (Number(linked.changes || 0) === 0) {
-    const now = db.query("SELECT status, bill_id FROM pre_orders WHERE id = ?").get(id) as any;
-    if (!(now?.status === "collected" && now?.bill_id === bill.id)) {
-      // The bill is committed and must not be hidden, but the order did not
-      // close — say so loudly rather than reporting a clean collection.
-      console.error(
-        `[preorders] bill #${bill.id} was written for pre-order #${id} but the order could not be marked collected (status=${now?.status}, bill_id=${now?.bill_id})`
-      );
-      return c.json(
-        {
-          error: `Bill #${bill.id} (token #${bill.token_number}) was created, but this pre-order could not be marked collected. Do NOT bill it again — show this to the owner.`,
-          bill,
-        },
-        500
-      );
-    }
-  }
-  if (!isReplay) {
-    db.query("INSERT INTO activity_log (user_id, action, details) VALUES (?, 'collected_pre_order', ?)").run(
-      user.id,
-      JSON.stringify({
-        pre_order_id: id,
-        bill_id: bill.id,
-        token: bill.token_number,
-        bill_total: bill.total,
-        deposit_applied: depositApplied,
-        cash_to_collect: cashToCollect,
-      })
-    );
-  }
-
-  // --- Receipt, exactly as the walk-in till builds it ----------------------
+  // --- 3. Receipt, exactly as the walk-in till builds it -------------------
   const billItems = db.query("SELECT * FROM bill_items WHERE bill_id = ?").all(bill.id) as any[];
   const fullBill = db.query("SELECT * FROM bills WHERE id = ?").get(bill.id) as any;
-  let cashierName = user.full_name;
-  if (isReplay && fullBill.user_id) {
-    const orig = db.query("SELECT full_name FROM users WHERE id = ?").get(fullBill.user_id) as any;
-    if (orig?.full_name) cashierName = orig.full_name;
-  }
   const receiptData = {
     shopName: settings.shop_name || "My Cake Shop",
     shopAddress: settings.shop_address || "",
     shopPhone: settings.shop_phone || "",
     tokenNumber: bill.token_number,
-    // On a replay the slip must describe the sale, not this request.
-    billDate: formatDateTime(isReplay ? fullBill.created_at : new Date().toISOString()),
+    billDate: formatDateTime(new Date().toISOString()),
     items: billItems.map((i: any) => ({
       name: i.product_name,
       qty: i.quantity,
@@ -1199,14 +1407,14 @@ preorders.post("/:id/collect", async (c) => {
     taxAmount: fullBill.tax_amount,
     total: fullBill.total,
     paymentMethod: fullBill.payment_method,
-    cashierName,
+    cashierName: user.full_name,
     customerName: order.customer_name as string,
     amountGiven: null,
     changeGiven: null,
   };
   const receiptText =
     buildReceiptText(receiptData) +
-    (settlementBlock({
+    (buildPreorderSettlementBlock({
       preOrderId: id,
       billTotal: fullBill.total,
       depositApplied,
@@ -1217,22 +1425,14 @@ preorders.post("/:id/collect", async (c) => {
   const kitchenText = buildKitchenTicket(receiptData);
 
   // Fire and forget, like POST /api/pos/bill: the sale is committed, so a
-  // jammed printer must not freeze the till. A replay queues nothing — two
-  // slips bearing one token is the confusion the duplicate guard exists to
-  // prevent — but the text still comes back so the screen can show it.
-  if (!isReplay) {
-    queuePrint(receiptText)
-      .then((r) => {
-        if (!r.success) console.error(`[print] pre-order #${id} bill #${bill.id}: ${r.error}`);
-      })
-      .catch((err: any) => {
-        console.error(`[print] pre-order #${id} bill #${bill.id}: ${err?.message || err}`);
-      });
-  } else {
-    console.warn(
-      `[preorders] duplicate collect for pre-order #${id} — replayed bill #${bill.id} token #${bill.token_number}, no second bill written`
-    );
-  }
+  // jammed printer must not freeze the till.
+  queuePrint(receiptText)
+    .then((r) => {
+      if (!r.success) console.error(`[print] pre-order #${id} bill #${bill.id}: ${r.error}`);
+    })
+    .catch((err: any) => {
+      console.error(`[print] pre-order #${id} bill #${bill.id}: ${err?.message || err}`);
+    });
 
   return c.json({
     pre_order: loadOrder(id),
@@ -1244,7 +1444,7 @@ preorders.post("/:id/collect", async (c) => {
     // The FULL value of the sale. This is what the day's sales record.
     bill_total: fullBill.total,
     // Already in the drawer from an earlier day (or earlier today) — NOT
-    // collected again now.
+    // collected again now. Also stored as bills.paid_in_advance.
     deposit_applied: depositApplied,
     // The only money that changes hands at this collection.
     cash_to_collect: cashToCollect,
@@ -1252,8 +1452,10 @@ preorders.post("/:id/collect", async (c) => {
     change_due: changeDue,
     receipt_text: receiptText,
     kitchen_text: kitchenText,
-    print_queued: !isReplay,
-    replayed: isReplay,
+    print_queued: true,
+    // Always false now: a repeat Collect is answered with the 409 above, never
+    // by replaying the bill. Kept so the pages' existing check stays valid.
+    replayed: false,
   });
 });
 

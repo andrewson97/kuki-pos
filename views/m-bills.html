@@ -32,6 +32,11 @@
   <script>
     let allBills = [];
 
+    // Stored as 'upi' (the database only allows cash/card/upi); shown as LankaQR.
+    function payLabel(m) {
+      return ({ cash: 'Cash', card: 'Card', upi: 'LankaQR' })[m] || (m || '-');
+    }
+
     async function load() {
       await bootMobile();
       $('filter-date').value = todayISO();
@@ -63,7 +68,7 @@
             <span class="list-amount">${fmt(b.total)}</span>
           </div>
           <div class="list-head" style="margin-top:4px;">
-            <span class="list-meta">${formatTime(b.created_at)} · ${(b.payment_method || '').toUpperCase()}</span>
+            <span class="list-meta">${formatTime(b.created_at)} · ${payLabel(b.payment_method)}</span>
             <span class="badge ${b.status === 'completed' ? 'success' : b.status === 'refunded' ? 'warning' : 'danger'}">${b.status}</span>
           </div>
         </div>`).join('');
@@ -78,24 +83,36 @@
             <span>${fmt(i.total)}</span>
           </div>`).join('');
         const canRefund = bill.status === 'completed';
+        // A pre-order collection never took stock out, so its refund cannot put
+        // any back; the checkbox is replaced by a line saying so.
+        const fromPreorder = String(bill.cart_id || '').startsWith('preorder-');
         $('bill-detail').innerHTML = `
           <h3>Bill #${String(bill.token_number).padStart(3,'0')}</h3>
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:0.85rem;margin-bottom:14px;">
             <div><span style="color:var(--ink-soft);">Date</span><br>${formatDateTime(bill.created_at)}</div>
             <div><span style="color:var(--ink-soft);">Cashier</span><br>${escapeHtml(bill.cashier_name || '-')}</div>
             <div><span style="color:var(--ink-soft);">Customer</span><br>${escapeHtml(bill.customer_name || 'Walk-in')}</div>
-            <div><span style="color:var(--ink-soft);">Payment</span><br>${(bill.payment_method || '').toUpperCase()}</div>
+            <div><span style="color:var(--ink-soft);">Payment</span><br>${payLabel(bill.payment_method)}</div>
           </div>
           <div style="margin-bottom:12px;">${itemsHtml}</div>
           <div style="display:flex;justify-content:space-between;font-size:0.9rem;padding:4px 0;"><span>Subtotal</span><span>${fmt(bill.subtotal)}</span></div>
           ${bill.discount > 0 ? `<div style="display:flex;justify-content:space-between;font-size:0.9rem;padding:4px 0;"><span>Discount</span><span>-${fmt(bill.discount)}</span></div>` : ''}
           ${bill.tax_amount > 0 ? `<div style="display:flex;justify-content:space-between;font-size:0.9rem;padding:4px 0;"><span>Tax</span><span>${fmt(bill.tax_amount)}</span></div>` : ''}
           <div style="display:flex;justify-content:space-between;font-weight:700;padding:8px 0;border-top:2px solid var(--line);border-bottom:2px solid var(--line);margin:8px 0;font-size:1.05rem;"><span>TOTAL</span><span>${fmt(bill.total)}</span></div>
-          ${bill.refund_reason ? `<div style="background:#fef3c7;padding:10px;border-radius:8px;margin:10px 0;font-size:0.85rem;"><strong>Refunded:</strong> ${escapeHtml(bill.refund_reason)}<br><small>by ${escapeHtml(bill.refunded_by_name || '-')} on ${formatDateTime(bill.refunded_at)}</small></div>` : ''}
+          ${bill.refund_reason ? `<div style="background:#fef3c7;padding:10px;border-radius:8px;margin:10px 0;font-size:0.85rem;"><strong>Refunded:</strong> ${escapeHtml(bill.refund_reason)}<br><small>by ${escapeHtml(bill.refunded_by_name || '-')} on ${formatDateTime(bill.refunded_at)} · ${bill.refund_restocked ? 'items put back into stock' : 'items NOT put back into stock'}</small></div>` : ''}
           <div class="btn-row" style="margin-top:14px;">
             <button class="btn btn-outline" onclick="reprint(${id})">Reprint</button>
-            ${canRefund ? `<button class="btn btn-danger" onclick="refundBill(this, ${id}, ${bill.total})">Refund</button>` : ''}
+            ${canRefund ? `<button class="btn btn-danger" onclick="$('refund-panel').style.display='block'">Refund…</button>` : ''}
           </div>
+          ${canRefund ? `
+            <div id="refund-panel" style="display:none;margin-top:12px;padding:12px;border:1.5px solid var(--red);border-radius:10px;">
+              <div style="font-weight:700;color:var(--red);margin-bottom:8px;">Refund ${fmt(bill.total)}</div>
+              <div class="field"><label>Reason (required)</label><input type="text" id="refund-reason" placeholder="e.g., cake damaged"></div>
+              ${fromPreorder
+                ? `<div style="color:var(--ink-soft);font-size:0.8rem;margin-bottom:10px;">From a pre-order collection — that never took anything out of stock, so nothing is put back.</div>`
+                : `<div class="field"><label style="display:flex;gap:8px;align-items:flex-start;"><input type="checkbox" id="refund-restock" style="width:auto;margin-top:3px;"> <span>Put items back into stock<br><small style="color:var(--ink-soft);font-weight:400;">Only if they go back on the shelf to sell again. Leave off for returned or damaged items.</small></span></label></div>`}
+              <button class="btn btn-danger" onclick="refundBill(this, ${id}, ${bill.total})">Confirm refund</button>
+            </div>` : ''}
           <button class="btn btn-outline" style="margin-top:8px;" onclick="closeSheet('bill-sheet')">Close</button>`;
         openSheet('bill-sheet');
       } catch (err) { toast(err.message, 'error'); }
@@ -111,17 +128,18 @@
       } catch (err) { toast(err.message, 'error'); }
     }
 
-    // The prompt and confirm stay outside the guard: neither writes anything, and
-    // cancelling either must not leave the button disabled.
+    // The checks and the confirm stay outside the guard: none of them writes, and
+    // cancelling the confirm must not leave the button disabled. Restock is OFF
+    // unless the box was ticked; a pre-order bill has no box, so it is always off.
     async function refundBill(btn, id, total) {
-      const reason = prompt(`Refund Rs. ${total.toFixed(2)} — reason (required):`);
-      if (reason === null) return;
-      const trimmed = reason.trim();
+      const trimmed = $('refund-reason').value.trim();
       if (!trimmed) { toast('Reason is required', 'error'); return; }
-      if (!confirm('Refund this bill? Stock will be restored.')) return;
+      const box = $('refund-restock');
+      const restock = !!(box && box.checked);
+      if (!confirm(`Refund Rs. ${total.toFixed(2)}?\n${restock ? 'Items WILL be put back into stock.' : 'Items will NOT be put back into stock.'}`)) return;
       await withBusy(btn, async () => {
-        await api(`/api/pos/bills/${id}/refund`, { method: 'POST', body: { reason: trimmed } });
-        toast('Bill refunded');
+        const r = await api(`/api/pos/bills/${id}/refund`, { method: 'POST', body: { reason: trimmed, restock } });
+        toast(r.restocked ? 'Bill refunded — items back in stock' : 'Bill refunded — stock unchanged');
         closeSheet('bill-sheet');
         loadBills();
       }, 'Refunding…');

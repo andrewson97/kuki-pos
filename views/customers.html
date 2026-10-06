@@ -129,7 +129,7 @@
           <td>#${String(o.token_number).padStart(3,'0')}</td>
           <td>${formatDate(o.bill_date)}</td>
           <td class="fw-bold">${formatCurrency(o.total)}</td>
-          <td><span class="badge bg-info">${o.payment_method}</span></td>
+          <td><span class="badge bg-info">${o.payment_method === 'upi' ? 'LankaQR' : o.payment_method}</span></td>
           <td><span class="badge bg-${o.status === 'completed' ? 'success' : 'danger'}">${o.status}</span></td>
         </tr>
       `).join('') || '<tr><td colspan="5" class="text-center text-muted">No orders yet</td></tr>';

@@ -431,30 +431,151 @@ interface CreateBillParams {
   // cart id carrying a different sale is billed normally. See the gate at the
   // top of the transaction below.
   cart_id?: string | null;
+  // Bill WITHOUT checking or deducting stock. Only for a pre-order collection
+  // (src/routes/preorders.ts): the owner never enters pre-ordered goods as
+  // stock — they are baked or bought in for that customer — so even a
+  // catalogue line whose product has track_stock = 1 must neither be refused
+  // for "out of stock" nor push the shelf count negative. Holds are still
+  // released and everything else (token, lines, cost price, log) is unchanged.
+  // Not part of the fingerprint: it changes what happens to the shelf, not
+  // which sale this is.
+  skip_stock?: boolean;
 }
 
+// ---------------------------------------------------------------------------
+// MONEY: rounded to the cent, once, in one place
+// ---------------------------------------------------------------------------
+// Rupees and cents are what change hands, but floating point does not know
+// that: 3 x 36.558 is 109.674, a 2.5% tax on 438.7 is 10.9675, and the till
+// used to show "109.67" while comparing the tender against 109.674 — so
+// "Rs 109.67 given" for a "Rs 109.67" bill read as short by a fraction of a
+// cent, and the stored total disagreed with the printed one. Every money
+// figure the server computes now goes through round2(), and the tills
+// (views/pos.html, views/m-pos.html) apply the SAME formula in the same order,
+// so the figure on screen, on the slip and in the database is one number.
+//
+// Number.EPSILON nudges the exact-half cases the right way: 1.005 is stored as
+// 1.00499999999999989..., which plain Math.round(x * 100) would round DOWN.
+export function round2(x: number): number {
+  return Math.round((x + Number.EPSILON) * 100) / 100;
+}
+
+/** Half a cent: a discount within this of the subtotal is the subtotal. */
+const DISCOUNT_TOLERANCE = 0.005;
+
+export interface BillTotals {
+  /** round2(quantity * unit_price) per line, in the order given. */
+  lineTotals: number[];
+  subtotal: number;
+  /** The discount as charged — rounded to the cent. */
+  discount: number;
+  tax_amount: number;
+  total: number;
+}
+
+/**
+ * Validate a sale's lines and discount, and work out its money — the ONE
+ * definition, shared by createBill() and the proforma slip (POST
+ * /api/pos/proforma), so the figure on a pre-payment slip can never drift from
+ * the figure charged a minute later. The proforma used to carry a line-for-line
+ * copy of this arithmetic with a "keep in step" note; a shared function keeps
+ * itself in step.
+ *
+ * Throws a plain Error with a cashier-readable message on bad input; both
+ * routes turn a throw into a 400 carrying that message.
+ *
+ * WHY THE CHECKS EXIST. Nothing used to stop a discount larger than the bill
+ * (a typo of 1500 for 150 on a Rs 900 sale): the total went negative, the
+ * "change" maths ran on a negative figure, and a negative sale landed in the
+ * day's takings. A negative discount quietly SURCHARGED the customer. A line
+ * with quantity 0, -1 or NaN — reachable from any client that is not our own
+ * till — wrote a bill line that sold nothing or "sold" a negative amount and
+ * put stock BACK on the shelf. None of those is a sale, so none is billed.
+ */
+export function computeBillTotals(
+  items: { product_name?: string; quantity: number; unit_price: number }[],
+  discount: unknown,
+  tax_rate: number
+): BillTotals {
+  if (!Array.isArray(items) || items.length === 0) throw new Error("No items in bill");
+  items.forEach((item, idx) => {
+    const label = `Line ${idx + 1}${item?.product_name ? ` (${item.product_name})` : ""}`;
+    // typeof first: a string "2" would multiply fine here and then be stored
+    // as text, so only real numbers are accepted. Our tills always send them.
+    if (typeof item?.quantity !== "number" || !Number.isFinite(item.quantity) || item.quantity <= 0) {
+      throw new Error(`${label}: the quantity must be a number greater than 0.`);
+    }
+    if (typeof item?.unit_price !== "number" || !Number.isFinite(item.unit_price) || item.unit_price < 0) {
+      throw new Error(`${label}: the price must be a number of 0 or more.`);
+    }
+  });
+
+  const lineTotals = items.map((item) => round2(item.quantity * item.unit_price));
+  const subtotal = round2(lineTotals.reduce((sum, t) => sum + t, 0));
+
+  // Absent / empty means no discount, as it always has (the routes pass
+  // `body.discount || 0`). Anything else must be a real figure.
+  const rawDiscount = discount == null || discount === "" ? 0 : Number(discount);
+  if (!Number.isFinite(rawDiscount)) throw new Error("The discount must be a number.");
+  if (rawDiscount < 0) throw new Error("The discount cannot be negative.");
+  // Compared AFTER rounding to the cent, with half a cent of slack, so a
+  // discount the till worked out as exactly the subtotal (a 100% discount
+  // typed as a percentage) is accepted however the float came out.
+  const disc = round2(rawDiscount);
+  if (disc > subtotal + DISCOUNT_TOLERANCE) {
+    throw new Error(
+      `The discount (${disc.toFixed(2)}) is more than the bill's subtotal (${subtotal.toFixed(2)}). Reduce the discount.`
+    );
+  }
+
+  // Same operands in the same order as before, each step now rounded. With
+  // the discount capped at the subtotal the taxable amount can no longer go
+  // negative; Math.max only guards the half-cent tolerance above.
+  const taxableAmount = Math.max(0, round2(subtotal - disc));
+  const tax_amount = round2(taxableAmount * (tax_rate / 100));
+  const total = round2(taxableAmount + tax_amount);
+  return { lineTotals, subtotal, discount: disc, tax_amount, total };
+}
+
+
+// CALLING THIS INSIDE YOUR OWN TRANSACTION is supported, and is what the
+// pre-order collect route does so that "bill written" and "order marked
+// collected" commit together or not at all. bun:sqlite turns a transaction
+// started while one is already open into a SAVEPOINT — including the
+// .immediate() variant below, whose BEGIN IMMEDIATE is simply not issued when
+// nested (verified against bun 1.3: an inner throw rolls back only the inner
+// savepoint, an inner success is committed or rolled back with the outer
+// transaction). So the caller must open its outer transaction with
+// .immediate() itself; that is what then holds the write lock across both.
 export function createBill(params: CreateBillParams): CreatedBill {
   const db = getDb();
   const { items, customer_id, discount, tax_rate, payment_method, user_id, amount_given, cart_id } = params;
   const cartId = String(cart_id || "").trim();
+
+  // Validation runs FIRST, before the fingerprint, the token or the
+  // transaction: a sale that cannot be billed must not burn a token, and
+  // computeBillTotals() throws before anything is read or written. A genuine
+  // resubmission is the same body as the first attempt, which passed these
+  // very checks, so the replay path below is unaffected.
+  const { lineTotals, subtotal, discount: discountCharged, tax_amount, total } = computeBillTotals(items, discount, tax_rate);
+
   // Computed from the RESOLVED params — the tax rate the caller settled on, the
   // payment method it will store — so the hash describes the sale that is about
   // to be written, not the raw request. Only meaningful alongside a cart id, so
   // it is left empty (stored as NULL) when there is no key to pair it with.
+  // Hashed from the discount AS SENT, not the rounded one: POST /bill and POST
+  // /bill/status hash the raw request body too, and all three must agree.
   const fingerprint = cartId ? saleFingerprint({ items, customer_id, discount, tax_rate, payment_method, amount_given }) : "";
 
-  const subtotal = items.reduce((sum, item) => sum + item.quantity * item.unit_price, 0);
-  const taxableAmount = subtotal - discount;
-  const tax_amount = taxableAmount * (tax_rate / 100);
-  const total = taxableAmount + tax_amount;
   const token_number = getNextTokenNumber();
   const bill_date = todayDate();
 
-  const changeGiven = amount_given != null ? Math.max(0, amount_given - total) : null;
+  // amount_given itself is stored as tendered; only the change is computed.
+  const changeGiven = amount_given != null ? round2(Math.max(0, amount_given - total)) : null;
 
   const insertBill = db.query(`
-    INSERT INTO bills (token_number, bill_date, customer_id, subtotal, discount, tax_rate, tax_amount, total, payment_method, status, user_id, amount_given, change_given, cart_id, cart_fingerprint)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'completed', ?, ?, ?, ?, ?)
+    INSERT INTO bills (token_number, bill_date, customer_id, subtotal, discount, tax_rate, tax_amount, total, payment_method, status, user_id, amount_given, change_given, cart_id, cart_fingerprint, stock_skipped)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'completed', ?, ?, ?, ?, ?, ?)
   `);
 
   const insertItem = db.query(`
@@ -526,7 +647,9 @@ export function createBill(params: CreateBillParams): CreatedBill {
     // times in the cart or across item+component sums correctly.
     // Shared with cart reservations (src/services/reservations.ts) so a hold
     // and a deduction can never disagree about what a cake consumes.
-    const needs = computeStockNeeds(items);
+    // skip_stock: no needs at all, so neither the check nor the deduction below
+    // runs. See the option's note on CreateBillParams.
+    const needs: ReturnType<typeof computeStockNeeds> = params.skip_stock ? new Map() : computeStockNeeds(items);
 
     // Validate every aggregated need against stock that is actually ours to
     // take: on-hand minus whatever OTHER carts are holding. With no holds in
@@ -541,7 +664,9 @@ export function createBill(params: CreateBillParams): CreatedBill {
 
     const result = insertBill.run(
       token_number, bill_date, customer_id || null,
-      subtotal, discount, tax_rate, tax_amount, total,
+      // The rounded, validated figures from computeBillTotals() — the discount
+      // as charged, not as typed.
+      subtotal, discountCharged, tax_rate, tax_amount, total,
       payment_method, user_id, amount_given ?? null, changeGiven,
       // Empty string would make every keyless till collide with every other one
       // under the UNIQUE index, so "no cart id" is stored as NULL — which the
@@ -551,16 +676,23 @@ export function createBill(params: CreateBillParams): CreatedBill {
       // keeps the (cart_id, cart_fingerprint) uniqueness effective, since a row
       // with a NULL fingerprint sits outside it. NULL only for keyless bills,
       // which are not deduped at all, and for rows that predate the column.
-      fingerprint || null
+      fingerprint || null,
+      // Recorded on the bill so Stock History can tell a sale that took stock
+      // from one that never did (a pre-order collection, see skip_stock). It
+      // cannot be inferred from the cart id: collections rung up before
+      // skip_stock existed DID deduct stock, and their history must stay.
+      params.skip_stock ? 1 : 0
     );
     const billId = Number(result.lastInsertRowid);
 
-    for (const item of items) {
+    items.forEach((item, idx) => {
       const product = db.query("SELECT cost_price FROM products WHERE id = ?").get(item.product_id) as any;
       const costPrice = product?.cost_price || 0;
       const original = item.original_price ?? item.unit_price;
-      insertItem.run(billId, item.product_id, item.product_name, item.quantity, item.unit_price, original, costPrice, item.quantity * item.unit_price);
-    }
+      // lineTotals[idx] is round2(quantity * unit_price): the same cent-rounded
+      // figure the subtotal was summed from, so the lines add up to it exactly.
+      insertItem.run(billId, item.product_id, item.product_name, item.quantity, item.unit_price, original, costPrice, lineTotals[idx]);
+    });
 
     // Deduct all aggregated needs in one pass. `needs` covers the products sold
     // AND the components of composite products, so stamping stock_updated_at

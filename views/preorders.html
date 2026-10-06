@@ -151,14 +151,14 @@
           <div class="alert alert-light border mb-3" id="pay-order-line"></div>
           <div class="mb-3">
             <label class="form-label">Amount</label>
-            <input type="number" class="form-control form-control-lg" id="pay-amount" min="0" step="0.01">
+            <input type="number" class="form-control form-control-lg" id="pay-amount" min="0" step="any">
           </div>
           <div class="mb-3">
             <label class="form-label">Method</label>
             <select class="form-select" id="pay-method">
               <option value="cash">Cash</option>
               <option value="card">Card</option>
-              <option value="upi">UPI</option>
+              <option value="upi">LankaQR</option>
             </select>
           </div>
           <div class="mb-0">
@@ -169,6 +169,51 @@
         <div class="modal-footer">
           <button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
           <button class="btn btn-success" id="btn-pay-save" onclick="submitPayment(this)">Record payment</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Cancel (admin): an order with money on it cannot be cancelled without
+       deciding what happens to that money - see POST /:id/cancel. -->
+  <div class="modal fade" id="cancelModal" tabindex="-1">
+    <div class="modal-dialog">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title" id="cancel-title">Cancel pre-order</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body">
+          <input type="hidden" id="cancel-id">
+          <div class="alert alert-light border mb-3" id="cancel-order-line"></div>
+          <div class="mb-3">
+            <label class="form-label">Reason (optional)</label>
+            <input type="text" class="form-control" id="cancel-reason" maxlength="500" placeholder="e.g. customer changed the date, no show">
+          </div>
+          <div id="cancel-deposit-wrap">
+            <label class="form-label fw-bold mb-1">Deposit of <span id="cancel-paid"></span> - what happens to it?</label>
+            <div class="form-check">
+              <input class="form-check-input" type="radio" name="cancel-action" id="cancel-action-refund" value="refund" onchange="syncCancelChoice()">
+              <label class="form-check-label" for="cancel-action-refund">Refund it to the customer</label>
+            </div>
+            <div class="ms-4 mb-2" id="cancel-refund-wrap">
+              <select class="form-select form-select-sm" id="cancel-refund-method" style="max-width:220px;">
+                <option value="cash">Cash - from the drawer</option>
+                <option value="card">Card</option>
+                <option value="upi">LankaQR</option>
+              </select>
+              <div class="small text-muted mt-1">A cash refund comes out of the drawer for this shift. It is not an expense.</div>
+            </div>
+            <div class="form-check">
+              <input class="form-check-input" type="radio" name="cancel-action" id="cancel-action-keep" value="keep" onchange="syncCancelChoice()">
+              <label class="form-check-label" for="cancel-action-keep">Keep it (customer forfeits the deposit)</label>
+            </div>
+            <div class="ms-4 small text-muted">Recorded as today's income. No money moves.</div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" data-bs-dismiss="modal">Back</button>
+          <button class="btn btn-danger" id="btn-cancel-save" onclick="submitCancel(this)">Cancel order</button>
         </div>
       </div>
     </div>
@@ -187,19 +232,19 @@
           <div class="row g-2 mt-2">
             <div class="col-md-4">
               <label class="form-label">Discount</label>
-              <input type="number" class="form-control" id="collect-discount" min="0" step="0.01" value="0" oninput="recalcCollect()">
+              <input type="number" class="form-control" id="collect-discount" min="0" step="any" value="0" oninput="recalcCollect()">
             </div>
             <div class="col-md-4">
               <label class="form-label">Payment method</label>
               <select class="form-select" id="collect-method" onchange="recalcCollect()">
                 <option value="cash">Cash</option>
                 <option value="card">Card</option>
-                <option value="upi">UPI</option>
+                <option value="upi">LankaQR</option>
               </select>
             </div>
             <div class="col-md-4" id="collect-cash-wrap">
               <label class="form-label">Cash received</label>
-              <input type="number" class="form-control" id="collect-cash" min="0" step="0.01" placeholder="optional" oninput="recalcCollect()">
+              <input type="number" class="form-control" id="collect-cash" min="0" step="any" placeholder="optional" oninput="recalcCollect()">
             </div>
           </div>
           <div id="collect-summary" class="mt-3"></div>
@@ -217,12 +262,12 @@
     <div class="modal-dialog">
       <div class="modal-content">
         <div class="modal-header">
-          <h5 class="modal-title">Receipt</h5>
+          <h5 class="modal-title" id="receipt-title">Receipt</h5>
           <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
         </div>
         <div class="modal-body">
           <div class="text-center mb-3">
-            <img src="/public/img/kuki_logo.png" alt="KUKI" style="max-width:140px;max-height:100px;display:block;margin:0 auto 8px;">
+            <img id="receipt-logo" src="/public/img/kuki_logo.png" alt="KUKI" style="max-width:140px;max-height:100px;display:block;margin:0 auto 8px;">
             <span class="badge bg-success fs-5" id="receipt-token">Receipt</span>
             <div class="mt-2 fs-4 fw-bold" id="receipt-headline"></div>
           </div>
@@ -258,6 +303,7 @@
     let collectOrder = null;
     let lastReceiptText = '';
     let lastKitchenText = '';
+    let lastNoLogo = false;
 
     const isAdmin = () => !!currentUser && currentUser.role === 'admin';
 
@@ -316,6 +362,27 @@
 
     function statusBadge(o) {
       return `<span class="badge ${STATUS_CLASS[o.status] || 'bg-secondary'}">${escapeHtml(STATUS_LABEL[o.status] || o.status)}</span>`;
+    }
+
+    // 'upi' is what is stored (the CHECK constraints and every report key on
+    // it), but the shop and its customers call the QR payment LankaQR.
+    function methodLabel(m) {
+      const v = String(m || '').toLowerCase();
+      return v === 'upi' ? 'LankaQR' : v === 'card' ? 'Card' : v === 'cash' ? 'Cash' : String(m || '-');
+    }
+
+    // What became of a cancelled order's deposit. Cancelling now has to settle
+    // it (refund or keep), so a cancelled order with money on it says which; an
+    // order cancelled before that rule existed says it was never settled,
+    // rather than letting money owed back disappear from the screen.
+    function depositOutcomeText(o) {
+      if (o.status !== 'cancelled') return '';
+      if (o.deposit_outcome === 'refunded') {
+        return `deposit ${formatCurrency(o.deposit_settled_amount)} refunded (${methodLabel(o.deposit_refund_method)})`;
+      }
+      if (o.deposit_outcome === 'kept') return `deposit ${formatCurrency(o.deposit_settled_amount)} kept as income`;
+      if (o.amount_paid > 0) return `deposit ${formatCurrency(o.amount_paid)} not settled`;
+      return 'no deposit to settle';
     }
 
     // ===== Boot ===========================================================
@@ -389,8 +456,13 @@
         p.set('status', 'open');
         p.set('sort', 'due');
       } else if (view === 'today') {
-        p.set('date', 'today');
-        p.set('status', 'all');
+        // The production list: what still has to be made or handed over today.
+        // Only taken/ready - a collected or cancelled cake is not kitchen work -
+        // and everything due up to today, so an order that was due last Friday
+        // and never collected is on the list (in the red OVERDUE group) instead
+        // of dropping off it the morning after.
+        p.set('to', 'today');
+        p.set('status', 'open');
         p.set('sort', 'due');
       } else if (view === 'overdue') {
         p.set('overdue', '1');
@@ -426,7 +498,7 @@
       const area = document.getElementById('orders-area');
       if (!orders.length) {
         const msg = view === 'overdue' ? 'Nothing overdue — every order is either still to come or settled.'
-          : view === 'today' ? 'Nothing due today.'
+          : view === 'today' ? 'Nothing to make or hand over today, and nothing overdue.'
           : view === 'work' ? 'Nothing outstanding — there is no cake to make.'
           : 'No orders match that search.';
         area.innerHTML = `<div class="text-center text-muted py-5">${escapeHtml(msg)}</div>`;
@@ -489,7 +561,7 @@
       const moneyTail = o.status === 'collected'
         ? '<span class="text-success">settled by bill</span>'
         : o.status === 'cancelled'
-          ? '<span class="text-muted">not collected</span>'
+          ? `<span class="${o.amount_paid > 0 && !o.deposit_outcome ? 'text-danger' : 'text-muted'}">not collected · ${escapeHtml(depositOutcomeText(o))}</span>`
           : `balance <strong class="${o.balance > 0 ? 'text-danger' : 'text-success'}">${escapeHtml(formatCurrency(o.balance))}</strong>`;
       return `
         <div class="po-card ${cls}">
@@ -503,7 +575,7 @@
             </div>
             <div class="text-end">
               ${statusBadge(o)}
-              ${o.is_overdue ? `<span class="badge bg-danger ms-1">${escapeHtml(lateText(o.collection_date))}</span>` : ''}
+              ${o.is_overdue ? `<span class="badge bg-danger ms-1">OVERDUE · ${escapeHtml(lateText(o.collection_date))}</span>` : ''}
               <div class="po-money mt-1">
                 <strong>${escapeHtml(formatCurrency(o.total))}</strong> · ${paidBit} · ${moneyTail}
               </div>
@@ -579,7 +651,7 @@
       const payments = (o.payments || []).map(p => `
         <tr>
           <td>${escapeHtml(formatBizDate(p.paid_on))}</td>
-          <td>${escapeHtml(String(p.payment_method || '').toUpperCase())}</td>
+          <td>${escapeHtml(methodLabel(p.payment_method))}</td>
           <td>${escapeHtml(p.taken_by || '-')}</td>
           <td class="text-end">${escapeHtml(formatCurrency(p.amount))}</td>
           <td class="text-end">${isAdmin() && o.status !== 'collected'
@@ -617,6 +689,9 @@
             ${o.status === 'collected'
               ? `<tr class="fw-bold text-success"><td colspan="3" class="text-end">Settled</td><td class="text-end">on the bill</td></tr>`
               : `<tr class="fw-bold ${o.balance > 0 ? 'text-danger' : 'text-success'}"><td colspan="3" class="text-end">${o.status === 'cancelled' ? 'Was outstanding' : 'Balance'}</td><td class="text-end">${escapeHtml(formatCurrency(o.balance))}</td></tr>`}
+            ${o.status === 'cancelled'
+              ? `<tr class="${o.amount_paid > 0 && !o.deposit_outcome ? 'text-danger fw-bold' : ''}"><td colspan="3" class="text-end">Deposit on cancelling</td><td class="text-end">${escapeHtml(depositOutcomeText(o))}${o.deposit_settled_at ? `<br><small class="text-muted">${escapeHtml(formatDateTime(o.deposit_settled_at))}</small>` : ''}</td></tr>`
+              : ''}
           </tfoot>
         </table>
         ${o.notes ? `<div class="po-note mb-3">${escapeHtml(o.notes)}</div>` : ''}
@@ -628,7 +703,7 @@
         ${o.bill ? `
           <div class="alert alert-secondary py-2">
             Billed as token #${escapeHtml(String(o.bill.token_number).padStart(3, '0'))} on ${escapeHtml(formatDateTime(o.bill.created_at))} ·
-            ${escapeHtml(formatCurrency(o.bill.total))} · ${escapeHtml(String(o.bill.payment_method || '').toUpperCase())}
+            ${escapeHtml(formatCurrency(o.bill.total))} · ${escapeHtml(methodLabel(o.bill.payment_method))}
             <button class="btn btn-sm btn-outline-secondary ms-2" onclick="viewBillReceipt(${o.bill.id}, ${o.bill.token_number})">Receipt</button>
           </div>` : ''}
         ${isOpen(o) ? '' : `<div class="po-readonly">This order is ${escapeHtml(STATUS_LABEL[o.status] || o.status)}: it is read-only and cannot be edited, paid or collected.</div>`}`;
@@ -644,17 +719,55 @@
     }
 
     // ===== Cancel (admin) ================================================
-    async function cancelOrder(id, btn) {
-      // prompt/confirm stay OUTSIDE the guard: neither writes anything, and
-      // backing out of either must not leave the button disabled.
-      const reason = prompt('Why is this order being cancelled? (optional)');
-      if (reason === null) return;
-      if (!confirm('Cancel this pre-order?\nAny deposit already taken stays on the books and has to be paid back as a cash expense.')) return;
+    // Cancelling an order that has money on it means deciding, there and then,
+    // what happens to that money: refund it (and how), or keep it. The server
+    // refuses a cancel that does not say, so the choice is asked up front
+    // rather than discovered from an error. An order with nothing paid just
+    // needs the reason.
+    let cancelPaid = 0;
+    function cancelOrder(id) {
+      const o = orders.find(x => x.id === id);
+      if (!o) { showToast('Refresh the list and try again', 'error'); return; }
+      cancelPaid = Number(o.amount_paid || 0);
+      document.getElementById('cancel-id').value = String(id);
+      document.getElementById('cancel-title').textContent = `Cancel pre-order #${id}`;
+      document.getElementById('cancel-order-line').innerHTML = `
+        <strong>${escapeHtml(o.customer_name || 'Customer')}</strong> ·
+        ${escapeHtml(dayLabel(o.collection_date))} ·
+        order ${escapeHtml(formatCurrency(o.total))} ·
+        paid ${escapeHtml(formatCurrency(cancelPaid))}`;
+      document.getElementById('cancel-reason').value = '';
+      document.getElementById('cancel-paid').textContent = formatCurrency(cancelPaid);
+      document.getElementById('cancel-deposit-wrap').style.display = cancelPaid > 0 ? '' : 'none';
+      document.getElementById('cancel-action-refund').checked = false;
+      document.getElementById('cancel-action-keep').checked = false;
+      document.getElementById('cancel-refund-method').value = 'cash';
+      syncCancelChoice();
+      new bootstrap.Modal(document.getElementById('cancelModal')).show();
+    }
+
+    function syncCancelChoice() {
+      const refund = document.getElementById('cancel-action-refund').checked;
+      document.getElementById('cancel-refund-wrap').style.display = refund ? '' : 'none';
+    }
+
+    async function submitCancel(btn) {
+      const id = parseInt(document.getElementById('cancel-id').value, 10);
+      const body = { reason: document.getElementById('cancel-reason').value.trim() };
+      if (cancelPaid > 0) {
+        const picked = document.querySelector('input[name="cancel-action"]:checked');
+        if (!picked) { showToast('Choose whether the deposit is refunded or kept', 'error'); return; }
+        body.deposit_action = picked.value;
+        if (picked.value === 'refund') body.refund_method = document.getElementById('cancel-refund-method').value;
+      }
       await withBusy(btn, async () => {
-        const res = await api(`/api/preorders/${id}/cancel`, { method: 'POST', body: { reason: reason.trim() } });
-        showToast(res.refund_due > 0
-          ? `Cancelled — ${formatCurrency(res.refund_due)} of deposit is refundable`
-          : 'Order cancelled');
+        const res = await api(`/api/preorders/${id}/cancel`, { method: 'POST', body });
+        const s = res.deposit_settled;
+        showToast(!s ? 'Order cancelled'
+          : s.outcome === 'refunded'
+            ? `Cancelled — refund ${formatCurrency(s.amount)} to the customer (${methodLabel(res.deposit_refund_method)})`
+            : `Cancelled — ${formatCurrency(s.amount)} deposit kept and recorded as income`);
+        bootstrap.Modal.getInstance(document.getElementById('cancelModal')).hide();
         await loadAll();
       }, 'Cancelling...');
     }
@@ -697,9 +810,23 @@
         paid_on: document.getElementById('pay-date').value || todayISO(),
       };
       await withBusy(btn, async () => {
-        await api(`/api/preorders/${id}/payments`, { method: 'POST', body });
+        const res = await api(`/api/preorders/${id}/payments`, { method: 'POST', body });
         showToast(`${formatCurrency(amount)} recorded`);
         bootstrap.Modal.getInstance(document.getElementById('paymentModal')).hide();
+        // The customer's proof of payment. The server has already queued it on
+        // the shop printer; this shows it, with the same print button as a
+        // receipt for shops printing from the browser. No logo: the slip names
+        // the shop in text, and a logo-topped slip would pass for a receipt.
+        if (res && res.slip_text) {
+          showReceipt({
+            title: 'Deposit slip',
+            badge: `Pre-order #${id}`,
+            headline: `${formatCurrency(amount)} taken · balance ${formatCurrency(res.balance)}`,
+            receipt: res.slip_text,
+            kitchen: '',
+            noLogo: true,
+          });
+        }
         await loadAll();
       }, 'Saving...');
     }
@@ -820,13 +947,18 @@
     }
 
     // ===== Receipt ========================================================
+    // Also shows a deposit slip: o.title / o.badge replace "Receipt" / the
+    // token, and o.noLogo keeps the logo off both the screen and the printout.
     function showReceipt(o) {
-      document.getElementById('receipt-token').textContent =
-        o.token == null ? 'Receipt' : `Token #${String(o.token).padStart(3, '0')}`;
+      document.getElementById('receipt-title').textContent = o.title || 'Receipt';
+      document.getElementById('receipt-logo').style.display = o.noLogo ? 'none' : '';
+      document.getElementById('receipt-token').textContent = o.badge
+        || (o.token == null ? 'Receipt' : `Token #${String(o.token).padStart(3, '0')}`);
       document.getElementById('receipt-headline').textContent = o.headline || '';
       document.getElementById('receipt-text').textContent = o.receipt || '';
       lastReceiptText = o.receipt || '';
       lastKitchenText = o.kitchen || '';
+      lastNoLogo = !!o.noLogo;
       new bootstrap.Modal(document.getElementById('receiptModal')).show();
     }
 
@@ -846,7 +978,7 @@
     async function printSlip(which) {
       const text = which === 'kitchen' ? lastKitchenText : lastReceiptText;
       if (!text) { showToast(`No ${which} copy available`, 'warning'); return; }
-      await openAndPrint(text, which !== 'kitchen');
+      await openAndPrint(text, which !== 'kitchen' && !lastNoLogo);
     }
 
     async function openAndPrint(text, withLogo) {
@@ -927,7 +1059,7 @@
                    placeholder="What the customer ordered" oninput="onLineChange(${i}, 'description', this.value)">
             <input type="number" class="form-control" style="width:90px;" min="1" step="1" value="${escapeHtml(String(l.quantity))}"
                    title="Quantity" oninput="onLineChange(${i}, 'quantity', this.value)">
-            <input type="number" class="form-control" style="width:120px;" min="0" step="0.01" value="${escapeHtml(String(l.unit_price))}"
+            <input type="number" class="form-control" style="width:120px;" min="0" step="any" value="${escapeHtml(String(l.unit_price))}"
                    title="Unit price" oninput="onLineChange(${i}, 'unit_price', this.value)">
             <button class="btn btn-outline-danger" title="Remove line" onclick="removeLine(${i})">&times;</button>
           </div>`).join('');

@@ -43,13 +43,23 @@
     <div class="card">
       <h2 id="form-title">Counting…</h2>
       <div id="denom-list"></div>
-      <div class="summary-row bold"><span>Counted Total</span><span id="counted-total">${currency}0.00</span></div>
+      <div class="denom-row">
+        <div class="label">Coins</div>
+        <div class="qty-controls">
+          <input type="number" class="qty-input" id="coins-total" min="0" step="any" value="0" inputmode="decimal" placeholder="Coins total (Rs)" aria-label="Coins total (Rs)" oninput="recalc()">
+        </div>
+        <div class="line-total" id="lt-coins">Rs. 0.00</div>
+      </div>
+      <div class="summary-row bold"><span>Counted Total</span><span id="counted-total">Rs. 0.00</span></div>
 
       <div id="expected-block" style="display:none;margin-top:14px;">
         <div class="summary-row"><span style="color:var(--ink-soft);">Opening</span><span id="exp-opening">-</span></div>
         <div class="summary-row"><span style="color:var(--ink-soft);">+ Cash sales</span><span id="exp-sales">-</span></div>
         <div class="summary-row"><span style="color:var(--ink-soft);">- Refunds</span><span id="exp-refunds">-</span></div>
         <div class="summary-row"><span style="color:var(--ink-soft);">- Expenses</span><span id="exp-expenses">-</span></div>
+        <div class="summary-row"><span style="color:var(--ink-soft);">+ Deposits taken (cash)</span><span id="exp-dep-taken">-</span></div>
+        <div class="summary-row"><span style="color:var(--ink-soft);">- Deposits applied at collection</span><span id="exp-dep-applied">-</span></div>
+        <div class="summary-row" id="row-dep-refunded" style="display:none;"><span style="color:var(--ink-soft);">- Deposits refunded (cash)</span><span id="exp-dep-refunded">-</span></div>
         <div class="summary-row bold"><span>Expected</span><span id="exp-expected">-</span></div>
         <div class="summary-row bold" style="font-size:1.1rem;"><span>Variance</span><strong id="exp-variance">-</strong></div>
       </div>
@@ -97,6 +107,16 @@
       recalc();
     }
 
+    // Money is compared to the cent. Floats summed in the browser leave tails
+    // like 4999.999999, so `v === 0` called an exact count "short".
+    function money(n) { return Math.round((Number(n) || 0) * 100) / 100; }
+    function isNil(v) { return Math.abs(Number(v) || 0) < 0.005; }
+
+    function coinsValue() {
+      const v = parseFloat($('coins-total').value);
+      return Number.isFinite(v) && v > 0 ? money(v) : 0;
+    }
+
     function recalc() {
       let total = 0;
       DENOMS.forEach(d => {
@@ -105,13 +125,18 @@
         total += line;
         $('lt_' + d).textContent = fmt(line);
       });
+      const coins = coinsValue();
+      $('lt-coins').textContent = fmt(coins);
+      total = money(total + coins);
       $('counted-total').textContent = fmt(total);
+      // Variance against the SERVER's expected figure (expected_now), never one
+      // re-derived here: this page used to leave the pre-order deposits out, so
+      // the screen and the stored close disagreed on any day with a deposit.
       if (mode === 'close' && todayData) {
-        const expected = (todayData.open?.total_amount || 0) + (todayData.cash_sales || 0) - (todayData.cash_refunds || 0) - (todayData.cash_expenses || 0);
-        const v = total - expected;
+        const v = money(total - (todayData.expected_now || 0));
         const el = $('exp-variance');
-        el.textContent = (v > 0 ? '+' : '') + fmt(v);
-        el.style.color = v === 0 ? 'var(--green)' : v > 0 ? 'var(--amber)' : 'var(--red)';
+        el.textContent = isNil(v) ? fmt(0) : (v > 0 ? '+' : '') + fmt(v);
+        el.style.color = isNil(v) ? 'var(--green)' : v > 0 ? 'var(--amber)' : 'var(--red)';
       }
     }
 
@@ -124,9 +149,12 @@
       } else if (todayData.shift_open) {
         el.innerHTML = `<div class="card" style="border-left:4px solid var(--amber);background:#fffbeb;"><strong>🟡 Shift in progress.</strong><br><span style="font-size:0.85rem;">Opening float ${fmt(todayData.open.total_amount)} by ${escapeHtml(todayData.open.user_name)} at ${formatTime(todayData.open.created_at)}.</span></div>`;
       } else {
-        const v = todayData.close.variance;
-        const word = v === 0 ? 'matched exactly' : v > 0 ? `over by ${fmt(Math.abs(v))}` : `short by ${fmt(Math.abs(v))}`;
-        el.innerHTML = `<div class="card" style="border-left:4px solid var(--green);background:var(--green-soft);"><strong>✅ Last shift closed.</strong><br><span style="font-size:0.85rem;">Counted ${fmt(todayData.close.total_amount)}, ${word}. Open a new shift below.</span></div>`;
+        // The STORED close: expected_amount and variance exactly as the server
+        // worked them out when the shift was closed.
+        const v = Number(todayData.close.variance) || 0;
+        const word = isNil(v) ? 'matched exactly' : v > 0 ? `over by ${fmt(Math.abs(v))}` : `short by ${fmt(Math.abs(v))}`;
+        const expectedTxt = todayData.close.expected_amount == null ? '' : ` against ${fmt(todayData.close.expected_amount)} expected`;
+        el.innerHTML = `<div class="card" style="border-left:4px solid var(--green);background:var(--green-soft);"><strong>✅ Last shift closed.</strong><br><span style="font-size:0.85rem;">Counted ${fmt(todayData.close.total_amount)}${expectedTxt}, ${word}. Open a new shift below.</span></div>`;
       }
     }
 
@@ -138,6 +166,7 @@
     function setMode(m) {
       mode = m;
       DENOMS.forEach(d => $('n_' + d).value = 0);
+      $('coins-total').value = 0;
       $('notes-input').value = '';
       if (m === 'open') {
         $('form-title').textContent = todayData.close ? 'Open New Shift' : 'Opening Float';
@@ -146,15 +175,20 @@
       } else {
         $('form-title').textContent = 'Closing Count';
         $('expected-block').style.display = 'block';
-        const open = todayData.open?.total_amount || 0;
-        const sales = todayData.cash_sales || 0;
-        const refunds = todayData.cash_refunds || 0;
-        const expenses = todayData.cash_expenses || 0;
-        $('exp-opening').textContent = fmt(open);
-        $('exp-sales').textContent = fmt(sales);
-        $('exp-refunds').textContent = fmt(refunds);
-        $('exp-expenses').textContent = fmt(expenses);
-        $('exp-expected').textContent = fmt(open + sales - refunds - expenses);
+        $('exp-opening').textContent = fmt(todayData.open?.total_amount || 0);
+        $('exp-sales').textContent = fmt(todayData.cash_sales || 0);
+        $('exp-refunds').textContent = fmt(todayData.cash_refunds || 0);
+        $('exp-expenses').textContent = fmt(todayData.cash_expenses || 0);
+        $('exp-dep-taken').textContent = fmt(todayData.deposits_taken || 0);
+        $('exp-dep-applied').textContent = fmt(todayData.deposits_applied || 0);
+        // Only shown when the server reports it (cash handed back for a
+        // cancelled pre-order). Either way it is already inside expected_now.
+        const hasRefunded = todayData.deposits_refunded !== undefined && todayData.deposits_refunded !== null;
+        $('row-dep-refunded').style.display = hasRefunded ? 'flex' : 'none';
+        if (hasRefunded) $('exp-dep-refunded').textContent = fmt(todayData.deposits_refunded);
+        // The server's figure, shown as-is: the lines above explain it, they are
+        // not added up again here.
+        $('exp-expected').textContent = fmt(todayData.expected_now || 0);
         if (todayData.pending_expenses > 0) {
           $('pending-warn').textContent = `${todayData.pending_expenses} expense(s) pending admin approval. Shift cannot close until they are approved or rejected.`;
           $('pending-warn').style.display = 'block';
@@ -193,6 +227,7 @@
       await withBusy(btn, async () => {
         const body = { notes: $('notes-input').value.trim() };
         DENOMS.forEach(d => body['notes_' + d] = parseInt($('n_' + d).value) || 0);
+        body.coins_total = coinsValue();
         await api('/api/cash/open', { method: 'POST', body });
         toast('Opening float saved');
         await load();
@@ -205,8 +240,13 @@
       await withBusy(btn, async () => {
         const body = { notes: $('notes-input').value.trim() };
         DENOMS.forEach(d => body['notes_' + d] = parseInt($('n_' + d).value) || 0);
-        await api('/api/cash/close', { method: 'POST', body });
-        toast('Closing count saved');
+        body.coins_total = coinsValue();
+        const res = await api('/api/cash/close', { method: 'POST', body });
+        // Quote the close the server stored, not the figure on screen a moment
+        // ago: a sale rung up while the drawer was being counted moves it.
+        const v = Number(res.variance) || 0;
+        toast(`Closed — expected ${fmt(res.expected_amount)}, ` +
+          (isNil(v) ? 'matched exactly' : `${v > 0 ? 'over' : 'short'} by ${fmt(Math.abs(v))}`));
         await load();
       }, 'Saving…');
       syncSubmit();

@@ -2,6 +2,8 @@ import { Hono } from "hono";
 import { getDb } from "../db/database";
 import { isValidPrinterTarget } from "../services/printer";
 import { adminOnly } from "../middleware/auth";
+import { createDownloadSnapshot, isSnapshotName, listSnapshots, snapshotPath } from "../services/backup";
+import { todayDate } from "../utils/helpers";
 import type { SessionUser } from "../middleware/auth";
 
 const settings = new Hono();
@@ -80,14 +82,51 @@ settings.get("/activity-log", adminOnly, (c) => {
   );
 });
 
-// Backup - download database
-settings.get("/backup", adminOnly, (c) => {
-  const db = getDb();
-  const file = Bun.file("data/shop.db");
-  return new Response(file, {
+// Backup - download a consistent copy of the live database, as of now.
+// This used to stream Bun.file("data/shop.db"), relative to the working
+// directory: on fly.io the database is /data/shop.db on the volume, so that path
+// did not exist, and even where it did, copying the main file of a WAL database
+// misses every transaction not yet checkpointed into it. createDownloadSnapshot()
+// takes a VACUUM INTO snapshot of the real file instead (see
+// src/services/backup.ts). Named by BUSINESS date, so a backup taken at 1 AM
+// after a late shift carries the date of the day it belongs to.
+settings.get("/backup", adminOnly, async (c) => {
+  let bytes: Uint8Array;
+  try {
+    bytes = await createDownloadSnapshot();
+  } catch (err) {
+    console.error("[backup] download snapshot failed", err);
+    return c.json({ error: "Could not create a backup. Please try again; if it keeps failing, check the server log." }, 500);
+  }
+  return new Response(bytes, {
     headers: {
       "Content-Type": "application/octet-stream",
-      "Content-Disposition": `attachment; filename="shop-backup-${new Date().toISOString().split("T")[0]}.db"`,
+      "Content-Disposition": `attachment; filename="shop-backup-${todayDate()}.db"`,
+    },
+  });
+});
+
+// The automatic daily snapshots kept on the volume (newest first), and a
+// download for each. The filename is checked against the exact snapshot pattern
+// by snapshotPath(); anything else - "../shop.db", another file in the folder -
+// is refused before the filesystem is touched.
+settings.get("/backups", adminOnly, (c) => {
+  return c.json(listSnapshots());
+});
+
+settings.get("/backups/:file", adminOnly, (c) => {
+  const name = c.req.param("file") ?? "";
+  if (!isSnapshotName(name)) {
+    return c.json({ error: "Not a backup file name" }, 400);
+  }
+  const full = snapshotPath(name);
+  if (!full) {
+    return c.json({ error: "That backup no longer exists" }, 404);
+  }
+  return new Response(Bun.file(full), {
+    headers: {
+      "Content-Type": "application/octet-stream",
+      "Content-Disposition": `attachment; filename="${name}"`,
     },
   });
 });

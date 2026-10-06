@@ -1,43 +1,43 @@
 import { Hono } from "hono";
 import { getDb } from "../db/database";
 import { todayDate } from "../utils/helpers";
+import { costOfGoods, dailySales, money, moneyReceivedByMethod, salesSummary } from "../services/sales";
 
 const reports = new Hono();
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
+// Sales, refunds, cost of goods and the payment split all come from
+// ../services/sales — see the rule for refunds at the top of that file. In
+// short: `sales.total_sales` is GROSS (completed + later-refunded bills, on
+// their sale day), `sales.total_refunds` is what went back on each refund's own
+// day, and every profit figure starts from `sales.net_sales`. `by_payment` is
+// money RECEIVED by method (deposits on their own day and method, refunds
+// subtracted on theirs), so it does not sum to the sales total.
+//
+// Top products deliberately stay on completed + refunded bills by SALE date:
+// they answer "what did we make and hand over", and a refund days later does
+// not un-bake the cake. They therefore reconcile with the GROSS total.
+const TOP_PRODUCTS_SOLD = "b.status IN ('completed', 'refunded')";
+
 reports.get("/daily", (c) => {
   const db = getDb();
   const date = c.req.query("date") || todayDate();
 
-  const sales = db.query(`
-    SELECT COUNT(*) as bill_count, COALESCE(SUM(total), 0) as total_sales,
-           COALESCE(SUM(discount), 0) as total_discount, COALESCE(SUM(tax_amount), 0) as total_tax
-    FROM bills WHERE bill_date = ? AND status = 'completed'
-  `).get(date) as any;
-
-  const byPayment = db.query(`
-    SELECT payment_method, COUNT(*) as count, SUM(total) as total
-    FROM bills WHERE bill_date = ? AND status = 'completed'
-    GROUP BY payment_method
-  `).all(date);
+  const sales = salesSummary(date, date);
+  const byPayment = moneyReceivedByMethod(date, date);
 
   const topProducts = db.query(`
     SELECT bi.product_name, SUM(bi.quantity) as total_qty, SUM(bi.total) as total_revenue,
            SUM(bi.cost_price * bi.quantity) as total_cost
     FROM bill_items bi
     JOIN bills b ON bi.bill_id = b.id
-    WHERE b.bill_date = ? AND b.status = 'completed'
+    WHERE b.bill_date = ? AND ${TOP_PRODUCTS_SOLD}
     GROUP BY bi.product_name
     ORDER BY total_qty DESC, product_name ASC
   `).all(date);
 
-  const totalCost = db.query(`
-    SELECT COALESCE(SUM(bi.cost_price * bi.quantity), 0) as total_cost
-    FROM bill_items bi
-    JOIN bills b ON bi.bill_id = b.id
-    WHERE b.bill_date = ? AND b.status = 'completed'
-  `).get(date) as any;
+  const totalCost = costOfGoods(date, date);
 
   const expenses = db.query(`
     SELECT COALESCE(SUM(amount), 0) as total_expenses
@@ -58,12 +58,15 @@ reports.get("/daily", (c) => {
     ORDER BY d.created_at DESC
   `).all(date);
 
-  const grossProfit = sales.total_sales - totalCost.total_cost;
+  const grossProfit = money(sales.net_sales - totalCost.total_cost);
 
   return c.json({
     date,
     sales,
+    refunds: sales.total_refunds,
+    net_sales: sales.net_sales,
     cost_of_goods: totalCost.total_cost,
+    cost_of_goods_restocked: totalCost.restocked_cost,
     gross_profit: grossProfit,
     by_payment: byPayment,
     top_products: topProducts,
@@ -79,18 +82,14 @@ reports.get("/monthly", (c) => {
   const month = c.req.query("month") || (new Date().getMonth() + 1).toString().padStart(2, "0");
   const year = c.req.query("year") || new Date().getFullYear().toString();
   const prefix = `${year}-${month}`;
+  // The same month as an inclusive business-date window, for the shared sales
+  // figures. "-31" is a plain string bound, so it covers every month length.
+  const monthStart = `${prefix}-01`;
+  const monthEnd = `${prefix}-31`;
 
-  const sales = db.query(`
-    SELECT COUNT(*) as bill_count, COALESCE(SUM(total), 0) as total_sales,
-           COALESCE(SUM(discount), 0) as total_discount, COALESCE(SUM(tax_amount), 0) as total_tax
-    FROM bills WHERE bill_date LIKE ? AND status = 'completed'
-  `).get(`${prefix}%`) as any;
-
-  const dailySales = db.query(`
-    SELECT bill_date, COUNT(*) as bill_count, SUM(total) as total_sales
-    FROM bills WHERE bill_date LIKE ? AND status = 'completed'
-    GROUP BY bill_date ORDER BY bill_date
-  `).all(`${prefix}%`);
+  const sales = salesSummary(monthStart, monthEnd);
+  const daily = dailySales(monthStart, monthEnd);
+  const byPayment = moneyReceivedByMethod(monthStart, monthEnd);
 
   const expenses = db.query(`
     SELECT COALESCE(SUM(amount), 0) as total_expenses
@@ -115,17 +114,12 @@ reports.get("/monthly", (c) => {
            SUM(bi.cost_price * bi.quantity) as total_cost
     FROM bill_items bi
     JOIN bills b ON bi.bill_id = b.id
-    WHERE b.bill_date LIKE ? AND b.status = 'completed'
+    WHERE b.bill_date LIKE ? AND ${TOP_PRODUCTS_SOLD}
     GROUP BY bi.product_name
     ORDER BY total_revenue DESC, product_name ASC
   `).all(`${prefix}%`);
 
-  const totalCost = db.query(`
-    SELECT COALESCE(SUM(bi.cost_price * bi.quantity), 0) as total_cost
-    FROM bill_items bi
-    JOIN bills b ON bi.bill_id = b.id
-    WHERE b.bill_date LIKE ? AND b.status = 'completed'
-  `).get(`${prefix}%`) as any;
+  const totalCost = costOfGoods(monthStart, monthEnd);
 
   // Wastage is a real cost of the month, so it comes off net profit here exactly
   // as it does in /range. These two reports disagreeing over the same period was
@@ -135,17 +129,22 @@ reports.get("/monthly", (c) => {
     FROM product_disposals WHERE business_date LIKE ?
   `).get(`${prefix}%`) as any;
 
-  const grossProfit = sales.total_sales - totalCost.total_cost;
-  const totalIncome = sales.total_sales + otherIncome.total_income;
-  const netProfit =
-    totalIncome - totalCost.total_cost - expenses.total_expenses - disposals.total_loss;
+  const grossProfit = money(sales.net_sales - totalCost.total_cost);
+  const totalIncome = money(sales.net_sales + otherIncome.total_income);
+  const netProfit = money(
+    totalIncome - totalCost.total_cost - expenses.total_expenses - disposals.total_loss
+  );
 
   return c.json({
     month: prefix,
     sales,
+    refunds: sales.total_refunds,
+    net_sales: sales.net_sales,
     cost_of_goods: totalCost.total_cost,
+    cost_of_goods_restocked: totalCost.restocked_cost,
     gross_profit: grossProfit,
-    daily_sales: dailySales,
+    by_payment: byPayment,
+    daily_sales: daily,
     expenses: { total: expenses.total_expenses, by_category: expensesByCategory },
     other_income: otherIncome.total_income,
     total_income: totalIncome,
@@ -186,30 +185,10 @@ reports.get("/range", (c) => {
   // Every query below filters the same inclusive [start_date, end_date] window
   const params: any[] = [startDate, endDate];
 
-  const sales = db.query(`
-    SELECT COUNT(*) as bill_count, COALESCE(SUM(total), 0) as total_sales,
-           COALESCE(SUM(discount), 0) as total_discount, COALESCE(SUM(tax_amount), 0) as total_tax
-    FROM bills WHERE bill_date >= ? AND bill_date <= ? AND status = 'completed'
-  `).get(...params) as any;
-
-  const byPayment = db.query(`
-    SELECT payment_method, COUNT(*) as count, COALESCE(SUM(total), 0) as total
-    FROM bills WHERE bill_date >= ? AND bill_date <= ? AND status = 'completed'
-    GROUP BY payment_method ORDER BY total DESC
-  `).all(...params);
-
-  const dailySales = db.query(`
-    SELECT bill_date, COUNT(*) as bill_count, COALESCE(SUM(total), 0) as total_sales
-    FROM bills WHERE bill_date >= ? AND bill_date <= ? AND status = 'completed'
-    GROUP BY bill_date ORDER BY bill_date ASC
-  `).all(...params);
-
-  const totalCost = db.query(`
-    SELECT COALESCE(SUM(bi.cost_price * bi.quantity), 0) as total_cost
-    FROM bill_items bi
-    JOIN bills b ON bi.bill_id = b.id
-    WHERE b.bill_date >= ? AND b.bill_date <= ? AND b.status = 'completed'
-  `).get(...params) as any;
+  const sales = salesSummary(startDate, endDate);
+  const byPayment = moneyReceivedByMethod(startDate, endDate);
+  const daily = dailySales(startDate, endDate);
+  const totalCost = costOfGoods(startDate, endDate);
 
   const expenses = db.query(`
     SELECT COALESCE(SUM(amount), 0) as total_expenses
@@ -240,26 +219,30 @@ reports.get("/range", (c) => {
            COALESCE(SUM(bi.cost_price * bi.quantity), 0) as total_cost
     FROM bill_items bi
     JOIN bills b ON bi.bill_id = b.id
-    WHERE b.bill_date >= ? AND b.bill_date <= ? AND b.status = 'completed'
+    WHERE b.bill_date >= ? AND b.bill_date <= ? AND ${TOP_PRODUCTS_SOLD}
     GROUP BY bi.product_name
     ORDER BY total_revenue DESC, product_name ASC
   `).all(...params);
 
-  const grossProfit = sales.total_sales - totalCost.total_cost;
-  const totalIncome = sales.total_sales + otherIncome.total_income;
-  // Unlike /monthly, this net profit also subtracts disposal (wastage) loss
-  const netProfit =
-    totalIncome - totalCost.total_cost - expenses.total_expenses - disposals.total_loss;
+  const grossProfit = money(sales.net_sales - totalCost.total_cost);
+  const totalIncome = money(sales.net_sales + otherIncome.total_income);
+  // Same as /monthly: disposal (wastage) loss comes off net profit too
+  const netProfit = money(
+    totalIncome - totalCost.total_cost - expenses.total_expenses - disposals.total_loss
+  );
 
   return c.json({
     start_date: startDate,
     end_date: endDate,
     days,
     sales,
+    refunds: sales.total_refunds,
+    net_sales: sales.net_sales,
     cost_of_goods: totalCost.total_cost,
+    cost_of_goods_restocked: totalCost.restocked_cost,
     gross_profit: grossProfit,
     by_payment: byPayment,
-    daily_sales: dailySales,
+    daily_sales: daily,
     expenses: { total: expenses.total_expenses, by_category: expensesByCategory },
     other_income: otherIncome.total_income,
     total_income: totalIncome,
@@ -278,7 +261,7 @@ reports.get("/top-products", (c) => {
            SUM(bi.cost_price * bi.quantity) as total_cost
     FROM bill_items bi
     JOIN bills b ON bi.bill_id = b.id
-    WHERE b.bill_date >= date('now', '-' || ? || ' days') AND b.status = 'completed'
+    WHERE b.bill_date >= date('now', '-' || ? || ' days') AND ${TOP_PRODUCTS_SOLD}
     GROUP BY bi.product_name
     ORDER BY total_revenue DESC, product_name ASC
   `).all(days);

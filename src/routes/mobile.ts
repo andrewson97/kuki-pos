@@ -3,6 +3,7 @@ import { getDb } from "../db/database";
 import { getUser } from "../middleware/auth";
 import { todayDate } from "../utils/helpers";
 import { getStockAlerts } from "../services/stock";
+import { costOfGoods, money, moneyReceivedByMethod, salesSummary } from "../services/sales";
 
 const mobile = new Hono();
 
@@ -18,17 +19,11 @@ mobile.get("/dashboard", (c) => {
   const user = getUser(c);
   const isAdmin = user?.role === "admin";
 
-  const todaySales = db.query(`
-    SELECT COUNT(*) AS bill_count, COALESCE(SUM(total), 0) AS total_sales
-    FROM bills WHERE bill_date = ? AND status = 'completed'
-  `).get(today) as any;
-
-  const todayCost = db.query(`
-    SELECT COALESCE(SUM(bi.cost_price * bi.quantity), 0) AS total_cost
-    FROM bill_items bi
-    JOIN bills b ON bi.bill_id = b.id
-    WHERE b.bill_date = ? AND b.status = 'completed'
-  `).get(today) as any;
+  // Same figures as /api/dashboard/stats and /api/reports/daily for today, from
+  // ../services/sales: gross sales on the sale day, refunds on the refund day,
+  // net = gross - refunds, and cost of goods net of any restocked refund.
+  const todaySales = salesSummary(today, today);
+  const todayCost = costOfGoods(today, today);
 
   const todayExpensesApproved = db.query(`
     SELECT COALESCE(SUM(amount), 0) AS total
@@ -73,13 +68,19 @@ mobile.get("/dashboard", (c) => {
     // null would reach fmt() and render as "Rs. 0.00" - a wrong number is worse
     // than no number.
     today: isAdmin
+      // `sales` is NET of refunds handed back today; gross_sales and refunds
+      // are its two halves. by_payment is money RECEIVED today by method.
       ? {
-          sales: todaySales.total_sales,
+          sales: todaySales.net_sales,
+          gross_sales: todaySales.total_sales,
+          refunds: todaySales.total_refunds,
+          refund_count: todaySales.refund_count,
           bills: todaySales.bill_count,
           cost: todayCost.total_cost,
-          profit: todaySales.total_sales - todayCost.total_cost,
+          profit: money(todaySales.net_sales - todayCost.total_cost),
           expenses_approved: todayExpensesApproved.total,
-          net: todaySales.total_sales - todayCost.total_cost - todayExpensesApproved.total,
+          net: money(todaySales.net_sales - todayCost.total_cost - todayExpensesApproved.total),
+          by_payment: moneyReceivedByMethod(today, today),
         }
       : { bills: todaySales.bill_count },
     pending_expenses: pendingExpenses,

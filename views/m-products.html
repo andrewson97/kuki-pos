@@ -54,22 +54,32 @@
         <select id="p-cat-sel" onchange="onCatChange()"></select>
         <input type="text" id="p-cat-new" placeholder="Type a new category name" style="display:none;margin-top:6px;">
       </div>
-      <div class="field"><label>Cost price (Rs.)</label><input type="number" id="p-cost" min="0" step="0.01" inputmode="decimal"></div>
-      <div class="field"><label>Selling price (Rs.)</label><input type="number" id="p-price" min="0" step="0.01" inputmode="decimal"></div>
-      <div class="field"><label>Discount price (optional)</label><input type="number" id="p-disc" min="0" step="0.01" inputmode="decimal" placeholder="leave blank for none"></div>
+      <div class="field"><label>Cost price (Rs.)</label><input type="number" id="p-cost" min="0" step="any" inputmode="decimal"></div>
+      <div class="field"><label>Selling price (Rs.)</label><input type="number" id="p-price" min="0" step="any" inputmode="decimal"></div>
+      <div class="field"><label>Discount price (optional)</label><input type="number" id="p-disc" min="0" step="any" inputmode="decimal" placeholder="leave blank for none"></div>
       <div class="field"><label><input type="checkbox" id="p-active" checked> Active (shown in POS)</label></div>
       <div class="field"><label><input type="checkbox" id="p-track" onchange="onTrackToggle()"> Track finished-product inventory</label></div>
+      <!-- The count is typed here only for a NEW product (opening stock). For an
+           existing one it is shown read-only: saving this sheet never changes
+           stock — "Adjust stock" does, and logs it. -->
       <div id="stock-fields" style="display:none;">
-        <div class="field"><label>Quantity on hand</label><input type="number" id="p-qty" min="0" step="1" value="0" inputmode="numeric"></div>
+        <div class="field" id="p-opening-field"><label>Opening stock</label><input type="number" id="p-qty" min="0" step="1" value="0" inputmode="numeric"></div>
+        <div class="field" id="p-onhand-field" style="display:none;">
+          <label>On hand</label>
+          <div style="display:flex;align-items:center;gap:10px;">
+            <strong id="p-onhand" style="font-size:1.1rem;flex:1;">0</strong>
+            <button class="btn btn-success" style="width:auto;padding:8px 14px;" onclick="openAdjust()">Adjust stock…</button>
+          </div>
+          <div style="color:var(--ink-soft);font-size:0.76rem;margin-top:4px;">Saving this form never changes the count. Turning tracking off keeps it as it is.</div>
+        </div>
         <div class="field"><label>Reorder level (alert below)</label><input type="number" id="p-reorder" min="0" step="1" value="0" inputmode="numeric"></div>
-        <button class="btn btn-danger" id="p-dispose" style="display:none;" onclick="disposeProduct(this)">Dispose (expired)…</button>
       </div>
       <div class="field">
         <label>Also deducts stock from <small style="color:var(--ink-soft);">(components)</small></label>
         <div id="p-components-list"></div>
         <div style="display:flex;gap:6px;margin-top:6px;">
           <select id="p-comp-pick" style="flex:1;padding:8px;border:1.5px solid var(--line);border-radius:8px;background:white;"></select>
-          <input type="number" id="p-comp-qty" min="0.01" step="0.01" value="1" style="width:70px;padding:8px;border:1.5px solid var(--line);border-radius:8px;">
+          <input type="number" id="p-comp-qty" min="0" step="1" value="1" style="width:70px;padding:8px;border:1.5px solid var(--line);border-radius:8px;">
           <button class="btn btn-outline" onclick="addComp()" style="padding:8px 14px;">Add</button>
         </div>
       </div>
@@ -78,6 +88,34 @@
         <button class="btn btn-primary" onclick="saveProd(this)">Save</button>
       </div>
       <button class="btn btn-danger" style="margin-top:8px;" id="p-delete" onclick="delProd(this)">Delete</button>
+    </div>
+  </div>
+
+  <!-- Adjust stock: the only way to change a tracked product's count once it
+       exists (POST /api/products/:id/stock-adjust). Sits after prod-sheet in
+       the DOM so it opens on top of it; the product sheet stays open beneath,
+       so nothing typed there is lost. -->
+  <div class="sheet" id="adj-sheet" onclick="if(event.target===this)closeSheet('adj-sheet')">
+    <div class="sheet-inner">
+      <div class="sheet-handle"></div>
+      <h3 id="adj-title">Adjust stock</h3>
+      <div style="font-size:0.9rem;margin-bottom:10px;">On hand now: <strong id="adj-onhand">0</strong></div>
+      <div class="field">
+        <label>What happened?</label>
+        <select id="adj-type" onchange="onAdjustTypeChange()">
+          <option value="received">Received / baked — adds</option>
+          <option value="waste">Waste — removes</option>
+          <option value="count">Count — sets to what you counted</option>
+        </select>
+        <div id="adj-help" style="color:var(--ink-soft);font-size:0.76rem;margin-top:4px;"></div>
+      </div>
+      <div class="field"><label id="adj-qty-label">How many?</label><input type="number" id="adj-qty" min="0" step="1" inputmode="numeric" oninput="updateAdjustPreview()"></div>
+      <div class="field"><label id="adj-reason-label">Reason</label><input type="text" id="adj-reason"></div>
+      <div id="adj-preview" style="font-weight:700;font-size:0.9rem;margin-bottom:8px;"></div>
+      <div class="btn-row">
+        <button class="btn btn-outline" onclick="closeSheet('adj-sheet')">Cancel</button>
+        <button class="btn btn-primary" onclick="saveAdjust(this)">Save</button>
+      </div>
     </div>
   </div>
 
@@ -180,7 +218,7 @@
         return `<div class="list-item" ${isAdmin ? `onclick="editProd(${p.id})"` : ''} style="display:flex;gap:12px;align-items:center;min-height:52px;">
           <div style="flex:1;min-width:0;">
             <div class="list-title">${escapeHtml(p.name)} ${statusBadge(p)}</div>
-            <div class="list-meta">${escapeHtml(p.category || '-')} · cost ${fmt(p.cost_price)}</div>
+            <div class="list-meta">${escapeHtml(p.category || '-')} · cost ${fmt(p.cost_price)}${p.track_stock ? ` · on hand ${p.stock_quantity}` : ''}</div>
           </div>
           <div style="text-align:right;">${priceHtml}</div>
         </div>`;
@@ -238,8 +276,7 @@
       $('p-track').checked = false;
       $('p-qty').value = 0;
       $('p-reorder').value = 0;
-      $('stock-fields').style.display = 'none';
-      $('p-dispose').style.display = 'none';
+      syncStockFields();
       $('p-delete').style.display = 'none';
       currentComponents = [];
       renderComps();
@@ -264,7 +301,7 @@
         const name = p ? p.name : `#${c.component_product_id}`;
         return `<div style="display:flex;align-items:center;gap:6px;padding:6px 0;border-bottom:1px solid var(--line);">
           <span style="flex:1;"><strong>${escapeHtml(name)}</strong></span>
-          <input type="number" value="${c.quantity}" step="0.01" min="0.01" style="width:70px;padding:6px;border:1px solid var(--line);border-radius:6px;" oninput="currentComponents[${i}].quantity = parseFloat(this.value) || 0">
+          <input type="number" value="${c.quantity}" step="1" min="0" style="width:70px;padding:6px;border:1px solid var(--line);border-radius:6px;" oninput="currentComponents[${i}].quantity = parseFloat(this.value) || 0">
           <button class="btn btn-danger" onclick="currentComponents.splice(${i},1); renderComps();" style="padding:4px 10px;">×</button>
         </div>`;
       }).join('');
@@ -279,11 +316,16 @@
       renderComps();
     }
 
-    function onTrackToggle() {
+    // New product: opening stock is typed here. Existing product: the count is
+    // shown read-only with the Adjust stock button beside it.
+    function syncStockFields() {
       const on = $('p-track').checked;
+      const isEdit = !!$('p-id').value;
       $('stock-fields').style.display = on ? 'block' : 'none';
-      $('p-dispose').style.display = (on && $('p-id').value) ? 'block' : 'none';
+      $('p-opening-field').style.display = isEdit ? 'none' : 'block';
+      $('p-onhand-field').style.display = isEdit ? 'block' : 'none';
     }
+    function onTrackToggle() { syncStockFields(); }
 
     function editProd(id) {
       const p = allProds.find(x => x.id === id);
@@ -296,10 +338,9 @@
       $('p-disc').value = p.discount_price || '';
       $('p-active').checked = !!p.is_active;
       $('p-track').checked = !!p.track_stock;
-      $('p-qty').value = p.stock_quantity || 0;
+      $('p-onhand').textContent = p.stock_quantity || 0;
       $('p-reorder').value = p.stock_reorder_level || 0;
-      $('stock-fields').style.display = p.track_stock ? 'block' : 'none';
-      $('p-dispose').style.display = p.track_stock ? 'block' : 'none';
+      syncStockFields();
       currentComponents = (p.components || []).map(c => ({ component_product_id: c.component_product_id, quantity: c.quantity }));
       renderComps();
       $('p-delete').style.display = 'block';
@@ -317,37 +358,86 @@
         discount_price: disc ? parseFloat(disc) : null,
         is_active: $('p-active').checked ? 1 : 0,
         track_stock: $('p-track').checked ? 1 : 0,
-        stock_quantity: parseFloat($('p-qty').value) || 0,
         stock_reorder_level: parseFloat($('p-reorder').value) || 0,
         components: currentComponents.filter(c => c.component_product_id && c.quantity > 0),
       };
       if (!body.name) { toast('Name required', 'error'); return; }
       if (!body.selling_price) { toast('Selling price required', 'error'); return; }
       await withBusy(btn, async () => {
+        // Only a NEW product carries a count; an edit never changes stock.
         if (id) await api(`/api/products/${id}`, { method: 'PUT', body });
-        else await api('/api/products', { method: 'POST', body });
+        else await api('/api/products', { method: 'POST', body: { ...body, stock_quantity: Math.max(0, parseFloat($('p-qty').value) || 0) } });
         closeSheet('prod-sheet');
         toast('Saved');
         await reloadAll();
       }, 'Saving…');
     }
 
-    async function disposeProduct(btn) {
-      const id = $('p-id').value;
-      if (!id) { toast('Save the product first', 'error'); return; }
-      const qtyStr = prompt('How many units to dispose?', '1');
-      if (qtyStr === null) return;
-      const qty = parseFloat(qtyStr);
-      if (!qty || qty <= 0) { toast('Invalid quantity', 'error'); return; }
-      const reason = prompt('Reason (e.g., expired, damaged)?', 'expired');
-      if (reason === null) return;
+    // ===== Adjust stock =====
+    const ADJUST_TEXT = {
+      received: { help: 'Freshly baked or delivered. Adds to what is on hand.', qty: 'How many came in?', reason: 'Note (optional)', placeholder: 'e.g., morning bake' },
+      waste: { help: 'Thrown away (expired, damaged). Removes from on hand; counted as a loss at cost price in the reports.', qty: 'How many were thrown away?', reason: 'Reason (required)', placeholder: 'e.g., expired' },
+      count: { help: 'You counted the shelf. On hand is SET to your count; the difference is recorded.', qty: 'How many did you count?', reason: 'Reason (required)', placeholder: 'e.g., end-of-day count' },
+    };
+
+    function adjProduct() {
+      return allProds.find(x => x.id === parseInt($('p-id').value));
+    }
+
+    function openAdjust() {
+      const p = adjProduct();
+      if (!p) { toast('Save the product first', 'error'); return; }
+      $('adj-title').textContent = 'Adjust stock · ' + p.name;
+      $('adj-onhand').textContent = p.stock_quantity || 0;
+      $('adj-type').value = 'received';
+      $('adj-qty').value = '';
+      $('adj-reason').value = '';
+      onAdjustTypeChange();
+      openSheet('adj-sheet');
+    }
+
+    function onAdjustTypeChange() {
+      const t = ADJUST_TEXT[$('adj-type').value];
+      $('adj-help').textContent = t.help;
+      $('adj-qty-label').textContent = t.qty;
+      $('adj-reason-label').textContent = t.reason;
+      $('adj-reason').placeholder = t.placeholder;
+      updateAdjustPreview();
+    }
+
+    function updateAdjustPreview() {
+      const p = adjProduct();
+      const el = $('adj-preview');
+      const raw = $('adj-qty').value;
+      const qty = parseFloat(raw);
+      if (!p || raw === '' || !Number.isFinite(qty)) { el.textContent = ''; return; }
+      const onHand = p.stock_quantity || 0;
+      const type = $('adj-type').value;
+      const next = type === 'received' ? onHand + qty : type === 'waste' ? onHand - qty : qty;
+      el.style.color = next < 0 ? 'var(--red)' : 'var(--ink)';
+      el.textContent = next < 0 ? `Only ${onHand} on hand — cannot throw away ${qty}.` : `On hand: ${onHand} → ${next}`;
+    }
+
+    async function saveAdjust(btn) {
+      const p = adjProduct();
+      if (!p) return;
+      const type = $('adj-type').value;
+      const raw = $('adj-qty').value;
+      const qty = parseFloat(raw);
+      const reason = $('adj-reason').value.trim();
+      if (raw === '' || !Number.isFinite(qty)) { toast('Enter a quantity', 'error'); return; }
+      if (type !== 'count' && qty <= 0) { toast('Quantity must be greater than zero', 'error'); return; }
+      if (qty < 0) { toast('The count cannot be negative', 'error'); return; }
+      if (type !== 'received' && !reason) { toast('Enter a reason', 'error'); return; }
       await withBusy(btn, async () => {
-        const r = await api(`/api/products/${id}/dispose`, { method: 'POST', body: { quantity: qty, reason } });
-        toast(`Disposed ${qty} — loss ${fmt(r.cost_loss)}`);
+        const r = await api(`/api/products/${p.id}/stock-adjust`, { method: 'POST', body: { type, quantity: qty, reason } });
+        closeSheet('adj-sheet');
+        toast(`Stock ${r.previous} → ${r.stock_quantity}${r.cost_loss ? ` — loss ${fmt(r.cost_loss)}` : ''}`);
         await reloadAll();
-        const updated = allProds.find(x => x.id === parseInt(id));
-        if (updated) $('p-qty').value = updated.stock_quantity || 0;
-      }, 'Disposing…');
+        // The product sheet is still open underneath: show it the new count.
+        const updated = allProds.find(x => x.id === p.id);
+        if (updated) $('p-onhand').textContent = updated.stock_quantity || 0;
+      }, 'Saving…');
     }
 
     // Three outcomes, and the user is told which one happened:

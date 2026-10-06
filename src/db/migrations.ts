@@ -339,14 +339,15 @@ export function runMigrations(): void {
     -- One bill can settle at most one pre-order. Partial (WHERE bill_id IS NOT
     -- NULL) because every uncollected order carries NULL and those must not
     -- collide, and because it doubles as the "which order did this bill
-    -- settle?" lookup, which only ever searches non-NULL values. Together with
-    -- the deterministic cart_id used at collection ('preorder-<id>', which the
-    -- UNIQUE index on bills(cart_id, cart_fingerprint) guards) this makes a
-    -- double-tapped Collect physically unable to produce two bills or two
-    -- links: a double tap resubmits the IDENTICAL collection, so it hashes to
-    -- the same fingerprint and replays. (A second Collect that is not identical
-    -- cannot get that far anyway: POST /:id/collect refuses an order whose
-    -- status is already 'collected' with a 409 before any bill is written.)
+    -- settle?" lookup, which only ever searches non-NULL values. It is the
+    -- database's last word; the real guarantee against two bills for one order
+    -- is in POST /:id/collect, which re-reads the order's status, writes the
+    -- bill and marks the order collected in ONE immediate transaction. A second
+    -- Collect - a double tap, or a second till with a different payment method
+    -- (and so a different bills.cart_fingerprint, which the bills index would
+    -- NOT catch) - therefore finds the order already 'collected' and gets a 409
+    -- carrying the first bill, and a crash part-way leaves neither a bill nor a
+    -- link behind.
     CREATE UNIQUE INDEX IF NOT EXISTS idx_pre_orders_bill ON pre_orders(bill_id) WHERE bill_id IS NOT NULL;
 
     -- A line is EITHER a catalogue product OR a free-text custom line, and both
@@ -545,6 +546,159 @@ export function runMigrations(): void {
   } catch {
     // Silent — fine if products table is empty or anything odd.
   }
+
+  // ── fix/labels-inputs ──────────────────────────────────────────────────────
+  // One-shot: the shop trades in LKR, but seedDefaults() used to seed the
+  // currency symbol as the Indian rupee sign. Existing installs got that wrong
+  // default, so swap it for "Rs." — but only when it is still exactly the old
+  // seeded value, never overwriting a symbol the owner chose in Settings.
+  // Idempotent: once converted the WHERE no longer matches.
+  try {
+    db.query("UPDATE settings SET value = 'Rs.' WHERE key = 'currency_symbol' AND value = '₹'").run();
+  } catch {
+    // Silent — settings table always exists by now; nothing to recover anyway.
+  }
+
+  // ===== fix/till =====================================================
+  // One-shot: the receipt footer's phone number moves into Settings.
+  //
+  // buildReceiptText() (src/services/printer.ts) used to print a hard-coded
+  // "+94 76 565 2881" as the slip's last line, whatever settings.shop_phone
+  // said. It now prints settings.shop_phone instead — so a shop whose setting
+  // is blank would silently lose the number from every receipt. Copy the old
+  // hard-coded number in wherever the setting is missing or blank.
+  //
+  // ONCE, not on every boot: a marker row records that it ran. Without it, an
+  // owner who deliberately blanks the number in Settings would have it put
+  // back by the next restart. The upsert also covers a brand-new database,
+  // where this runs before seedDefaults() has created the shop_phone row at
+  // all (seedDefaults() then leaves it alone: INSERT OR IGNORE). Both writes
+  // in one transaction, so a failure leaves neither behind and the next boot
+  // simply tries again.
+  try {
+    const done = db.query("SELECT 1 FROM settings WHERE key = 'migration_fix_till_shop_phone'").get();
+    if (!done) {
+      db.transaction(() => {
+        db.query(
+          "INSERT INTO settings (key, value) VALUES ('shop_phone', ?) " +
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value WHERE trim(settings.value) = ''"
+        ).run("+94 76 565 2881");
+        db.query("INSERT OR REPLACE INTO settings (key, value) VALUES ('migration_fix_till_shop_phone', '1')").run();
+      })();
+    }
+  } catch (err: any) {
+    console.error("[migration] fix/till: could not default settings.shop_phone:", err?.message || err);
+  }
+
+  // ---------------------------------------------------------------------------
+  // fix/preorders — what a collection bill had already been paid, and what
+  // happened to the deposit of a cancelled order.
+  // ---------------------------------------------------------------------------
+  // bills.paid_in_advance: on a pre-order's collection bill, the deposits taken
+  // BEFORE collection (the same figure the collect route subtracts to get
+  // cash_to_collect). The bill itself records the FULL sale, so without this the
+  // bill alone cannot say how much of it changed hands at the till: a reprint
+  // could not print "Paid in advance / Balance", and a report splitting the
+  // day's takings by method would count the deposit twice (once on the day it
+  // was taken, again inside this bill's total). 0 for every ordinary sale.
+  // The exact declaration is shared with the reports branch, which adds the
+  // identical line; addColumn() swallows the second ALTER, so they cannot fight.
+  addColumn("bills", "paid_in_advance", "REAL NOT NULL DEFAULT 0");
+  // One-shot backfill for collection bills written before the column existed.
+  // Only rows still at 0 and actually linked from a pre-order are touched, and
+  // the figure is recomputed from pre_order_payments, which holds pre-collection
+  // payments only (see that table's comment) — so re-running it is a no-op.
+  try {
+    db.exec(`
+      UPDATE bills SET paid_in_advance = (
+        SELECT COALESCE(SUM(pop.amount), 0)
+        FROM pre_orders po JOIN pre_order_payments pop ON pop.pre_order_id = po.id
+        WHERE po.bill_id = bills.id
+      )
+      WHERE paid_in_advance = 0
+        AND id IN (SELECT bill_id FROM pre_orders WHERE bill_id IS NOT NULL)
+    `);
+  } catch (err: any) {
+    console.error("[migration] paid_in_advance backfill failed:", err?.message || err);
+  }
+
+  // The deposit of a CANCELLED pre-order. Cancelling used to leave it in limbo:
+  // the screen said "pay it back as a cash expense" (which wrongly cut profit),
+  // a deposit the customer forfeited never became income, and money owed back
+  // simply vanished. Now cancelling an order that has payments must settle them
+  // one of two ways, recorded here:
+  //   deposit_outcome         'refunded' | 'kept'; NULL when there was nothing
+  //                           to settle (or for orders cancelled before this).
+  //   deposit_settled_amount  what was refunded / kept: the order's payments at
+  //                           the moment of cancelling.
+  //   deposit_refund_method   cash | card | upi, refunds only. A CASH refund is
+  //                           money leaving the drawer, which the cash shift
+  //                           subtracts (getDepositsRefundedSince in
+  //                           src/routes/cash.ts) — not an expense, not income.
+  //   deposit_settled_at      UTC datetime('now'), what a shift window compares.
+  //   deposit_settled_by      users.id of the admin who cancelled.
+  // A KEPT deposit is written to the income table as well, so it appears in the
+  // existing income reports without any report knowing about pre-orders.
+  addColumn("pre_orders", "deposit_outcome", "TEXT");
+  addColumn("pre_orders", "deposit_settled_amount", "REAL");
+  addColumn("pre_orders", "deposit_refund_method", "TEXT");
+  addColumn("pre_orders", "deposit_settled_at", "TEXT");
+  addColumn("pre_orders", "deposit_settled_by", "INTEGER");
+
+  // --- fix/stock-refunds ---------------------------------------------------
+  // Whether a refund put the bill's items back into stock. A refund used to
+  // restore stock unconditionally; now the cashier chooses ("Put items back
+  // into stock", off by default — a returned cake usually goes in the bin, not
+  // back on the shelf), and POST /api/pos/bills/:id/refund records the choice
+  // here. 1 = stock was restored, 0 = it was not (or the bill is not refunded).
+  // The reports branch adds this identical line and reads it; addColumn is a
+  // no-op for whichever runs second. Added as a column, never by rebuilding the
+  // table.
+  addColumn("bills", "refund_restocked", "INTEGER NOT NULL DEFAULT 0");
+  // Backfill: every refund made BEFORE the choice existed did restore stock, so
+  // those bills must read 1, not the column default. They are recognised by
+  // their 'refunded_bill' log row, which predates the 'restock' key — every
+  // refund from now on writes that key, true or false. Idempotent: it only ever
+  // touches legacy rows still at 0, so running it on every boot is harmless.
+  try {
+    db.exec(`
+      UPDATE bills SET refund_restocked = 1
+      WHERE status = 'refunded' AND refund_restocked = 0
+        AND id IN (
+          SELECT CAST(json_extract(details, '$.bill_id') AS INTEGER) FROM activity_log
+          WHERE action = 'refunded_bill' AND json_extract(details, '$.restock') IS NULL
+        )
+    `);
+  } catch (err: any) {
+    console.error("[migration] could not backfill bills.refund_restocked for legacy refunds:", err?.message || err);
+  }
+
+  // --- fix/cash-reports ----------------------------------------------------
+  // Coins in the drawer. The count only ever had Rs 20–5000 note rows, so every
+  // coin in the till was either left out of the count (a phantom shortage at
+  // close) or folded into a note row by guesswork. One running total rather
+  // than a row per coin: nobody counts Rs 1 coins one by one at closing time,
+  // they bag or weigh them. Counts saved before this had no coins, hence 0.
+  addColumn("cash_counts", "coins_total", "REAL NOT NULL DEFAULT 0");
+  // The two lines below are IDENTICAL to ones another branch adds; addColumn()
+  // swallows "duplicate column", so whichever branch lands second is a no-op.
+  // They are here because the reports in this branch read them:
+  //   refund_restocked — 1 when the refund put the bill's items back into
+  //     stock. Only then does the item cost come back off cost of goods on the
+  //     refund day; otherwise the cake is gone and its cost stays a cost.
+  //   paid_in_advance — the part of a pre-order collection bill that was paid
+  //     as deposits before collection day, so "money received by method" counts
+  //     only the balance under the bill's own day and method.
+  addColumn("bills", "refund_restocked", "INTEGER NOT NULL DEFAULT 0");
+  addColumn("bills", "paid_in_advance", "REAL NOT NULL DEFAULT 0");
+
+  // --- fix/post-merge ------------------------------------------------------
+  // 1 when the bill moved no stock at all: createBill() was called with
+  // skip_stock (a pre-order collection; pre-ordered goods are never stock).
+  // Stock History reads it so such a bill never shows as stock leaving. Every
+  // existing row gets 0, which is right: before skip_stock existed, collections
+  // went through the ordinary stock deduction like any other sale.
+  addColumn("bills", "stock_skipped", "INTEGER NOT NULL DEFAULT 0");
 }
 
 export function seedDefaults(): void {
@@ -577,7 +731,7 @@ export function seedDefaults(): void {
     shop_address: "",
     shop_phone: "",
     tax_rate: "0",
-    currency_symbol: "₹",
+    currency_symbol: "Rs.",
     printer_type: "none",
     printer_address: "",
     enforce_cash_shift: "1",

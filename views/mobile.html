@@ -24,6 +24,9 @@
     .stats-row .mini { background: rgba(255,255,255,0.18); border-radius: 10px; padding: 10px 12px; }
     .stats-row .mini .label { font-size: 0.65rem; }
     .stats-row .mini .val { font-size: 1.05rem; font-weight: 700; margin-top: 2px; }
+    .stats-recv { margin-top: 12px; background: rgba(255,255,255,0.18); border-radius: 10px; padding: 10px 12px; font-size: 0.85rem; }
+    .stats-recv .label { font-size: 0.65rem; }
+    .stats-recv .row { display: flex; justify-content: space-between; padding: 2px 0; }
     .exp-item { padding: 12px 0; border-bottom: 1px solid var(--line); }
     .exp-item:last-child { border-bottom: none; }
     .exp-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 4px; }
@@ -138,16 +141,32 @@
           <div class="sub">${escapeHtml(dateLabel || '')}</div>`;
         return;
       }
+      // t.sales is NET of refunds handed back today (gross and refunds beside
+      // it). by_payment is money RECEIVED today by method: a deposit counts on
+      // the day and by the method it was paid, a refund on the day it went back,
+      // so it need not add up to sales.
+      const recv = Array.isArray(t.by_payment) && t.by_payment.length
+        ? `<div class="stats-recv"><div class="label">Money received by method</div>${t.by_payment.map(p =>
+            `<div class="row"><span>${escapeHtml(payLabel(p.payment_method))}</span><strong>${fmt(p.total)}</strong></div>`).join('')}</div>`
+        : '';
       $('stats-hero').innerHTML = `
-        <div class="label">Today's sales</div>
+        <div class="label">Today's net sales</div>
         <div class="big">${fmt(t.sales)}</div>
-        <div class="sub">${t.bills} ${t.bills === 1 ? 'bill' : 'bills'} · Net ${fmt(t.net)}</div>
+        <div class="sub">${t.bills} ${t.bills === 1 ? 'bill' : 'bills'} · Net profit ${fmt(t.net)}</div>
+        ${t.gross_sales !== undefined ? `<div class="sub">Gross ${fmt(t.gross_sales)} · Refunds −${fmt(t.refunds || 0)}</div>` : ''}
         <div class="stats-row">
           <div class="mini"><div class="label">Cost</div><div class="val">${fmt(t.cost)}</div></div>
           <div class="mini"><div class="label">Profit</div><div class="val">${fmt(t.profit)}</div></div>
           <div class="mini"><div class="label">Expenses</div><div class="val">${fmt(t.expenses_approved)}</div></div>
           <div class="mini"><div class="label">Margin</div><div class="val">${t.sales > 0 ? Math.round(t.profit / t.sales * 100) : 0}%</div></div>
-        </div>`;
+        </div>
+        ${recv}`;
+    }
+
+    // 'upi' is what the database stores; the customer pays with LankaQR.
+    function payLabel(m) {
+      const v = String(m || '').toLowerCase();
+      return v === 'upi' ? 'LankaQR' : v.toUpperCase();
     }
 
     function renderPending(items, isAdmin) {
