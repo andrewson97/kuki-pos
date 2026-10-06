@@ -7,6 +7,24 @@ export interface SessionUser {
   username: string;
   full_name: string;
   role: "admin" | "cashier";
+  /** Admin-granted: this cashier may see the day's money on the dashboards.
+   *  Meaningless for an admin, who always sees it — use canSeeDashboardMoney(). */
+  show_dashboard_money: boolean;
+}
+
+/**
+ * May this user see the day's takings (sales, profit, expenses, money received
+ * by method) on the desktop and mobile dashboards?
+ *
+ * Admins always may. A cashier may only when an admin has ticked "Show
+ * today's money on the dashboard" for them on the Users page
+ * (users.show_dashboard_money); the default is off, which is how every cashier
+ * behaved before the option existed. The ONE definition, read by
+ * /api/dashboard/stats and /api/mobile/dashboard, so the two screens cannot
+ * disagree about a user.
+ */
+export function canSeeDashboardMoney(user: SessionUser | null | undefined): boolean {
+  return !!user && (user.role === "admin" || user.show_dashboard_money);
 }
 
 // Get user from session cookie — works in both parent app and sub-routers
@@ -21,7 +39,7 @@ export function getUser(c: Context): SessionUser | null {
 
   const db = getDb();
   const session = db.query(`
-    SELECT u.id as user_id, u.username, u.full_name, u.role
+    SELECT u.id as user_id, u.username, u.full_name, u.role, u.show_dashboard_money
     FROM sessions s
     JOIN users u ON s.user_id = u.id
     WHERE s.id = ? AND s.expires_at > datetime('now') AND u.is_active = 1
@@ -33,6 +51,7 @@ export function getUser(c: Context): SessionUser | null {
     username: session.username,
     full_name: session.full_name,
     role: session.role,
+    show_dashboard_money: !!session.show_dashboard_money,
   };
   c.set("user", user);
   return user;

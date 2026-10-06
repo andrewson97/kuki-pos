@@ -17,7 +17,7 @@
       </div>
       <div class="table-container">
         <table class="table table-hover mb-0">
-          <thead><tr><th>Username</th><th>Full Name</th><th>Role</th><th>Status</th><th>Created</th><th>Actions</th></tr></thead>
+          <thead><tr><th>Username</th><th>Full Name</th><th>Role</th><th>Status</th><th>Dashboard money</th><th>Created</th><th>Actions</th></tr></thead>
           <tbody id="users-table"></tbody>
         </table>
       </div>
@@ -44,6 +44,11 @@
             <input type="checkbox" class="form-check-input" id="user-active" checked>
             <label class="form-check-label">Active</label>
           </div>
+          <div class="form-check mt-2">
+            <input type="checkbox" class="form-check-input" id="user-dash-money">
+            <label class="form-check-label" for="user-dash-money">Show today's money on the dashboard</label>
+            <div class="form-text" id="user-dash-money-hint"></div>
+          </div>
         </div>
         <div class="modal-footer"><button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button><button class="btn btn-primary" onclick="saveUser(this)">Save</button></div>
       </div>
@@ -64,6 +69,7 @@
           <td>${u.full_name}</td>
           <td><span class="badge bg-${u.role === 'admin' ? 'primary' : 'secondary'}">${u.role}</span></td>
           <td><span class="badge bg-${u.is_active ? 'success' : 'danger'}">${u.is_active ? 'Active' : 'Disabled'}</span></td>
+          <td>${u.role === 'admin' ? '<span class="text-muted small">Always (admin)</span>' : (u.show_dashboard_money ? '<span class="badge bg-info">Shown</span>' : '<span class="badge bg-light text-dark border">Hidden</span>')}</td>
           <td>${formatDate(u.created_at)}</td>
           <td><button class="btn btn-sm btn-outline-primary" onclick="editUser(${u.id})">Edit</button></td>
         </tr>
@@ -80,8 +86,34 @@
       document.getElementById('pw-hint').textContent = '(required)';
       document.getElementById('user-role').value = 'cashier';
       document.getElementById('user-active').checked = true;
+      const dashBox = document.getElementById('user-dash-money');
+      dashBox.disabled = false;
+      dashBox.checked = false;
+      dashBox.dataset.cashierValue = '0';
+      syncDashMoneyField();
       new bootstrap.Modal(document.getElementById('userModal')).show();
     }
+
+    // An admin always sees the dashboard money, so for that role the box is
+    // shown ticked and locked rather than offering a choice that does nothing.
+    // The cashier's own choice is remembered underneath (dataset.cashierValue)
+    // so flipping the role to Admin and back does not lose it.
+    function syncDashMoneyField() {
+      const box = document.getElementById('user-dash-money');
+      const isAdmin = document.getElementById('user-role').value === 'admin';
+      if (isAdmin) {
+        if (!box.disabled) box.dataset.cashierValue = box.checked ? '1' : '0';
+        box.checked = true;
+        box.disabled = true;
+      } else {
+        if (box.disabled) box.checked = box.dataset.cashierValue === '1';
+        box.disabled = false;
+      }
+      document.getElementById('user-dash-money-hint').textContent = isAdmin
+        ? 'Admins always see today\'s money on the dashboard.'
+        : 'Today\'s sales, profit, expenses and money received by method. When off, this cashier\'s dashboard shows only bill counts, stock alerts and recent bills.';
+    }
+    document.getElementById('user-role').addEventListener('change', syncDashMoneyField);
 
     function editUser(id) {
       const u = allUsers.find(x => x.id === id);
@@ -94,6 +126,11 @@
       document.getElementById('pw-hint').textContent = '(leave blank to keep current)';
       document.getElementById('user-role').value = u.role;
       document.getElementById('user-active').checked = !!u.is_active;
+      const dashBox = document.getElementById('user-dash-money');
+      dashBox.disabled = false;
+      dashBox.checked = !!u.show_dashboard_money;
+      dashBox.dataset.cashierValue = u.show_dashboard_money ? '1' : '0';
+      syncDashMoneyField();
       new bootstrap.Modal(document.getElementById('userModal')).show();
     }
 
@@ -104,6 +141,10 @@
         role: document.getElementById('user-role').value,
         is_active: document.getElementById('user-active').checked ? 1 : 0,
       };
+      // For an admin the box is locked on; store the cashier choice kept
+      // underneath instead, so a later demotion to cashier keeps it.
+      const dashBox = document.getElementById('user-dash-money');
+      data.show_dashboard_money = dashBox.disabled ? dashBox.dataset.cashierValue === '1' : dashBox.checked;
       const pw = document.getElementById('user-password').value;
 
       await withBusy(btn, async () => {

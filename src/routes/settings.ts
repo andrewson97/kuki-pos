@@ -41,26 +41,34 @@ settings.put("/", adminOnly, async (c) => {
 // User management (admin only)
 settings.get("/users", adminOnly, (c) => {
   const db = getDb();
-  return c.json(db.query("SELECT id, username, full_name, role, is_active, created_at FROM users ORDER BY id").all());
+  return c.json(db.query("SELECT id, username, full_name, role, is_active, show_dashboard_money, created_at FROM users ORDER BY id").all());
 });
 
+// show_dashboard_money: whether a cashier sees the day's money on the
+// dashboards (see canSeeDashboardMoney in ../middleware/auth). Stored as 0/1;
+// anything truthy from the form counts as on. Ignored for admins, who always
+// see it, but stored as sent so flipping someone's role back keeps their choice.
+const dashboardMoneyFlag = (v: unknown): number => (v === true || v === 1 || v === "1" ? 1 : 0);
+
 settings.post("/users", adminOnly, async (c) => {
-  const { username, password, full_name, role } = await c.req.json();
+  const { username, password, full_name, role, show_dashboard_money } = await c.req.json();
   const db = getDb();
   const hash = await Bun.password.hash(password, { algorithm: "bcrypt", cost: 10 });
   const result = db.query(
-    "INSERT INTO users (username, password_hash, full_name, role) VALUES (?, ?, ?, ?)"
-  ).run(username, hash, full_name, role || "cashier");
+    "INSERT INTO users (username, password_hash, full_name, role, show_dashboard_money) VALUES (?, ?, ?, ?, ?)"
+  ).run(username, hash, full_name, role || "cashier", dashboardMoneyFlag(show_dashboard_money));
   return c.json({ id: Number(result.lastInsertRowid) });
 });
 
 settings.put("/users/:id", adminOnly, async (c) => {
   const id = c.req.param("id");
-  const { full_name, role, is_active, password } = await c.req.json();
+  const { full_name, role, is_active, password, show_dashboard_money } = await c.req.json();
   const db = getDb();
-  db.query("UPDATE users SET full_name = ?, role = ?, is_active = ? WHERE id = ?").run(
-    full_name, role, is_active, id
-  );
+  // show_dashboard_money only changes when the form sends it, so an older
+  // client that does not know the field cannot switch it off by omission.
+  db.query(
+    "UPDATE users SET full_name = ?, role = ?, is_active = ?, show_dashboard_money = COALESCE(?, show_dashboard_money) WHERE id = ?"
+  ).run(full_name, role, is_active, show_dashboard_money === undefined ? null : dashboardMoneyFlag(show_dashboard_money), id);
   if (password) {
     const hash = await Bun.password.hash(password, { algorithm: "bcrypt", cost: 10 });
     db.query("UPDATE users SET password_hash = ? WHERE id = ?").run(hash, id);

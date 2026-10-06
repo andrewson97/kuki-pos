@@ -198,12 +198,15 @@
       return label ? `<span class="badge bg-light text-dark border">${label}</span>` : '';
     }
 
-    // The day's money is admin-only. The server already leaves those fields out
-    // of the response for a cashier, so the tiles are taken out of the layout
-    // rather than left showing a dash - and the remaining tiles are rearranged
-    // so the page still reads as a finished dashboard instead of a gap.
+    // The day's money is for admins, and for cashiers an admin has allowed to
+    // see it (Users page -> "Show today's money on the dashboard"); /api/auth/me
+    // reports that as currentUser.show_dashboard_money. The server already
+    // leaves those fields out of the response for everyone else, so the tiles
+    // are taken out of the layout rather than left showing a dash - and the
+    // remaining tiles are rearranged so the page still reads as a finished
+    // dashboard instead of a gap.
     function applyMoneyVisibility() {
-      if (currentUser && currentUser.role === 'admin') return;
+      if (currentUser && (currentUser.role === 'admin' || currentUser.show_dashboard_money)) return;
       document.querySelectorAll('[data-money]').forEach(el => el.remove());
       const mainRow = document.getElementById('stats-row-main');
       const bills = document.getElementById('col-bills');

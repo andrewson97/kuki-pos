@@ -699,6 +699,12 @@ export function runMigrations(): void {
   // existing row gets 0, which is right: before skip_stock existed, collections
   // went through the ordinary stock deduction like any other sale.
   addColumn("bills", "stock_skipped", "INTEGER NOT NULL DEFAULT 0");
+
+  // Per-cashier choice, made by an admin on the Users page: may this cashier
+  // see the day's money (sales, profit, expenses, money received) on the
+  // dashboards? Default 0 = hidden, exactly how every cashier behaved before
+  // the option existed. Admins always see it regardless (canSeeDashboardMoney).
+  addColumn("users", "show_dashboard_money", "INTEGER NOT NULL DEFAULT 0");
 }
 
 export function seedDefaults(): void {

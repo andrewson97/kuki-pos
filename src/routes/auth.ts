@@ -63,7 +63,7 @@ auth.get("/me", (c) => {
   }
   const db = getDb();
   const session = db.query(`
-    SELECT u.id, u.username, u.full_name, u.role
+    SELECT u.id, u.username, u.full_name, u.role, u.show_dashboard_money
     FROM sessions s
     JOIN users u ON s.user_id = u.id
     WHERE s.id = ? AND s.expires_at > datetime('now') AND u.is_active = 1
@@ -71,7 +71,18 @@ auth.get("/me", (c) => {
   if (!session) {
     return c.json({ error: "Session expired" }, 401);
   }
-  return c.json({ user: { id: session.id, username: session.username, full_name: session.full_name, role: session.role } });
+  // show_dashboard_money lets the dashboard drop its money tiles before the
+  // stats arrive (no flash of figures a cashier is not meant to see). The
+  // server still decides what the stats contain — see canSeeDashboardMoney().
+  return c.json({
+    user: {
+      id: session.id,
+      username: session.username,
+      full_name: session.full_name,
+      role: session.role,
+      show_dashboard_money: session.role === "admin" || !!session.show_dashboard_money,
+    },
+  });
 });
 
 export default auth;
