@@ -339,14 +339,15 @@ export function runMigrations(): void {
     -- One bill can settle at most one pre-order. Partial (WHERE bill_id IS NOT
     -- NULL) because every uncollected order carries NULL and those must not
     -- collide, and because it doubles as the "which order did this bill
-    -- settle?" lookup, which only ever searches non-NULL values. Together with
-    -- the deterministic cart_id used at collection ('preorder-<id>', which the
-    -- UNIQUE index on bills(cart_id, cart_fingerprint) guards) this makes a
-    -- double-tapped Collect physically unable to produce two bills or two
-    -- links: a double tap resubmits the IDENTICAL collection, so it hashes to
-    -- the same fingerprint and replays. (A second Collect that is not identical
-    -- cannot get that far anyway: POST /:id/collect refuses an order whose
-    -- status is already 'collected' with a 409 before any bill is written.)
+    -- settle?" lookup, which only ever searches non-NULL values. It is the
+    -- database's last word; the real guarantee against two bills for one order
+    -- is in POST /:id/collect, which re-reads the order's status, writes the
+    -- bill and marks the order collected in ONE immediate transaction. A second
+    -- Collect - a double tap, or a second till with a different payment method
+    -- (and so a different bills.cart_fingerprint, which the bills index would
+    -- NOT catch) - therefore finds the order already 'collected' and gets a 409
+    -- carrying the first bill, and a crash part-way leaves neither a bill nor a
+    -- link behind.
     CREATE UNIQUE INDEX IF NOT EXISTS idx_pre_orders_bill ON pre_orders(bill_id) WHERE bill_id IS NOT NULL;
 
     -- A line is EITHER a catalogue product OR a free-text custom line, and both
@@ -545,6 +546,61 @@ export function runMigrations(): void {
   } catch {
     // Silent — fine if products table is empty or anything odd.
   }
+
+  // ---------------------------------------------------------------------------
+  // fix/preorders — what a collection bill had already been paid, and what
+  // happened to the deposit of a cancelled order.
+  // ---------------------------------------------------------------------------
+  // bills.paid_in_advance: on a pre-order's collection bill, the deposits taken
+  // BEFORE collection (the same figure the collect route subtracts to get
+  // cash_to_collect). The bill itself records the FULL sale, so without this the
+  // bill alone cannot say how much of it changed hands at the till: a reprint
+  // could not print "Paid in advance / Balance", and a report splitting the
+  // day's takings by method would count the deposit twice (once on the day it
+  // was taken, again inside this bill's total). 0 for every ordinary sale.
+  // The exact declaration is shared with the reports branch, which adds the
+  // identical line; addColumn() swallows the second ALTER, so they cannot fight.
+  addColumn("bills", "paid_in_advance", "REAL NOT NULL DEFAULT 0");
+  // One-shot backfill for collection bills written before the column existed.
+  // Only rows still at 0 and actually linked from a pre-order are touched, and
+  // the figure is recomputed from pre_order_payments, which holds pre-collection
+  // payments only (see that table's comment) — so re-running it is a no-op.
+  try {
+    db.exec(`
+      UPDATE bills SET paid_in_advance = (
+        SELECT COALESCE(SUM(pop.amount), 0)
+        FROM pre_orders po JOIN pre_order_payments pop ON pop.pre_order_id = po.id
+        WHERE po.bill_id = bills.id
+      )
+      WHERE paid_in_advance = 0
+        AND id IN (SELECT bill_id FROM pre_orders WHERE bill_id IS NOT NULL)
+    `);
+  } catch (err: any) {
+    console.error("[migration] paid_in_advance backfill failed:", err?.message || err);
+  }
+
+  // The deposit of a CANCELLED pre-order. Cancelling used to leave it in limbo:
+  // the screen said "pay it back as a cash expense" (which wrongly cut profit),
+  // a deposit the customer forfeited never became income, and money owed back
+  // simply vanished. Now cancelling an order that has payments must settle them
+  // one of two ways, recorded here:
+  //   deposit_outcome         'refunded' | 'kept'; NULL when there was nothing
+  //                           to settle (or for orders cancelled before this).
+  //   deposit_settled_amount  what was refunded / kept: the order's payments at
+  //                           the moment of cancelling.
+  //   deposit_refund_method   cash | card | upi, refunds only. A CASH refund is
+  //                           money leaving the drawer, which the cash shift
+  //                           subtracts (getDepositsRefundedSince in
+  //                           src/routes/cash.ts) — not an expense, not income.
+  //   deposit_settled_at      UTC datetime('now'), what a shift window compares.
+  //   deposit_settled_by      users.id of the admin who cancelled.
+  // A KEPT deposit is written to the income table as well, so it appears in the
+  // existing income reports without any report knowing about pre-orders.
+  addColumn("pre_orders", "deposit_outcome", "TEXT");
+  addColumn("pre_orders", "deposit_settled_amount", "REAL");
+  addColumn("pre_orders", "deposit_refund_method", "TEXT");
+  addColumn("pre_orders", "deposit_settled_at", "TEXT");
+  addColumn("pre_orders", "deposit_settled_by", "INTEGER");
 }
 
 export function seedDefaults(): void {
