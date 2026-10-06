@@ -60,7 +60,8 @@ type PaymentMethod = (typeof PAYMENT_METHODS)[number];
  *               customer's name on it. This is the one state the KITCHEN sets
  *               rather than the till, and it is the whole point of the
  *               production view: "what still has to be baked for today" is
- *               collection_date = today AND status = 'taken'.
+ *               collection_date <= today AND status = 'taken' (today's orders
+ *               plus overdue ones nobody made yet).
  *   collected — sold. A bill exists (bill_id) and the money is settled. (No
  *               stock moves — see rule 1 above.) Terminal.
  *   cancelled — the order will not happen. Terminal. Any deposit was settled
