@@ -2,7 +2,7 @@ export function generateSessionId(): string {
   return crypto.randomUUID();
 }
 
-export function formatCurrency(amount: number, symbol: string = "₹"): string {
+export function formatCurrency(amount: number, symbol: string = "Rs."): string {
   return `${symbol}${amount.toFixed(2)}`;
 }
 

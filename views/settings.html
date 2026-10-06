@@ -22,7 +22,7 @@
             <hr>
             <h6 class="fw-bold mb-3">Billing</h6>
             <div class="row mb-3">
-              <div class="col-md-6"><label class="form-label">Tax Rate (%)</label><input type="number" class="form-control" id="s-tax-rate" step="0.01" min="0"></div>
+              <div class="col-md-6"><label class="form-label">Tax Rate (%)</label><input type="number" class="form-control" id="s-tax-rate" step="any" min="0"></div>
               <div class="col-md-6"><label class="form-label">Currency Symbol</label><input type="text" class="form-control" id="s-currency" maxlength="5"></div>
             </div>
             <hr>
@@ -68,8 +68,8 @@
               <tr><td><kbd>F2</kbd></td><td>Search products</td></tr>
               <tr><td><kbd>F9</kbd></td><td>Pay with Cash</td></tr>
               <tr><td><kbd>F10</kbd></td><td>Pay with Card</td></tr>
-              <tr><td><kbd>F11</kbd></td><td>Pay with UPI</td></tr>
-              <tr><td><kbd>Esc</kbd></td><td>Clear cart</td></tr>
+              <tr><td><kbd>F11</kbd></td><td>Pay with LankaQR</td></tr>
+              <tr><td><kbd>Esc</kbd></td><td>Close the open dialog</td></tr>
             </table>
           </div>
 
@@ -93,7 +93,7 @@
       document.getElementById('s-shop-address').value = s.shop_address || '';
       document.getElementById('s-shop-phone').value = s.shop_phone || '';
       document.getElementById('s-tax-rate').value = s.tax_rate || '0';
-      document.getElementById('s-currency').value = s.currency_symbol || '\u20B9';
+      document.getElementById('s-currency').value = s.currency_symbol || 'Rs.';
       document.getElementById('s-printer-type').value = s.printer_type || 'none';
       document.getElementById('s-printer-address').value = s.printer_address || '';
       document.getElementById('s-enforce-shift').checked = (s.enforce_cash_shift ?? '1') === '1';
