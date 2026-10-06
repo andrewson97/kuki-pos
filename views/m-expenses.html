@@ -114,7 +114,7 @@
             <span class="list-amount">${fmt(e.amount)}</span>
           </div>
           <div class="list-head" style="margin-top:4px;">
-            <span class="list-meta">${escapeHtml(e.category_name || '-')} · ${(e.payment_source || 'cash').toUpperCase()} · ${formatDate(e.expense_date)}</span>
+            <span class="list-meta">${escapeHtml(e.category_name || '-')} · ${e.payment_source === 'upi' ? 'LankaQR' : (e.payment_source || 'cash').toUpperCase()} · ${formatDate(e.expense_date)}</span>
             <span class="badge ${cls}">${e.status}</span>
           </div>
           <div class="list-meta">by ${escapeHtml(e.user_name || '-')}${e.approver_name && e.status !== 'pending' ? ` · ${e.status} by ${escapeHtml(e.approver_name)}` : ''}${e.rejected_reason ? ` · "${escapeHtml(e.rejected_reason)}"` : ''}</div>

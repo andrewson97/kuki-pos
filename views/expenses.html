@@ -125,7 +125,7 @@
           <td>${formatDate(e.expense_date)}</td>
           <td><span class="badge bg-secondary">${e.category_name || '-'}</span></td>
           <td class="fw-bold">${formatCurrency(e.amount)}</td>
-          <td><small>${(e.payment_source || 'cash').toUpperCase()}</small></td>
+          <td><small>${e.payment_source === 'upi' ? 'LankaQR' : (e.payment_source || 'cash').toUpperCase()}</small></td>
           <td>${e.description || '-'}</td>
           <td>${e.user_name || '-'}${e.approver_name && e.status !== 'pending' ? `<br><small class="text-muted">${e.status} by ${e.approver_name}</small>` : ''}</td>
           <td>${statusBadge}</td>
