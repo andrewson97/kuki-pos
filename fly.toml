@@ -1,5 +1,8 @@
 app = "kuki-pos"
-primary_region = "bom"
+# Mumbai (bom) is deprecated on fly.io and cannot take new resources.
+# Singapore is the nearest region to the shop: ~3,400 km from Colombo
+# against ~8,100 km to Amsterdam, where this used to run.
+primary_region = "sin"
 
 [build]
 
