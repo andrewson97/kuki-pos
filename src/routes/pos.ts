@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { getDb } from "../db/database";
 import { getUser } from "../middleware/auth";
-import { createBill, findBillByCartId, findBillBySale, saleFingerprint, getNextTokenNumber } from "../services/billing";
+import { createBill, computeBillTotals, findBillByCartId, findBillBySale, saleFingerprint, getNextTokenNumber } from "../services/billing";
 import { getSettings, buildReceiptText, buildKitchenTicket, buildProformaText, queuePrint } from "../services/printer";
 import { restoreStockForBill } from "../services/stock";
 import {
@@ -20,6 +20,89 @@ pos.get("/token", (c) => {
   return c.json({ next_token: getNextTokenNumber() });
 });
 
+// ---------------------------------------------------------------------------
+// The sale key and the slips — shared by POST /bill and POST /bill/status
+// ---------------------------------------------------------------------------
+// POST /bill/status answers "did THIS request body already become a bill?", so
+// it has to resolve the tax rate, apply the defaults and hash the sale EXACTLY
+// as POST /bill does, and build the receipt exactly as POST /bill does. Two
+// copies would drift, and a drifted fingerprint answers "not found" for a sale
+// that IS on the books — which tells the cashier to take the money again: the
+// very double charge the status check exists to prevent. So both routes call
+// these two functions and neither has an inline copy.
+function resolveSaleKey(body: any, settings: Record<string, string>) {
+  const tax_rate = body.tax_rate ?? parseFloat(settings.tax_rate || "0");
+  // Fingerprinted from the RESOLVED tax rate and the same defaults createBill()
+  // applies, so this hash and the one it computes cannot disagree.
+  const cartId = String(body.cart_id || "").trim();
+  const fingerprint = cartId
+    ? saleFingerprint({
+        items: body.items,
+        customer_id: body.customer_id || null,
+        discount: body.discount || 0,
+        tax_rate,
+        payment_method: body.payment_method || "cash",
+        amount_given: body.amount_given ?? null,
+      })
+    : "";
+  return { tax_rate, cartId, fingerprint };
+}
+
+/**
+ * The customer slip and the kitchen ticket for a stored bill, read back out of
+ * the database (never out of the request), so a fresh sale, a replay and a
+ * status lookup all print the one real bill.
+ *
+ * describeStoredSale: true when this request is NOT the one that took the
+ * money (a replay, a status lookup). The slip must then describe the SALE —
+ * the time the money was taken and the cashier who took it, exactly as the
+ * reprint route does. For a fresh sale both are "now" and "me".
+ */
+function buildBillSlips(
+  billId: number,
+  tokenNumber: number,
+  user: { full_name: string },
+  settings: Record<string, string>,
+  describeStoredSale: boolean
+): { receiptText: string; kitchenText: string } {
+  const db = getDb();
+  const billItems = db.query("SELECT * FROM bill_items WHERE bill_id = ?").all(billId) as any[];
+  const fullBill = db.query("SELECT * FROM bills WHERE id = ?").get(billId) as any;
+  let customerName: string | undefined;
+  if (fullBill.customer_id) {
+    const cust = db.query("SELECT name FROM customers WHERE id = ?").get(fullBill.customer_id) as any;
+    customerName = cust?.name;
+  }
+
+  const billDateText = formatDateTime(describeStoredSale ? fullBill.created_at : new Date().toISOString());
+  let cashierName = user.full_name;
+  if (describeStoredSale && fullBill.user_id) {
+    const orig = db.query("SELECT full_name FROM users WHERE id = ?").get(fullBill.user_id) as any;
+    if (orig?.full_name) cashierName = orig.full_name;
+  }
+
+  const receiptData = {
+    shopName: settings.shop_name || "My Cake Shop",
+    shopAddress: settings.shop_address || "",
+    shopPhone: settings.shop_phone || "",
+    tokenNumber,
+    billDate: billDateText,
+    items: billItems.map((i: any) => ({ name: i.product_name, qty: i.quantity, price: i.unit_price, total: i.total, original_price: i.original_price })),
+    subtotal: fullBill.subtotal,
+    discount: fullBill.discount,
+    taxRate: fullBill.tax_rate,
+    taxAmount: fullBill.tax_amount,
+    total: fullBill.total,
+    paymentMethod: fullBill.payment_method,
+    cashierName,
+    customerName,
+    amountGiven: fullBill.amount_given,
+    changeGiven: fullBill.change_given,
+  };
+  // Pure string work — the device write, when there is one, is the caller's.
+  return { receiptText: buildReceiptText(receiptData), kitchenText: buildKitchenTicket(receiptData) };
+}
+
 pos.post("/bill", async (c) => {
   const user = getUser(c)!;
   const body = await c.req.json();
@@ -29,7 +112,6 @@ pos.post("/bill", async (c) => {
   }
 
   const settings = getSettings();
-  const tax_rate = body.tax_rate ?? parseFloat(settings.tax_rate || "0");
 
   // Server-side duplicate-bill protection. The client guard (withBusy + the
   // checkoutInProgress flag) lives in one browser tab; two tabs, a reload
@@ -45,19 +127,9 @@ pos.post("/bill", async (c) => {
   //     swallowed it the same way. Only a match from the last few minutes is a
   //     retry; anything older is a repeat order and gets its own bill.
   //
-  // Fingerprinted from the RESOLVED tax rate and the same defaults createBill()
-  // applies, so this hash and the one it computes cannot disagree.
-  const cartId = String(body.cart_id || "").trim();
-  const fingerprint = cartId
-    ? saleFingerprint({
-        items: body.items,
-        customer_id: body.customer_id || null,
-        discount: body.discount || 0,
-        tax_rate,
-        payment_method: body.payment_method || "cash",
-        amount_given: body.amount_given ?? null,
-      })
-    : "";
+  // resolveSaleKey() is shared with POST /bill/status, which must reach the
+  // very same fingerprint for the very same body.
+  const { tax_rate, cartId, fingerprint } = resolveSaleKey(body, settings);
 
   // This lookup is ADVISORY ONLY: it decides nothing about writing (createBill()
   // repeats the check inside its transaction, where it cannot go stale). It is
@@ -137,51 +209,12 @@ pos.post("/bill", async (c) => {
   // this cart is sold either way.
   releaseParkedCart(cartId);
 
-  // Generate receipt
-  const db = getDb();
-  const billItems = db.query("SELECT * FROM bill_items WHERE bill_id = ?").all(bill.id) as any[];
-  const fullBill = db.query("SELECT * FROM bills WHERE id = ?").get(bill.id) as any;
-  let customerName: string | undefined;
-  if (fullBill.customer_id) {
-    const cust = db.query("SELECT name FROM customers WHERE id = ?").get(fullBill.customer_id) as any;
-    customerName = cust?.name;
-  }
-
-  // On a replay the slip must describe the SALE, not this request: the time the
-  // money was taken and the cashier who took it, exactly as the reprint route
-  // does. For a fresh sale both are "now" and "me", so nothing changes there.
-  const billDateText = formatDateTime(isReplay ? fullBill.created_at : new Date().toISOString());
-  let cashierName = user.full_name;
-  if (isReplay && fullBill.user_id) {
-    const orig = db.query("SELECT full_name FROM users WHERE id = ?").get(fullBill.user_id) as any;
-    if (orig?.full_name) cashierName = orig.full_name;
-  }
-
-  const receiptData = {
-    shopName: settings.shop_name || "My Cake Shop",
-    shopAddress: settings.shop_address || "",
-    shopPhone: settings.shop_phone || "",
-    tokenNumber: bill.token_number,
-    billDate: billDateText,
-    items: billItems.map((i: any) => ({ name: i.product_name, qty: i.quantity, price: i.unit_price, total: i.total, original_price: i.original_price })),
-    subtotal: fullBill.subtotal,
-    discount: fullBill.discount,
-    taxRate: fullBill.tax_rate,
-    taxAmount: fullBill.tax_amount,
-    total: fullBill.total,
-    paymentMethod: fullBill.payment_method,
-    cashierName,
-    customerName,
-    amountGiven: fullBill.amount_given,
-    changeGiven: fullBill.change_given,
-  };
-
   // Build the slips synchronously (pure string work), then hand the device write to
   // the print queue WITHOUT awaiting it. The bill is already committed at this point,
   // so a slow/jammed/offline printer must not keep the cashier staring at a frozen
-  // screen — that wait is what made them tap Pay twice.
-  const receiptText = buildReceiptText(receiptData);
-  const kitchenText = buildKitchenTicket(receiptData);
+  // screen — that wait is what made them tap Pay twice. On a replay the slip
+  // describes the original sale (its time, its cashier) — see buildBillSlips().
+  const { receiptText, kitchenText } = buildBillSlips(bill.id, bill.token_number, user, settings, isReplay);
   // A replay does NOT re-queue the device write. The sale that was actually
   // recorded already queued its slip, and a second identical slip bearing the
   // same token is worse than no slip: two pieces of paper for one sale is
@@ -212,6 +245,85 @@ pos.post("/bill", async (c) => {
   return c.json({ ...bill, receipt_text: receiptText, kitchen_text: kitchenText, print_queued: !isReplay });
 });
 
+// ---------------------------------------------------------------------------
+// "Did my last sale go through?" — the lost-response check
+// ---------------------------------------------------------------------------
+// Body: EXACTLY the body the till sent to POST /bill (it keeps a copy of it as
+// a "pending attempt" until it gets a clear answer).
+// Answers { found: true, ...bill, receipt_text, kitchen_text } or { found: false }.
+//
+// WHY THIS EXISTS. When the request reached the server and committed but the
+// answer never got back (flaky wifi, a fly.io cold start, a tab that slept),
+// the till showed "Failed to fetch" with the cart still on screen. If the
+// cashier then retried with ANYTHING different — the other cash preset, Card
+// instead of Cash, the customer's name added — that was a different
+// fingerprint, not a replay, and a SECOND bill was written for one sale. The
+// replay guard can only catch a byte-identical retry; it cannot catch a
+// cashier who reasonably changed something. So the till now refuses to take
+// another payment until it has ASKED, with the body it actually sent, and this
+// is where it asks.
+//
+// Pure lookup: it never writes a bill and NEVER queues a print. The sale that
+// was recorded already queued its slip; a second piece of paper with the same
+// token is exactly the confusion this exists to prevent. The text comes back
+// so the till can show the receipt and print it on demand like any other.
+//
+// WHY THE LOOKUP IS NOT TIME-BOUNDED (unlike the replay gate in createBill()).
+// findBillBySale() only matches the last REPLAY_WINDOW_MINUTES, because a
+// stale cart id used to carry LATER, DIFFERENT customers' baskets and the
+// window is what told a retry from a repeat order. That cannot happen here:
+// the till asks about one specific attempt it knows it sent, it blocks every
+// further payment until it has an answer, and cart ids now rotate when a sale
+// BEGINS — so nothing else can have been rung up under this cart id since. A
+// till that was offline for half an hour must still be told "yes, that went
+// through", because "no" sends the cashier to charge the customer again AND
+// (being outside the window) POST /bill would then write a second bill. So
+// findBillBySale() — the one definition of "this sale, just now" — is asked
+// first, and the same pair without the window is the fallback.
+const SELECT_BILL_BY_SALE_ANY_TIME =
+  "SELECT id, token_number, total, bill_date FROM bills WHERE cart_id = ? AND cart_fingerprint = ?" +
+  " ORDER BY created_at DESC, id DESC LIMIT 1";
+
+pos.post("/bill/status", async (c) => {
+  const user = getUser(c)!;
+  const body = await c.req.json().catch(() => null);
+  // Same refusal POST /bill would give the same body — so the till, which
+  // treats a clear 400 as "that attempt was never recorded", is right to.
+  if (!body || !Array.isArray(body.items) || body.items.length === 0) {
+    return c.json({ error: "No items in bill" }, 400);
+  }
+
+  const settings = getSettings();
+  const { cartId, fingerprint } = resolveSaleKey(body, settings);
+  // No cart id, no key: POST /bill does not dedupe such a sale either, so
+  // there is nothing to look up. Both tills always send one.
+  if (!cartId || !fingerprint) return c.json({ found: false });
+
+  let bill = findBillBySale(cartId, fingerprint);
+  if (!bill) {
+    const row = getDb().query(SELECT_BILL_BY_SALE_ANY_TIME).get(cartId, fingerprint) as any;
+    if (row) bill = { id: row.id, token_number: row.token_number, total: row.total, bill_date: row.bill_date, replayed: true };
+  }
+  if (!bill) return c.json({ found: false });
+
+  // The cart is sold, so tidy up after it exactly as a replay through POST
+  // /bill does — normally all three are already gone, but a hold sync that
+  // was in flight when the sale committed can land just after it.
+  releaseCartReservations(cartId);
+  releaseCartClaim(cartId);
+  releaseParkedCart(cartId);
+
+  // Not the request that took the money, so the slip describes the stored
+  // sale: its time and its cashier.
+  const { receiptText, kitchenText } = buildBillSlips(bill.id, bill.token_number, user, settings, true);
+  console.warn(
+    `[pos] status check found cart ${cartId} (fingerprint ${fingerprint.slice(0, 12)}) already billed as #${bill.id} token #${bill.token_number} — a lost response, recovered`
+  );
+  // Same shape as a POST /bill replay, plus `found`, so the till renders it
+  // through the same path. replayed: true — nothing new was written.
+  return c.json({ found: true, ...bill, replayed: true, receipt_text: receiptText, kitchen_text: kitchenText, print_queued: false });
+});
+
 // Pre-payment slip. The cashier prints this, hands it over, takes the money and
 // THEN presses Pay, which runs POST /bill exactly as before.
 //
@@ -235,7 +347,6 @@ pos.post("/proforma", async (c) => {
 
   const settings = getSettings();
   const tax_rate = body.tax_rate ?? parseFloat(settings.tax_rate || "0");
-  const discount = body.discount || 0;
   const items = body.items as {
     product_name: string;
     quantity: number;
@@ -243,15 +354,20 @@ pos.post("/proforma", async (c) => {
     original_price?: number;
   }[];
 
-  // Totals: copied line for line from createBill() in src/services/billing.ts so
-  // the figure on this slip cannot drift from the figure the customer is charged
-  // a minute later. Same operands, same order, same lack of rounding — including
-  // NOT clamping taxableAmount at zero, because createBill() doesn't either.
-  // If billing.ts ever changes, this block must change with it.
-  const subtotal = items.reduce((sum, item) => sum + item.quantity * item.unit_price, 0);
-  const taxableAmount = subtotal - discount;
-  const tax_amount = taxableAmount * (tax_rate / 100);
-  const total = taxableAmount + tax_amount;
+  // Totals: the SAME function createBill() uses (src/services/billing.ts), so
+  // the figure on this slip cannot drift from the figure the customer is
+  // charged a minute later — same validation, same cent rounding, same order.
+  // This used to be a line-for-line copy with a "keep in step" note; a copy
+  // that missed the discount cap would happily print a slip for a negative
+  // amount that the bill route then refuses. A bad discount or line is refused
+  // here with the same wording POST /bill would use.
+  let totals;
+  try {
+    totals = computeBillTotals(items, body.discount || 0, tax_rate);
+  } catch (err: any) {
+    return c.json({ error: err?.message || "Could not work out this bill" }, 400);
+  }
+  const { lineTotals, subtotal, discount, tax_amount, total } = totals;
 
   let customerName: string | undefined;
   if (body.customer_id) {
@@ -265,11 +381,11 @@ pos.post("/proforma", async (c) => {
     shopAddress: settings.shop_address || "",
     shopPhone: settings.shop_phone || "",
     billDate: formatDateTime(new Date().toISOString()),
-    items: items.map((i) => ({
+    items: items.map((i, idx) => ({
       name: i.product_name,
       qty: i.quantity,
       price: i.unit_price,
-      total: i.quantity * i.unit_price,
+      total: lineTotals[idx] as number,
       original_price: i.original_price,
     })),
     subtotal,

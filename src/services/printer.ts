@@ -29,6 +29,17 @@ export function getSettings(): Record<string, string> {
   return settings;
 }
 
+// How a stored payment method reads on paper. 'upi' is what the database has
+// always stored (and its CHECK constraint allows), but what Sri Lankan
+// customers actually scan at this counter is LankaQR — the national QR
+// standard — so that is the word on the slip. The stored value is unchanged;
+// only the label is. Cash and card print as they always have.
+function paymentLabel(method: string): string {
+  const m = String(method || "").trim().toLowerCase();
+  if (m === "upi") return "LankaQR";
+  return String(method || "").toUpperCase();
+}
+
 export function buildReceiptText(data: PrintReceiptData): string {
   const lines: string[] = [];
   const w = 28; // 57mm printer ~ 28 chars at 13px monospace
@@ -39,9 +50,11 @@ export function buildReceiptText(data: PrintReceiptData): string {
   };
 
   // Shop name is shown via the logo image above the text, so don't repeat it here.
+  // The phone number is NOT printed up here any more: it is the last line of the
+  // slip (see the footer below), and printing it twice on a 28-column slip only
+  // costs paper.
   if (data.shopAddress) lines.push(center(data.shopAddress));
-  if (data.shopPhone) lines.push(center(`Tel: ${data.shopPhone}`));
-  if (data.shopAddress || data.shopPhone) lines.push("-".repeat(w));
+  if (data.shopAddress) lines.push("-".repeat(w));
   lines.push(`Token: #${String(data.tokenNumber).padStart(3, "0")}`);
   lines.push(`Date: ${data.billDate}`);
   if (data.customerName) lines.push(`Customer: ${data.customerName}`);
@@ -82,7 +95,7 @@ export function buildReceiptText(data: PrintReceiptData): string {
   if (data.taxAmount > 0) lines.push(totalLine(`Tax (${data.taxRate}%)`, data.taxAmount));
   lines.push("=".repeat(w));
   lines.push(totalLine("TOTAL", data.total));
-  lines.push(`${"Payment".padEnd(17)} ${data.paymentMethod.toUpperCase().padStart(10)}`);
+  lines.push(`${"Payment".padEnd(17)} ${paymentLabel(data.paymentMethod).padStart(10)}`);
   if (data.amountGiven != null) {
     lines.push(totalLine("Cash Given", data.amountGiven));
     lines.push(totalLine("Change", data.changeGiven ?? 0));
@@ -90,7 +103,12 @@ export function buildReceiptText(data: PrintReceiptData): string {
   lines.push("=".repeat(w));
   lines.push("");
   lines.push(center("Thank you! Visit again!"));
-  lines.push(center("+94 76 565 2881"));
+  // The shop's own number, from Settings — it used to be hard-coded here, so a
+  // changed number meant a code change and the Settings field did nothing on
+  // the slip's last line. A one-shot in runMigrations() (fix/till) copied the
+  // old hard-coded number into settings.shop_phone wherever it was empty, so
+  // existing receipts keep showing it. Blank in Settings = no number printed.
+  if (data.shopPhone) lines.push(center(data.shopPhone));
 
   return lines.join("\n");
 }

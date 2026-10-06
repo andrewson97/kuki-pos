@@ -557,6 +557,37 @@ export function runMigrations(): void {
   } catch {
     // Silent — settings table always exists by now; nothing to recover anyway.
   }
+
+  // ===== fix/till =====================================================
+  // One-shot: the receipt footer's phone number moves into Settings.
+  //
+  // buildReceiptText() (src/services/printer.ts) used to print a hard-coded
+  // "+94 76 565 2881" as the slip's last line, whatever settings.shop_phone
+  // said. It now prints settings.shop_phone instead — so a shop whose setting
+  // is blank would silently lose the number from every receipt. Copy the old
+  // hard-coded number in wherever the setting is missing or blank.
+  //
+  // ONCE, not on every boot: a marker row records that it ran. Without it, an
+  // owner who deliberately blanks the number in Settings would have it put
+  // back by the next restart. The upsert also covers a brand-new database,
+  // where this runs before seedDefaults() has created the shop_phone row at
+  // all (seedDefaults() then leaves it alone: INSERT OR IGNORE). Both writes
+  // in one transaction, so a failure leaves neither behind and the next boot
+  // simply tries again.
+  try {
+    const done = db.query("SELECT 1 FROM settings WHERE key = 'migration_fix_till_shop_phone'").get();
+    if (!done) {
+      db.transaction(() => {
+        db.query(
+          "INSERT INTO settings (key, value) VALUES ('shop_phone', ?) " +
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value WHERE trim(settings.value) = ''"
+        ).run("+94 76 565 2881");
+        db.query("INSERT OR REPLACE INTO settings (key, value) VALUES ('migration_fix_till_shop_phone', '1')").run();
+      })();
+    }
+  } catch (err: any) {
+    console.error("[migration] fix/till: could not default settings.shop_phone:", err?.message || err);
+  }
 }
 
 export function seedDefaults(): void {
