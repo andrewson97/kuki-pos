@@ -1354,6 +1354,30 @@ function listHoldsWithClaims(): any[] {
     });
   }
 
+  // A pending disposal request holds its product under cart 'disposal-<id>'
+  // (src/routes/disposals.ts) so binned stock cannot be sold. No till claims
+  // that cart, so without this it would read as an unclaimed, stranded hold and
+  // the "release unreported holds" sweep would put binned stock back on sale.
+  // The request is a stored fact like a parked bill, so it is a claim of its own.
+  const disposalRows = db.query(`
+    SELECT r.id, r.reason, r.requested_at, u.full_name AS user_name
+    FROM disposal_requests r
+    LEFT JOIN users u ON u.id = r.requested_by
+    WHERE r.status = 'pending'
+  `).all() as any[];
+  for (const d of disposalRows) {
+    byCart.set(`disposal-${d.id}`, {
+      state: "disposal",
+      till_id: null,
+      till_label: "",
+      user_name: d.user_name ?? null,
+      last_seen_at: d.requested_at,
+      label: `Disposal request #${d.id} — ${d.reason}`,
+      disposal_request_id: d.id,
+      source: "disposal_request",
+    });
+  }
+
   return holds.map((h: any) => ({ ...h, claim: byCart.get(h.cart_id) ?? null }));
 }
 
@@ -1371,6 +1395,15 @@ pos.delete("/reservations/:id", adminOnly, (c) => {
     "SELECT r.id, r.quantity, r.cart_id, p.name AS product_name FROM stock_reservations r LEFT JOIN products p ON p.id = r.product_id WHERE r.id = ?"
   ).get(id) as any;
   if (!hold) return c.json({ error: "Hold not found" }, 404);
+  // A pending disposal's hold is not stranded: it is binned stock. Releasing it
+  // here would put it back on sale while the request still says it is gone, so
+  // the request has to be decided instead (rejecting it releases the hold).
+  if (String(hold.cart_id).startsWith("disposal-")) {
+    return c.json(
+      { error: `This stock is held by ${hold.cart_id.replace("disposal-", "disposal request #")}. Approve or reject that request instead.` },
+      409
+    );
+  }
 
   db.transaction(() => {
     releaseHold(id);
@@ -1451,6 +1484,10 @@ function unreportedReason(claim: any, cutoff: string): UnreportedReason | null {
   // listing already lets parked_carts override a till's claim. Discard the bill
   // (which hands the stock back) or release the row by hand instead.
   if (claim.source === "parked_carts") return null;
+
+  // A pending disposal request: binned stock, decided only by approving or
+  // rejecting the request. Never swept, at any age, for the same reason.
+  if (claim.source === "disposal_request") return null;
 
   // What is left is a till's self-report on a cart with no parked bill behind
   // it. It counts only while the till is still checking in. Both timestamps are
