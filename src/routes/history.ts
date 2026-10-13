@@ -113,7 +113,8 @@ const UNIFIED_SQL = `
     NULL                                            AS note,
     st.reference                                    AS reference,
     u.full_name                                     AS user_name,
-    NULL                                            AS cost_loss
+    NULL                                            AS cost_loss,
+    NULL                                            AS anchor_after
   FROM stock_transactions st
   LEFT JOIN stock_items si ON si.id = st.stock_item_id
   LEFT JOIN users u ON u.id = st.user_id
@@ -136,7 +137,8 @@ const UNIFIED_SQL = `
     json_extract(al.details, '$.note'),
     NULL,
     u.full_name,
-    NULL
+    NULL,
+    json_extract(al.details, '$.new_quantity')
   FROM activity_log al
   LEFT JOIN users u ON u.id = al.user_id
   WHERE al.action = 'restocked_product'
@@ -169,7 +171,8 @@ const UNIFIED_SQL = `
       || COALESCE(' — ' || json_extract(al.details, '$.reason'), ''),
     NULL,
     u.full_name,
-    NULL
+    NULL,
+    json_extract(al.details, '$.counted')
   FROM activity_log al
   LEFT JOIN users u ON u.id = al.user_id
   WHERE al.action = 'counted_product_stock'
@@ -192,7 +195,8 @@ const UNIFIED_SQL = `
     d.reason,
     NULL,
     u.full_name,
-    d.cost_loss
+    d.cost_loss,
+    NULL
   FROM product_disposals d
   LEFT JOIN products p ON p.id = d.product_id
   LEFT JOIN users u ON u.id = d.user_id
@@ -216,6 +220,7 @@ const UNIFIED_SQL = `
     NULL,
     'Bill #' || b.token_number,
     u.full_name,
+    NULL,
     NULL
   FROM bill_items bi
   JOIN bills b ON b.id = bi.bill_id
@@ -243,6 +248,7 @@ const UNIFIED_SQL = `
     'Component of ' || bi.product_name,
     'Bill #' || b.token_number,
     u.full_name,
+    NULL,
     NULL
   FROM bill_items bi
   JOIN bills b ON b.id = bi.bill_id
@@ -272,6 +278,7 @@ const UNIFIED_SQL = `
     'Cart ' || COALESCE(json_extract(al.details, '$.cart_id'), '?'),
     NULL,
     u.full_name,
+    NULL,
     NULL
   FROM activity_log al
   LEFT JOIN users u ON u.id = al.user_id
@@ -307,10 +314,101 @@ const UNIFIED_SQL = `
     json_extract(al.details, '$.reason'),
     'Bill #' || COALESCE(json_extract(al.details, '$.token'), '?'),
     u.full_name,
+    NULL,
     NULL
   FROM activity_log al
   LEFT JOIN users u ON u.id = al.user_id
   WHERE al.action = 'refunded_bill'
+`;
+
+// --- Stock after each movement ---------------------------------------------
+// No source stores "how much was left after this", so it is WORKED BACK from
+// what is on hand now: walk an item's movements newest-first and undo each one.
+//
+//   stock_after(row) = on_hand_now − (sum of the signed changes of every
+//                                     NEWER movement of the same item)
+//
+// That is exact for as long as every change is in the timeline. It is not, for
+// older product history: before Oct 2026 a product's count could be changed
+// from its edit form with no record at all (it was how stock was set). Walking
+// back across such a silent change makes every row older than it wrong, and
+// with no record nothing can say where it happened.
+//
+// Two things keep that honest:
+//   1. ANCHORS. Rows that RECORD the exact figure left restart the walk:
+//        - a stock count ('counted_product_stock' → details.counted), and
+//        - a restock/opening stock logged with details.new_quantity (the old
+//          restock endpoint did not write it; those rows are plain movements).
+//      anchor_grp numbers the anchors newest to oldest. Group 0 is everything
+//      newer than the newest anchor and starts from on-hand stock; group k
+//      starts from anchor k's recorded figure. Either way the newer changes in
+//      the group are undone, the anchor's own included, which is exactly
+//      "stock before the anchor" for the row just older than it.
+//   2. A CHECK between anchors. Walking all the way through group k must land
+//      on the figure anchor k+1 recorded. If it does not, something changed in
+//      that stretch without a record, so every row in it except group k's own
+//      anchor (whose figure is recorded, so exact) is flagged
+//      stock_after_approx = 1 and the page shows it as "≈". The oldest stretch
+//      has no older anchor to check against and is left unflagged.
+//
+// Computed over the WHOLE timeline, before the page's filters and paging, so a
+// filtered or second-page view shows the same figure as the full list. Info
+// rows change nothing and show the level they happened at; the refund note has
+// no item, and an untracked product has no meaningful count, so both are NULL.
+// The ordering is the display ordering, so "newer" means "above it on screen".
+const STOCK_AFTER_ORDER = "occurred_at DESC, source ASC, source_id DESC";
+const WITH_STOCK_AFTER_SQL = `
+  WITH moves AS (
+    SELECT u.*,
+           CASE u.direction WHEN 'in' THEN u.quantity WHEN 'out' THEN -u.quantity ELSE 0 END AS delta
+    FROM (${UNIFIED_SQL}) u
+  ),
+  grouped AS (
+    SELECT moves.*,
+           SUM(CASE WHEN anchor_after IS NOT NULL THEN 1 ELSE 0 END)
+             OVER (PARTITION BY item_kind, item_id ORDER BY ${STOCK_AFTER_ORDER} ROWS UNBOUNDED PRECEDING) AS anchor_grp
+    FROM moves
+  ),
+  walked AS (
+    SELECT grouped.*,
+           FIRST_VALUE(anchor_after) OVER grp AS grp_anchor,
+           COALESCE(SUM(delta) OVER (grp ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING), 0) AS newer_delta,
+           SUM(delta) OVER (PARTITION BY item_kind, item_id, anchor_grp) AS grp_total,
+           CASE item_kind
+             WHEN 'product' THEN (SELECT CASE WHEN p.track_stock = 1 THEN p.stock_quantity END FROM products p WHERE p.id = grouped.item_id)
+             WHEN 'ingredient' THEN (SELECT si.quantity FROM stock_items si WHERE si.id = grouped.item_id)
+           END AS on_hand_now
+    FROM grouped
+    WINDOW grp AS (PARTITION BY item_kind, item_id, anchor_grp ORDER BY ${STOCK_AFTER_ORDER})
+  ),
+  started AS (
+    SELECT walked.*,
+           CASE WHEN anchor_grp = 0 THEN on_hand_now ELSE grp_anchor END AS grp_start
+    FROM walked
+  ),
+  -- One row per stretch: where its walk starts, and where it ends up after
+  -- undoing every change in it (the predicted figure for the next anchor).
+  stretches AS (
+    SELECT DISTINCT item_kind, item_id, anchor_grp, grp_anchor, grp_start - grp_total AS predicted_next
+    FROM started
+  )
+  SELECT s.source, s.source_id, s.occurred_at, s.business_date, s.item_kind, s.item_id, s.item_name, s.unit,
+         s.movement_type, s.direction, s.quantity, s.note, s.reference, s.user_name, s.cost_loss,
+         CASE
+           WHEN s.item_id IS NULL OR s.on_hand_now IS NULL THEN NULL
+           ELSE ROUND(s.grp_start - s.newer_delta, 3)
+         END AS stock_after,
+         CASE
+           WHEN s.item_id IS NULL OR s.on_hand_now IS NULL THEN 0
+           WHEN s.anchor_after IS NOT NULL AND s.anchor_grp > 0 THEN 0
+           WHEN nxt.anchor_grp IS NOT NULL AND ABS(cur.predicted_next - nxt.grp_anchor) > 0.0005 THEN 1
+           ELSE 0
+         END AS stock_after_approx
+  FROM started s
+  JOIN stretches cur
+    ON cur.item_kind = s.item_kind AND cur.item_id IS s.item_id AND cur.anchor_grp = s.anchor_grp
+  LEFT JOIN stretches nxt
+    ON nxt.item_kind = s.item_kind AND nxt.item_id IS s.item_id AND nxt.anchor_grp = s.anchor_grp + 1
 `;
 
 interface Filters {
@@ -407,10 +505,12 @@ history.get("/stock", adminOnly, (c) => {
 
   // occurred_at is the real UTC instant, so this is a true chronological merge.
   // The extra keys only break ties within the same second, deterministically,
-  // so paging can never repeat or skip a row.
+  // so paging can never repeat or skip a row. Read through WITH_STOCK_AFTER_SQL
+  // so each row carries stock_after (see above); the count stays on the plain
+  // union, which has the same rows and does not need the window functions.
   const rows = db
     .query(
-      `SELECT * FROM (${UNIFIED_SQL}) ${filters.where}
+      `SELECT * FROM (${WITH_STOCK_AFTER_SQL}) ${filters.where}
        ORDER BY occurred_at DESC, source ASC, source_id DESC, item_id DESC
        LIMIT ? OFFSET ?`
     )

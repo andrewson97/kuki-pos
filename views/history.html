@@ -64,6 +64,7 @@
               <th>Item</th>
               <th style="width:130px;">Movement</th>
               <th style="width:110px;" class="text-end">Change</th>
+              <th style="width:110px;" class="text-end" title="How much of this item was left right after this movement">Stock after</th>
               <th>Why / Note</th>
               <th style="width:140px;">Reference</th>
               <th style="width:140px;">By</th>
@@ -71,6 +72,14 @@
           </thead>
           <tbody id="hist-table"></tbody>
         </table>
+      </div>
+
+      <div class="small text-muted mt-2">
+        <strong>Stock after</strong> is how much of the item was left right after that movement. It is worked back from
+        today's stock and restarts at every stock count. <strong>≈</strong> means the movements between two counts do not
+        add up, so something changed without a record. Before October 2026 a product's stock could be changed from its
+        edit form without a record, so product figures older than its first stock count may be off. Blank for products
+        that are not stock-tracked.
       </div>
 
       <div class="text-center mt-3">
@@ -138,7 +147,7 @@
       // so say why it is empty instead of showing a broken screen.
       document.getElementById('hist-summary').textContent = 'Admin access required.';
       document.getElementById('hist-table').innerHTML =
-        '<tr><td colspan="7" class="text-center text-muted py-5">This screen is for admins only.</td></tr>';
+        '<tr><td colspan="8" class="text-center text-muted py-5">This screen is for admins only.</td></tr>';
     }
 
     async function loadFilterOptions() {
@@ -238,11 +247,30 @@
       return `<span class="hist-qty info">${qty === null ? '—' : qty + unit}</span>`;
     }
 
+    // What was left right after this movement, worked out on the server
+    // (stock_after in src/routes/history.ts). Rounded to 3 places there; shown
+    // without trailing zeros so "12" stays "12" and "2.5 kg" stays "2.5 kg".
+    // Below zero is shown in red: it means the records say more went out than
+    // was ever recorded coming in, which is worth a stock count.
+    function stockAfterCell(r) {
+      if (r.stock_after === null || r.stock_after === undefined) return '<span class="text-muted">—</span>';
+      const n = Number(r.stock_after);
+      const unit = r.unit ? ` ${esc(r.unit)}` : '';
+      const cls = n < 0 ? 'text-danger fw-bold' : 'fw-semibold';
+      // stock_after_approx: the records between two stock counts do not add
+      // up, so something changed without being recorded somewhere in this
+      // stretch and the figure can be off. Say so rather than look certain.
+      if (r.stock_after_approx) {
+        return `<span class="${cls} text-muted" title="Approximate: between two stock counts, the recorded movements do not add up, so something changed without a record here.">≈ ${esc(String(+n.toFixed(3)))}${unit}</span>`;
+      }
+      return `<span class="${cls}">${esc(String(+n.toFixed(3)))}${unit}</span>`;
+    }
+
     function render() {
       const body = document.getElementById('hist-table');
       if (!histRows.length) {
         body.innerHTML =
-          '<tr><td colspan="7" class="text-center text-muted py-5">' +
+          '<tr><td colspan="8" class="text-center text-muted py-5">' +
           '<div style="font-size:2rem;">\u{1F4E6}</div>' +
           'No stock movements for these filters.<br>' +
           '<small>Try widening the date range or clearing the item filter.</small>' +
@@ -268,6 +296,7 @@
           <td><strong>${esc(r.item_name)}</strong><br>${kindBadge}</td>
           <td><span class="badge ${typeBadge}">${esc(typeLabel)}</span></td>
           <td class="text-end">${qtyCell(r)}</td>
+          <td class="text-end">${stockAfterCell(r)}</td>
           <td class="hist-note">${esc(r.note) || '-'}${loss}</td>
           <td class="hist-note">${esc(r.reference) || '-'}</td>
           <td class="hist-note">${esc(r.user_name) || '-'}</td>
