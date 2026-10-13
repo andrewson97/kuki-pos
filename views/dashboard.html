@@ -109,6 +109,15 @@
           </div>
         </div>
         <div class="col-md-5">
+          <!-- Admin only, and only while something is waiting. -->
+          <div class="table-container p-3 mb-3 d-none" id="disposals-section">
+            <h6 class="fw-bold mb-1">&#128465; Disposals Waiting for Approval <span class="badge bg-danger" id="disposals-count">0</span></h6>
+            <div class="text-muted small mb-3">Waste reported by cashiers. The stock is set aside until you decide.</div>
+            <table class="table table-sm mb-0">
+              <thead><tr><th>Item</th><th>Qty</th><th>Reason</th><th></th></tr></thead>
+              <tbody id="disposals-list"></tbody>
+            </table>
+          </div>
           <div class="table-container p-3">
             <h6 class="fw-bold mb-1">&#128680; Needs Attention Now</h6>
             <div class="text-muted small mb-3">Low stock, plus anything that ran out today.</div>
@@ -230,7 +239,58 @@
       if (color) el.style.color = color;
     }
 
+
+    // ===== Disposals waiting for approval (admin) =====
+    // A cashier's waste report (src/routes/disposals.ts). Its product stock is
+    // set aside until decided; approving takes it off the count and records the
+    // loss, rejecting puts it back on sale.
+    let pendingDisposals = [];
+    const fmtDisposalQty = r => String(+Number(r.quantity).toFixed(3)) + (r.unit && r.unit !== 'pcs' ? ' ' + r.unit : '');
+
+    async function approveDisposal(id, btn) {
+      const r = pendingDisposals.find(x => x.id === id);
+      if (!r) return;
+      if (!confirm(`Approve: ${fmtDisposalQty(r)} of ${r.item_name} thrown away (${r.reason})?\n\nIt comes off the stock count and is recorded as a loss.`)) return;
+      await withBusy(btn, async () => {
+        await api(`/api/disposals/${id}/approve`, { method: 'POST', body: {} });
+        showToast('Disposal approved');
+        await loadDisposals();
+      }, '…');
+    }
+
+    async function rejectDisposal(id, btn) {
+      const why = prompt('Reject this disposal? The stock goes back on sale.\n\nReason for the cashier (optional):', '');
+      if (why === null) return;
+      await withBusy(btn, async () => {
+        await api(`/api/disposals/${id}/reject`, { method: 'POST', body: { reason: why } });
+        showToast('Rejected; the stock is back on sale');
+        await loadDisposals();
+      }, '…');
+    }
+
+    async function loadDisposals() {
+      const section = document.getElementById('disposals-section');
+      if (!currentUser || currentUser.role !== 'admin') return;
+      try {
+        pendingDisposals = await api('/api/disposals?status=pending');
+      } catch { return; }
+      section.classList.toggle('d-none', !pendingDisposals.length);
+      document.getElementById('disposals-count').textContent = pendingDisposals.length;
+      const esc = v => String(v == null ? '' : v).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+      document.getElementById('disposals-list').innerHTML = pendingDisposals.map(r => `
+        <tr>
+          <td class="fw-bold">${esc(r.item_name)}<br><small class="text-muted fw-normal">${esc(r.requested_by_name || '-')}</small></td>
+          <td class="fw-bold">${esc(fmtDisposalQty(r))}</td>
+          <td class="small">${esc(r.reason)}</td>
+          <td class="text-nowrap">
+            <button class="btn btn-sm btn-success" onclick="approveDisposal(${r.id}, this)">Approve</button>
+            <button class="btn btn-sm btn-outline-secondary" onclick="rejectDisposal(${r.id}, this)">Reject</button>
+          </td>
+        </tr>`).join('');
+    }
+
     async function loadDashboard() {
+      loadDisposals();
       // Runs before the fetch so a cashier never sees the money tiles flash in.
       // initApp() has already populated currentUser by the time it calls us.
       applyMoneyVisibility();

@@ -18,7 +18,12 @@
     <input type="text" id="s-search" placeholder="Search stock items…">
     <select id="s-cat"><option value="">All categories</option></select>
   </div>
-  <div style="background:white;padding:12px 14px 4px;font-weight:700;color:var(--ink-soft);text-transform:uppercase;letter-spacing:0.1em;font-size:0.72rem;">Stock Items</div>
+  <!-- Disposal requests: filled by renderDisposals(), hidden when empty. -->
+  <div id="disposal-section" style="display:none;">
+    <div style="background:white;padding:12px 14px 4px;font-weight:700;color:var(--ink-soft);text-transform:uppercase;letter-spacing:0.1em;font-size:0.72rem;">Disposal Requests <span id="disposal-count" style="text-transform:none;letter-spacing:0;"></span></div>
+    <div id="disposal-list"></div>
+  </div>
+  <div style="background:white;padding:12px 14px 4px;font-weight:700;color:var(--ink-soft);text-transform:uppercase;letter-spacing:0.1em;font-size:0.72rem;border-top:8px solid var(--bg);">Stock Items</div>
   <div id="stock-list"><div class="empty">Loading…</div></div>
 
   <div id="tracked-section" style="display:none;">
@@ -71,6 +76,23 @@
     </div>
   </div>
 
+  <!-- Report waste: a cashier's disposal request, approved by an admin. -->
+  <div class="sheet" id="dsp-sheet" onclick="if(event.target===this)closeSheet('dsp-sheet')">
+    <div class="sheet-inner">
+      <div class="sheet-handle"></div>
+      <h3 id="dsp-title">Report waste</h3>
+      <input type="hidden" id="dsp-kind"><input type="hidden" id="dsp-id">
+      <div style="color:var(--ink-soft);font-size:0.78rem;margin-bottom:10px;">Thrown away, expired, damaged or dropped. An admin approves it before it comes off the stock count; until then it is set aside so it cannot be sold.</div>
+      <div style="font-size:0.9rem;margin-bottom:10px;">On hand now: <strong id="dsp-onhand">0</strong></div>
+      <div class="field"><label>How many were thrown away?</label><input type="number" id="dsp-qty" min="0" step="1" inputmode="decimal"></div>
+      <div class="field"><label>Reason (required)</label><input type="text" id="dsp-reason" maxlength="500" placeholder="e.g., expired, dropped"></div>
+      <div class="btn-row">
+        <button class="btn btn-outline" onclick="closeSheet('dsp-sheet')">Cancel</button>
+        <button class="btn btn-danger" onclick="submitDisposal(this)">Send for approval</button>
+      </div>
+    </div>
+  </div>
+
   <button class="fab" id="fab" onclick="openAdd()" style="display:none;">+</button>
 
   <!-- Edit / adjust sheet -->
@@ -115,7 +137,7 @@
 
   <script src="/public/js/mobile.js"></script>
   <script>
-    let items = [], cats = [], tracked = [], holds = [];
+    let items = [], cats = [], tracked = [], holds = [], disposalRequests = [];
 
     // The server's answer to "which holds is nothing reporting any more?" —
     // { count, carts, quantity, threshold_minutes, hold_ids, holds }. null means
@@ -140,15 +162,17 @@
 
     async function load() {
       await bootMobile();
-      if (currentUser.role !== 'admin') { $('fab').style.display = 'none'; toast('Read-only — admin needed to edit'); }
+      if (currentUser.role !== 'admin') { $('fab').style.display = 'none'; toast('Tap an item to report waste'); }
       else $('fab').style.display = 'block';
-      const [stocks, allCats, prods, activeHolds] = await Promise.all([
+      const [stocks, allCats, prods, activeHolds, disposals] = await Promise.all([
         api('/api/stock/items'),
         api('/api/stock/categories'),
         api('/api/products'),
         api('/api/pos/reservations'),
+        // An admin gets everyone's requests, a cashier only their own.
+        api('/api/disposals?limit=30'),
       ]);
-      items = stocks; cats = allCats; holds = activeHolds;
+      items = stocks; cats = allCats; holds = activeHolds; disposalRequests = disposals;
       await loadUnreportedPreview();
       tracked = prods.filter(p => p.is_active && p.track_stock);
       const catOpts = '<option value="">All categories</option>' + cats.map(c => `<option value="${c.id}">${escapeHtml(c.name)}</option>`).join('');
@@ -157,6 +181,7 @@
       render();
       renderTracked();
       renderHolds();
+      renderDisposals();
       $('s-search').addEventListener('input', () => { render(); renderTracked(); });
       $('s-cat').addEventListener('change', render);
     }
@@ -189,9 +214,102 @@
             <span class="list-title">${escapeHtml(p.name)} ${status}</span>
             <span class="list-amount" style="color:${out ? 'var(--red)' : (low ? '#92400e' : 'var(--ink)')};">${p.stock_quantity}</span>
           </div>
-          <div class="list-meta">${escapeHtml(p.category || '-')} · min ${p.stock_reorder_level} · tap to add, dispose or count</div>
+          <div class="list-meta">${escapeHtml(p.category || '-')} · min ${p.stock_reorder_level} · ${currentUser.role === 'admin' ? 'tap to add, dispose or count' : 'tap to report waste'}</div>
         </div>`;
       }).join('');
+    }
+
+    // ===== Disposal requests =====
+    // Same flow as the desktop Stock page (src/routes/disposals.ts): a cashier
+    // reports waste, an admin approves or rejects it. A pending request sets
+    // its product stock aside so it cannot be sold meanwhile.
+    const fmtQty = n => String(+Number(n).toFixed(3));
+
+    function renderDisposals() {
+      const sec = $('disposal-section');
+      const isAdmin = currentUser.role === 'admin';
+      const pending = disposalRequests.filter(r => r.status === 'pending');
+      const rows = isAdmin
+        ? pending.concat(disposalRequests.filter(r => r.status !== 'pending').slice(0, 5))
+        : disposalRequests.slice(0, 10);
+      if (!rows.length) { sec.style.display = 'none'; return; }
+      sec.style.display = 'block';
+      $('disposal-count').innerHTML = pending.length
+        ? `· <span style="color:var(--red);">${pending.length} waiting${isAdmin ? ' for you' : ''}</span>` : '';
+      $('disposal-list').innerHTML = rows.map(r => {
+        const unit = r.unit && r.unit !== 'pcs' ? ` ${escapeHtml(r.unit)}` : '';
+        const badge = r.status === 'pending' ? '<span class="badge warning">Waiting</span>'
+          : r.status === 'approved' ? '<span class="badge success">Approved</span>'
+          : '<span class="badge">Rejected</span>';
+        const decided = r.status !== 'pending' && r.decided_by_name ? ` · by ${escapeHtml(r.decided_by_name)}` : '';
+        const why = r.status === 'rejected' && r.reject_reason ? `<div class="list-meta">"${escapeHtml(r.reject_reason)}"</div>` : '';
+        const actions = isAdmin && r.status === 'pending'
+          ? `<div class="btn-row" style="margin-top:8px;">
+               <button class="btn btn-outline btn-sm" onclick="rejectDisposal(${r.id}, this)">Reject</button>
+               <button class="btn btn-success btn-sm" onclick="approveDisposal(${r.id}, this)">Approve</button>
+             </div>`
+          : '';
+        return `<div class="list-item"${r.status === 'pending' ? ' style="background:#fffbeb;"' : ''}>
+          <div class="list-head">
+            <span class="list-title">${escapeHtml(r.item_name)} ${badge}</span>
+            <span class="list-amount">${fmtQty(r.quantity)}${unit}</span>
+          </div>
+          <div class="list-meta">${escapeHtml(r.reason)}</div>
+          <div class="list-meta">${escapeHtml(r.requested_by_name || '-')} · ${escapeHtml(formatDateTime(r.requested_at))}${decided}</div>
+          ${why}${actions}
+        </div>`;
+      }).join('');
+    }
+
+    function openDisposalRequest(kind, id) {
+      const item = kind === 'product' ? tracked.find(p => p.id === id) : items.find(i => i.id === id);
+      if (!item) return;
+      const unit = kind === 'product' ? 'pcs' : (item.unit || '');
+      $('dsp-kind').value = kind;
+      $('dsp-id').value = id;
+      $('dsp-title').textContent = 'Report waste · ' + item.name;
+      $('dsp-onhand').textContent = `${fmtQty(kind === 'product' ? item.stock_quantity || 0 : item.quantity || 0)} ${unit}`;
+      // Products go out in whole units; ingredients may be 2.5 kg.
+      $('dsp-qty').step = kind === 'product' ? '1' : 'any';
+      $('dsp-qty').value = '';
+      $('dsp-reason').value = '';
+      openSheet('dsp-sheet');
+    }
+
+    async function submitDisposal(btn) {
+      const raw = $('dsp-qty').value;
+      const qty = parseFloat(raw);
+      const reason = $('dsp-reason').value.trim();
+      if (raw === '' || !Number.isFinite(qty) || qty <= 0) { toast('Enter how many were thrown away', 'error'); return; }
+      if (!reason) { toast('Enter a reason', 'error'); return; }
+      await withBusy(btn, async () => {
+        const r = await api('/api/disposals', { method: 'POST', body: { item_kind: $('dsp-kind').value, item_id: Number($('dsp-id').value), quantity: qty, reason } });
+        closeSheet('dsp-sheet');
+        toast(r.request && r.request.status === 'approved' ? 'Disposed of and recorded' : 'Sent for approval');
+        load();
+      }, 'Sending…');
+    }
+
+    async function approveDisposal(id, btn) {
+      const r = disposalRequests.find(x => x.id === id);
+      if (!r) return;
+      const unit = r.unit && r.unit !== 'pcs' ? ` ${r.unit}` : '';
+      if (!confirm(`Approve: ${fmtQty(r.quantity)}${unit} of ${r.item_name} thrown away (${r.reason})?\n\nIt comes off the stock count and is recorded as a loss.`)) return;
+      await withBusy(btn, async () => {
+        await api(`/api/disposals/${id}/approve`, { method: 'POST', body: {} });
+        toast('Disposal approved');
+        load();
+      }, '…');
+    }
+
+    async function rejectDisposal(id, btn) {
+      const why = prompt('Reject this disposal? The stock goes back on sale.\n\nReason for the cashier (optional):', '');
+      if (why === null) return;
+      await withBusy(btn, async () => {
+        await api(`/api/disposals/${id}/reject`, { method: 'POST', body: { reason: why } });
+        toast('Rejected; stock back on sale');
+        load();
+      }, '…');
     }
 
     // ===== Adjust stock (tracked products) =====
@@ -209,7 +327,9 @@
     function openAdjust(id) {
       const p = tracked.find(x => x.id === id);
       if (!p) return;
-      if (currentUser.role !== 'admin') { toast('Admin needed to change stock', 'error'); return; }
+      // A cashier cannot change stock directly, but can report waste for an
+      // admin to approve.
+      if (currentUser.role !== 'admin') { openDisposalRequest('product', id); return; }
       $('adj-id').value = p.id;
       $('adj-title').textContent = 'Adjust stock · ' + p.name;
       $('adj-onhand').textContent = p.stock_quantity || 0;
@@ -273,7 +393,7 @@
       const isAdmin = currentUser.role === 'admin';
       $('stock-list').innerHTML = filtered.map(it => {
         const low = it.reorder_level > 0 && it.quantity <= it.reorder_level;
-        return `<div class="list-item" ${isAdmin ? `onclick="editItem(${it.id})"` : ''}>
+        return `<div class="list-item" onclick="${isAdmin ? `editItem(${it.id})` : `openDisposalRequest('ingredient', ${it.id})`}">
           <div class="list-head">
             <span class="list-title">${escapeHtml(it.name)}${low ? ' <span class="badge danger">LOW</span>' : ''}</span>
             <span class="list-amount" style="color:${low ? 'var(--red)' : 'var(--ink)'};">${it.quantity} ${escapeHtml(it.unit || '')}</span>
@@ -455,7 +575,9 @@
       return {
         // Anything that is not 'active' shows as parked: the cautious reading,
         // because a parked cart is the one it would hurt to release.
-        kind: c.state === 'active' ? 'active' : 'parked',
+        // 'disposal' is a pending disposal request holding binned stock; it is
+        // decided by approving or rejecting the request, never by releasing.
+        kind: c.state === 'active' ? 'active' : c.state === 'disposal' ? 'disposal' : 'parked',
         till: c.till_label || c.till_id || 'unnamed till',
         who: c.user_name || '',
         seenText: unknown ? 'check-in time unknown' : (mins < 1 ? 'checked in just now' : `checked in ${gap} ago`),
@@ -477,6 +599,8 @@
       const old = age.hours >= HOLD_STALE_HOURS;
       if (claim.kind === 'unsupported') return old ? 2 : 0;
       if (claim.kind === 'unclaimed') return old ? 2 : 1;
+      // Waiting on an admin's decision, not on a till: never flagged as stale.
+      if (claim.kind === 'disposal') return 0;
       return claim.seenStale ? 1 : 0;
     }
 
@@ -486,6 +610,10 @@
       if (claim.kind === 'unclaimed') {
         return '<div class="list-meta" style="color:var(--red);font-weight:600;">No till is reporting this cart</div>'
           + '<div class="list-meta">Check the tills before releasing — a till that is switched off still holds its parked orders.</div>';
+      }
+      if (claim.kind === 'disposal') {
+        return `<div class="list-meta"><span class="badge warning">Waiting for disposal approval</span>${claim.label ? ` <b>· ${escapeHtml(claim.label)}</b>` : ''}</div>`
+          + (claim.who ? `<div class="list-meta">reported by ${escapeHtml(claim.who)}</div>` : '');
       }
       const badge = claim.kind === 'active'
         ? '<span class="badge success">Cart open</span>'
@@ -556,7 +684,9 @@
           <div class="list-meta" style="word-break:break-all;">cart ${escapeHtml(h.cart_id || '-')} · ${escapeHtml(h.cashier_name || '-')}</div>
           <div class="list-meta"${sev === 2 ? ' style="color:var(--red);font-weight:600;"' : ''}>held ${escapeHtml(age.text)} · ${escapeHtml(formatDateTime(h.created_at))}</div>
           ${claimLines(claim)}
-          ${isAdmin
+          ${claim.kind === 'disposal'
+            ? '<div class="list-meta">Approve or reject the disposal request</div>'
+            : isAdmin
             ? `<button class="btn btn-danger btn-sm" style="margin-top:8px;" onclick="releaseStockHold(${h.id}, this)">Release</button>`
             : '<div class="list-meta">Admin needed to release</div>'}
         </div>`;

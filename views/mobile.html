@@ -84,6 +84,11 @@
   </div>
 
   <div class="container">
+    <!-- Admin only, and only while something is waiting. -->
+    <div class="card" id="card-disposals" style="display:none;">
+      <h2>Disposals waiting for approval <span id="disposals-count" style="color:var(--red);"></span></h2>
+      <div id="disposals-list"></div>
+    </div>
     <div class="card" id="card-pending">
       <h2>Pending expense approvals <span id="pending-count" style="color:var(--red);"></span></h2>
       <div id="pending-list"><div class="empty">Loading…</div></div>
@@ -123,6 +128,7 @@
         $('user-name').textContent = currentUser.full_name;
         renderHero(data.today, data.date);
         renderPending(data.pending_expenses, currentUser.role === 'admin');
+        loadDisposals();
         renderTasks(data.tasks);
         renderStock(data);
       } catch (err) { toast(err.message, 'error'); }
@@ -167,6 +173,55 @@
     function payLabel(m) {
       const v = String(m || '').toLowerCase();
       return v === 'upi' ? 'LankaQR' : v.toUpperCase();
+    }
+
+
+    // ===== Disposals waiting for approval (admin) =====
+    // A cashier's waste report (src/routes/disposals.ts). Its product stock is
+    // set aside until decided; approving takes it off the count and records the
+    // loss, rejecting puts it back on sale.
+    let pendingDisposals = [];
+    const fmtDisposalQty = r => String(+Number(r.quantity).toFixed(3)) + (r.unit && r.unit !== 'pcs' ? ' ' + r.unit : '');
+
+    async function approveDisposal(id, btn) {
+      const r = pendingDisposals.find(x => x.id === id);
+      if (!r) return;
+      if (!confirm(`Approve: ${fmtDisposalQty(r)} of ${r.item_name} thrown away (${r.reason})?\n\nIt comes off the stock count and is recorded as a loss.`)) return;
+      await withBusy(btn, async () => {
+        await api(`/api/disposals/${id}/approve`, { method: 'POST', body: {} });
+        toast('Disposal approved');
+        loadDisposals();
+      }, '…');
+    }
+
+    async function rejectDisposal(id, btn) {
+      const why = prompt('Reject this disposal? The stock goes back on sale.\n\nReason for the cashier (optional):', '');
+      if (why === null) return;
+      await withBusy(btn, async () => {
+        await api(`/api/disposals/${id}/reject`, { method: 'POST', body: { reason: why } });
+        toast('Rejected; the stock is back on sale');
+        loadDisposals();
+      }, '…');
+    }
+
+    async function loadDisposals() {
+      if (currentUser.role !== 'admin') return;
+      try { pendingDisposals = await api('/api/disposals?status=pending'); } catch { return; }
+      $('card-disposals').style.display = pendingDisposals.length ? 'block' : 'none';
+      $('disposals-count').textContent = pendingDisposals.length ? '· ' + pendingDisposals.length : '';
+      $('disposals-list').innerHTML = pendingDisposals.map(r => `
+        <div class="exp-item">
+          <div class="exp-head">
+            <span class="exp-amount">${escapeHtml(fmtDisposalQty(r))}</span>
+            <span class="exp-cat">${escapeHtml(r.item_name)}</span>
+          </div>
+          <div class="exp-desc">${escapeHtml(r.reason)}</div>
+          <div class="exp-meta">${escapeHtml(r.requested_by_name || '-')} · ${escapeHtml(formatDateTime(r.requested_at))}</div>
+          <div class="exp-actions">
+            <button class="btn btn-success btn-sm" onclick="approveDisposal(${r.id}, this)">Approve</button>
+            <button class="btn btn-danger btn-sm" onclick="rejectDisposal(${r.id}, this)">Reject</button>
+          </div>
+        </div>`).join('');
     }
 
     function renderPending(items, isAdmin) {

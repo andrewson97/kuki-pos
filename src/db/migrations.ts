@@ -705,6 +705,42 @@ export function runMigrations(): void {
   // dashboards? Default 0 = hidden, exactly how every cashier behaved before
   // the option existed. Admins always see it regardless (canSeeDashboardMoney).
   addColumn("users", "show_dashboard_money", "INTEGER NOT NULL DEFAULT 0");
+
+  // --- Disposal requests -----------------------------------------------------
+  // A cashier reports waste ("3 fish buns dropped", "2 kg flour spoiled") and an
+  // admin approves or rejects it. Nothing here IS the disposal: approval writes
+  // the ordinary records an admin's own waste writes (product_disposals for a
+  // product, a 'waste' stock_transactions row for an ingredient), so reports and
+  // Stock History need no special case. This table is only the request and its
+  // decision. See src/routes/disposals.ts.
+  //
+  // item_name / unit are snapshots so a request still reads correctly if the
+  // item is renamed or deleted while it waits. business_date is the day the
+  // waste was REPORTED: the goods left the shelf then, so that is the day an
+  // approved loss is booked against, however late the approval comes.
+  //
+  // A pending request for a tracked product holds its quantity in
+  // stock_reservations under cart_id 'disposal-<id>', so the tills cannot sell
+  // stock that is already in the bin; approval and rejection both release it.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS disposal_requests (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      item_kind TEXT NOT NULL CHECK(item_kind IN ('product', 'ingredient')),
+      item_id INTEGER NOT NULL,
+      item_name TEXT NOT NULL,
+      unit TEXT NOT NULL DEFAULT '',
+      quantity REAL NOT NULL CHECK(quantity > 0),
+      reason TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'approved', 'rejected')),
+      business_date TEXT NOT NULL,
+      requested_by INTEGER REFERENCES users(id),
+      requested_at TEXT NOT NULL DEFAULT (datetime('now')),
+      decided_by INTEGER REFERENCES users(id),
+      decided_at TEXT,
+      reject_reason TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_disposal_requests_status ON disposal_requests(status, requested_at);
+  `);
 }
 
 export function seedDefaults(): void {
