@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { getDb } from "../db/database";
 import { adminOnly, getUser } from "../middleware/auth";
+import { PortionError, finishStockUnit, listPortionIngredients, openStockUnit, undoOpenStockUnit } from "../services/portions";
 
 const stock = new Hono();
 
@@ -95,6 +96,22 @@ stock.delete("/items/:id", adminOnly, (c) => {
     const names = usedBy.map((r) => r.name).join(", ");
     return c.json(
       { error: `${item.name} is used in the recipe for ${names}. Remove it from those recipes first.` },
+      400
+    );
+  }
+
+  // Same rule for the till links: products made from it as an opened
+  // ingredient, or packed in it. Deleting would leave them pointing at nothing.
+  const linkedBy = db.query(
+    `SELECT p.name FROM product_ingredient_links l JOIN products p ON p.id = l.product_id WHERE l.stock_item_id = ?
+     UNION
+     SELECT p.name FROM product_packing_links l JOIN products p ON p.id = l.product_id WHERE l.stock_item_id = ?
+     ORDER BY 1`
+  ).all(id, id) as any[];
+  if (linkedBy.length) {
+    const names = linkedBy.map((r) => r.name).join(", ");
+    return c.json(
+      { error: `${item.name} is linked to ${names} (as an ingredient or packing). Remove it from those products first.` },
       400
     );
   }
@@ -292,6 +309,53 @@ stock.post("/usage", async (c) => {
     return c.json({ error: err.message || "Could not record usage" }, 400);
   }
   return c.json({ success: true });
+});
+
+// --- Opened ingredients (src/services/portions.ts) ---------------------------
+// Ordinary till work, so no adminOnly — the same as /usage above. Opening and
+// finishing are both on the record (stock_transactions / activity_log) with
+// the cashier's name.
+
+// Every ingredient something is made from: its links and its opened units.
+stock.get("/portions", (c) => c.json(listPortionIngredients()));
+
+// Open one sealed unit: it leaves stock and its servings become sellable.
+stock.post("/items/:id/open", async (c) => {
+  const id = Number(c.req.param("id"));
+  if (!Number.isInteger(id) || id <= 0) return c.json({ error: "Invalid stock item id" }, 400);
+  const body = await c.req.json().catch(() => ({} as any));
+  try {
+    return c.json({ success: true, ...openStockUnit(id, getUser(c)!.id, body?.note) });
+  } catch (err: any) {
+    if (err instanceof PortionError) return c.json({ error: err.message }, err.status);
+    throw err;
+  }
+});
+
+// Finish an opened unit early (spilled, gone off). A reason is required.
+stock.post("/opened/:id/finish", async (c) => {
+  const id = Number(c.req.param("id"));
+  if (!Number.isInteger(id) || id <= 0) return c.json({ error: "Invalid opened item id" }, 400);
+  const body = await c.req.json().catch(() => ({} as any));
+  try {
+    return c.json({ success: true, ...finishStockUnit(id, getUser(c)!.id, body?.reason) });
+  } catch (err: any) {
+    if (err instanceof PortionError) return c.json({ error: err.message }, err.status);
+    throw err;
+  }
+});
+
+// Undo an Open made by mistake. Admin-only: it puts a unit back into sealed
+// stock, which is a correction to the record, not till work.
+stock.post("/opened/:id/undo", adminOnly, (c) => {
+  const id = Number(c.req.param("id"));
+  if (!Number.isInteger(id) || id <= 0) return c.json({ error: "Invalid opened item id" }, 400);
+  try {
+    return c.json({ success: true, ...undoOpenStockUnit(id, getUser(c)!.id) });
+  } catch (err: any) {
+    if (err instanceof PortionError) return c.json({ error: err.message }, err.status);
+    throw err;
+  }
 });
 
 // Alerts

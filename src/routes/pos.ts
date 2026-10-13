@@ -11,6 +11,7 @@ import {
   getCartHolds,
 } from "../services/reservations";
 import { adminOnly } from "../middleware/auth";
+import { returnPortionsForBill } from "../services/portions";
 import { todayDate, formatDateTime } from "../utils/helpers";
 
 const pos = new Hono();
@@ -42,6 +43,8 @@ function resolveSaleKey(body: any, settings: Record<string, string>) {
         tax_rate,
         payment_method: body.payment_method || "cash",
         amount_given: body.amount_given ?? null,
+        // Raw, exactly as createBill() hashes it — absent stays absent.
+        order_type: body.order_type ?? null,
       })
     : "";
   return { tax_rate, cartId, fingerprint };
@@ -93,6 +96,7 @@ function buildBillSlips(
     taxAmount: fullBill.tax_amount,
     total: fullBill.total,
     paymentMethod: fullBill.payment_method,
+    orderType: fullBill.order_type,
     cashierName,
     customerName,
     amountGiven: fullBill.amount_given,
@@ -184,6 +188,9 @@ pos.post("/bill", async (c) => {
       // the fingerprint itself from these very params, so there is no second
       // definition of it to drift.
       cart_id: cartId || null,
+      // Dine-in / takeaway. Absent (an older till page) falls back to the
+      // shop's default inside createBill().
+      order_type: body.order_type ?? null,
     });
   } catch (err: any) {
     return c.json({ error: err?.message || "Failed to create bill" }, 400);
@@ -471,6 +478,11 @@ pos.get("/bills/:id", (c) => {
 // costing only and selling never deducts them, so a refund must not "give
 // back" ingredients that were never taken (it used to, via restoreStockForBill).
 //
+// Servings taken from an opened ingredient (a milk box) follow the same tick:
+// with "put back" they return to the box they came from, if that box is still
+// open (returnPortionsForBill); a box already finished stays finished. Packing
+// never comes back — the box left with the customer.
+//
 // A bill made by collecting a pre-order (cart_id 'preorder-…') never deducted
 // stock — collection skips it — so its refund never restores any, whatever the
 // caller asked for. The UI hides the checkbox for those; this is the backstop.
@@ -492,6 +504,7 @@ pos.post("/bills/:id/refund", async (c) => {
 
   const items = db.query("SELECT product_id, quantity FROM bill_items WHERE bill_id = ?").all(id) as any[];
 
+  let portions = { returned: 0, not_returned: 0 };
   try {
     // .immediate() and the status re-check inside it: two taps (or two tills)
     // refunding the same bill must not both pass the check above and restore
@@ -521,6 +534,7 @@ pos.post("/bills/:id/refund", async (c) => {
             }
           }
         }
+        portions = returnPortionsForBill(Number(id));
       }
       db.query(
         "UPDATE bills SET status = 'refunded', refund_reason = ?, refunded_at = datetime('now'), refunded_by_user_id = ?, refund_restocked = ? WHERE id = ?"
@@ -533,6 +547,11 @@ pos.post("/bills/:id/refund", async (c) => {
         user.id, JSON.stringify({
           bill_id: id, token: bill.token_number, amount: bill.total, reason,
           restock, restock_requested: restockRequested, from_preorder: fromPreorder,
+          // Fractions of a unit given back to still-open boxes, and the share
+          // that could not be because its box was already finished.
+          ...(portions.returned || portions.not_returned
+            ? { portions_returned: portions.returned, portions_not_returned: portions.not_returned }
+            : {}),
         })
       );
     }).immediate();
@@ -540,7 +559,7 @@ pos.post("/bills/:id/refund", async (c) => {
     return c.json({ error: err?.message || "Refund failed" }, 400);
   }
 
-  return c.json({ success: true, restocked: restock, from_preorder: fromPreorder });
+  return c.json({ success: true, restocked: restock, from_preorder: fromPreorder, portions });
 });
 
 // Imported here rather than in the block at the top so this route's reprint
@@ -572,6 +591,7 @@ pos.get("/bills/:id/receipt", async (c) => {
     taxAmount: bill.tax_amount,
     total: bill.total,
     paymentMethod: bill.payment_method,
+    orderType: bill.order_type,
     cashierName: bill.cashier_name,
     customerName: bill.customer_name,
     amountGiven: bill.amount_given,
@@ -841,7 +861,7 @@ const PARK_MAX_ITEMS = 200;
 // name. Shared by the listing, the upsert's read-back and resume — so the three
 // can never return different shapes for the same row.
 const SELECT_PARKED = `
-  SELECT p.id, p.cart_id, p.label, p.items, p.customer_id, p.customer_label, p.discount,
+  SELECT p.id, p.cart_id, p.label, p.items, p.customer_id, p.customer_label, p.discount, p.order_type,
          p.user_id, u.full_name AS cashier_name, p.till_id, p.till_label,
          p.created_at, p.updated_at
   FROM parked_carts p
@@ -878,6 +898,9 @@ function shapeParked(row: any): any {
     customer_id: row.customer_id ?? null,
     customer_label: row.customer_label ?? "",
     discount: row.discount ?? 0,
+    // Dine in / takeaway as it was when parked; null for a bill parked before
+    // the choice existed (the till then stays on its default).
+    order_type: row.order_type ?? null,
     user_id: row.user_id ?? null,
     cashier_name: row.cashier_name ?? null,
     till_id: row.till_id ?? null,
@@ -1072,6 +1095,9 @@ pos.post("/parked", async (c) => {
     return c.json({ error: "till_label must be a string" }, 400);
   }
   const tillId = (typeof body.till_id === "string" ? body.till_id.trim() : "").slice(0, PARK_MAX_LEN) || null;
+  // Kept so a dine-in order parked and resumed is still billed as dine-in.
+  // Anything but the two values (an older till sends nothing) is stored as NULL.
+  const orderType = body.order_type === "dine_in" || body.order_type === "takeaway" ? body.order_type : null;
   const tillLabel =
     (typeof body.till_label === "string" ? body.till_label.trim() : "").slice(0, PARK_MAX_LEN) || tillId || "";
 
@@ -1080,8 +1106,8 @@ pos.post("/parked", async (c) => {
   // time a line is added. updated_at carries "last re-parked".
   const upsert = db.query(`
     INSERT INTO parked_carts
-      (cart_id, label, items, customer_id, customer_label, discount, user_id, till_id, till_label, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+      (cart_id, label, items, customer_id, customer_label, discount, user_id, till_id, till_label, order_type, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
     ON CONFLICT(cart_id) DO UPDATE SET
       label = excluded.label,
       items = excluded.items,
@@ -1091,6 +1117,7 @@ pos.post("/parked", async (c) => {
       user_id = excluded.user_id,
       till_id = excluded.till_id,
       till_label = excluded.till_label,
+      order_type = excluded.order_type,
       updated_at = excluded.updated_at
   `);
 
@@ -1104,7 +1131,8 @@ pos.post("/parked", async (c) => {
       discount,
       user.id,
       tillId,
-      tillLabel
+      tillLabel,
+      orderType
     );
     return db.query(`${SELECT_PARKED} WHERE p.cart_id = ?`).get(cartId) as any;
   }).immediate();

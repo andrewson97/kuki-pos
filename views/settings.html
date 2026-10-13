@@ -25,6 +25,16 @@
               <div class="col-md-6"><label class="form-label">Tax Rate (%)</label><input type="number" class="form-control" id="s-tax-rate" step="any" min="0"></div>
               <div class="col-md-6"><label class="form-label">Currency Symbol</label><input type="text" class="form-control" id="s-currency" maxlength="5"></div>
             </div>
+            <div class="row mb-3">
+              <div class="col-md-6">
+                <label class="form-label">Each sale starts as</label>
+                <select class="form-select" id="s-default-order-type">
+                  <option value="takeaway">Takeaway</option>
+                  <option value="dine_in">Dine in</option>
+                </select>
+                <div class="text-muted" style="font-size:0.85rem;">The till's Takeaway / Dine in toggle starts here for every new sale. Takeaway sales use the packing set on each product.</div>
+              </div>
+            </div>
             <hr>
             <h6 class="fw-bold mb-3">Thermal Printer</h6>
             <div class="row mb-3">
@@ -99,6 +109,7 @@
       document.getElementById('s-shop-phone').value = s.shop_phone || '';
       document.getElementById('s-tax-rate').value = s.tax_rate || '0';
       document.getElementById('s-currency').value = s.currency_symbol || 'Rs.';
+      document.getElementById('s-default-order-type').value = s.default_order_type === 'dine_in' ? 'dine_in' : 'takeaway';
       document.getElementById('s-printer-type').value = s.printer_type || 'none';
       document.getElementById('s-printer-address').value = s.printer_address || '';
       document.getElementById('s-enforce-shift').checked = (s.enforce_cash_shift ?? '1') === '1';
@@ -164,6 +175,7 @@
             shop_phone: document.getElementById('s-shop-phone').value,
             tax_rate: document.getElementById('s-tax-rate').value,
             currency_symbol: document.getElementById('s-currency').value,
+            default_order_type: document.getElementById('s-default-order-type').value,
             printer_type: document.getElementById('s-printer-type').value,
             printer_address: document.getElementById('s-printer-address').value,
             enforce_cash_shift: document.getElementById('s-enforce-shift').checked ? '1' : '0',

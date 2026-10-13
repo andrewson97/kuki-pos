@@ -37,6 +37,11 @@
       return ({ cash: 'Cash', card: 'Card', upi: 'LankaQR' })[m] || (m || '-');
     }
 
+    // NULL on bills from before the till asked — shown as nothing, never guessed.
+    function orderTypeLabel(t) {
+      return ({ takeaway: 'Takeaway', dine_in: 'Dine in' })[t] || '';
+    }
+
     async function load() {
       await bootMobile();
       $('filter-date').value = todayISO();
@@ -68,7 +73,7 @@
             <span class="list-amount">${fmt(b.total)}</span>
           </div>
           <div class="list-head" style="margin-top:4px;">
-            <span class="list-meta">${formatTime(b.created_at)} · ${payLabel(b.payment_method)}</span>
+            <span class="list-meta">${formatTime(b.created_at)} · ${payLabel(b.payment_method)}${orderTypeLabel(b.order_type) ? ' · ' + orderTypeLabel(b.order_type) : ''}</span>
             <span class="badge ${b.status === 'completed' ? 'success' : b.status === 'refunded' ? 'warning' : 'danger'}">${b.status}</span>
           </div>
         </div>`).join('');
@@ -92,7 +97,7 @@
             <div><span style="color:var(--ink-soft);">Date</span><br>${formatDateTime(bill.created_at)}</div>
             <div><span style="color:var(--ink-soft);">Cashier</span><br>${escapeHtml(bill.cashier_name || '-')}</div>
             <div><span style="color:var(--ink-soft);">Customer</span><br>${escapeHtml(bill.customer_name || 'Walk-in')}</div>
-            <div><span style="color:var(--ink-soft);">Payment</span><br>${payLabel(bill.payment_method)}</div>
+            <div><span style="color:var(--ink-soft);">Payment</span><br>${payLabel(bill.payment_method)}${orderTypeLabel(bill.order_type) ? ' · ' + orderTypeLabel(bill.order_type) : ''}</div>
           </div>
           <div style="margin-bottom:12px;">${itemsHtml}</div>
           <div style="display:flex;justify-content:space-between;font-size:0.9rem;padding:4px 0;"><span>Subtotal</span><span>${fmt(bill.subtotal)}</span></div>
@@ -140,6 +145,8 @@
       await withBusy(btn, async () => {
         const r = await api(`/api/pos/bills/${id}/refund`, { method: 'POST', body: { reason: trimmed, restock } });
         toast(r.restocked ? 'Bill refunded — items back in stock' : 'Bill refunded — stock unchanged');
+        // Servings from an opened box go back only to a box that is still open.
+        if (r.portions && r.portions.not_returned > 0) toast('Some servings came from a box already finished — they could not go back', 'error');
         closeSheet('bill-sheet');
         loadBills();
       }, 'Refunding…');

@@ -705,6 +705,100 @@ export function runMigrations(): void {
   // dashboards? Default 0 = hidden, exactly how every cashier behaved before
   // the option existed. Admins always see it regardless (canSeeDashboardMoney).
   addColumn("users", "show_dashboard_money", "INTEGER NOT NULL DEFAULT 0");
+
+  // --- feature/opened-ingredients-order-type --------------------------------
+  // Dine-in or takeaway. Nullable on purpose: every bill written before the
+  // choice existed gets NULL, which means "not recorded", never a guess. Every
+  // bill written from now on carries one (createBill() resolves it, falling
+  // back to settings.default_order_type). Added as a column, never by
+  // rebuilding the table.
+  addColumn("bills", "order_type", "TEXT CHECK(order_type IN ('dine_in', 'takeaway'))");
+  // The same choice on a parked bill, so a dine-in order parked and resumed is
+  // not billed as the default. NULL for bills parked before it existed; the
+  // route stores only the two values, so no CHECK is needed here.
+  addColumn("parked_carts", "order_type", "TEXT");
+
+  db.exec(`
+    -- "This product is made from an OPENED unit of that ingredient": a milk box
+    -- makes 4 milkshakes. servings_per_unit is how many of the PRODUCT one unit
+    -- of the ingredient (one box, one tub, in the stock item's own unit) makes.
+    -- Unlike recipes (costing only), these links are enforced: a linked product
+    -- can only be billed while an opened unit of every ingredient it is linked
+    -- to has enough left. See src/services/portions.ts.
+    --
+    -- product_id cascades: the link is the product's own configuration. The
+    -- stock item does not: deleting an ingredient that products are made from is
+    -- refused with their names (src/routes/stock.ts), like a recipe.
+    CREATE TABLE IF NOT EXISTS product_ingredient_links (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+      stock_item_id INTEGER NOT NULL REFERENCES stock_items(id),
+      servings_per_unit REAL NOT NULL CHECK(servings_per_unit > 0),
+      UNIQUE(product_id, stock_item_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_product_ingredient_links_item ON product_ingredient_links(stock_item_id);
+
+    -- One opened unit of an ingredient: the box on the counter. Opening takes the
+    -- unit out of stock_items.quantity (a 'usage' stock_transactions row), so
+    -- stock_items.quantity is what is still SEALED. The three states the till
+    -- shows are therefore: in stock (sealed, stock_items.quantity), 'opened' and
+    -- 'finished' (rows here).
+    --
+    -- remaining is the FRACTION of the unit left, 1 at opening. A fraction, not
+    -- a serving count, because one box can feed several products with different
+    -- yields (4 milkshakes OR 8 iced coffees per box): each sale takes
+    -- quantity / servings_per_unit of it. It is rounded to 6 places on every
+    -- write and compared with a small tolerance (PORTION_EPSILON), so three
+    -- thirds use up a box exactly.
+    --
+    -- finish_reason: 'used_up' when sales emptied it, 'manual' when someone
+    -- marked it finished early (spilled, gone off) — remaining then keeps what
+    -- was thrown away, which is what anyone later asks about.
+    CREATE TABLE IF NOT EXISTS opened_stock_units (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      stock_item_id INTEGER NOT NULL REFERENCES stock_items(id) ON DELETE CASCADE,
+      status TEXT NOT NULL DEFAULT 'opened' CHECK(status IN ('opened', 'finished')),
+      remaining REAL NOT NULL DEFAULT 1,
+      opened_by INTEGER REFERENCES users(id),
+      opened_at TEXT NOT NULL DEFAULT (datetime('now')),
+      finished_by INTEGER REFERENCES users(id),
+      finished_at TEXT,
+      finish_reason TEXT CHECK(finish_reason IN ('used_up', 'manual')),
+      finish_note TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_opened_stock_units_open ON opened_stock_units(stock_item_id, status);
+
+    -- Which sale used how much of which opened unit. History only: nothing reads
+    -- it to decide anything, it answers "why is this box finished already?".
+    -- product_id is a plain integer (no foreign key) with the name kept beside
+    -- it, so this history never stops a product from being deleted.
+    CREATE TABLE IF NOT EXISTS opened_unit_usage (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      opened_unit_id INTEGER NOT NULL REFERENCES opened_stock_units(id) ON DELETE CASCADE,
+      bill_id INTEGER REFERENCES bills(id),
+      product_id INTEGER,
+      product_name TEXT NOT NULL DEFAULT '',
+      quantity REAL NOT NULL,
+      fraction REAL NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_opened_unit_usage_unit ON opened_unit_usage(opened_unit_id);
+
+    -- Packing a product uses up: a cake box, a cup and lid, a napkin. quantity is
+    -- per unit of the product sold. applies_to says when: 'takeaway' (only on a
+    -- takeaway bill — a dine-in milkshake goes in a glass) or 'always'. Deducted
+    -- from stock_items at checkout by src/services/packing.ts. Same cascade rule
+    -- as the ingredient links above.
+    CREATE TABLE IF NOT EXISTS product_packing_links (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+      stock_item_id INTEGER NOT NULL REFERENCES stock_items(id),
+      quantity REAL NOT NULL CHECK(quantity > 0),
+      applies_to TEXT NOT NULL DEFAULT 'takeaway' CHECK(applies_to IN ('takeaway', 'always')),
+      UNIQUE(product_id, stock_item_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_product_packing_links_item ON product_packing_links(stock_item_id);
+  `);
 }
 
 export function seedDefaults(): void {
@@ -742,6 +836,8 @@ export function seedDefaults(): void {
     printer_address: "",
     enforce_cash_shift: "1",
     category_order: "[]",
+    // What the till's Takeaway / Dine-in toggle starts on for each new sale.
+    default_order_type: "takeaway",
   };
   for (const [key, value] of Object.entries(defaults)) {
     db.query("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)").run(key, value);
