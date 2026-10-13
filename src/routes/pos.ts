@@ -42,6 +42,8 @@ function resolveSaleKey(body: any, settings: Record<string, string>) {
         tax_rate,
         payment_method: body.payment_method || "cash",
         amount_given: body.amount_given ?? null,
+        // Raw, exactly as createBill() hashes it — absent stays absent.
+        order_type: body.order_type ?? null,
       })
     : "";
   return { tax_rate, cartId, fingerprint };
@@ -93,6 +95,7 @@ function buildBillSlips(
     taxAmount: fullBill.tax_amount,
     total: fullBill.total,
     paymentMethod: fullBill.payment_method,
+    orderType: fullBill.order_type,
     cashierName,
     customerName,
     amountGiven: fullBill.amount_given,
@@ -184,6 +187,9 @@ pos.post("/bill", async (c) => {
       // the fingerprint itself from these very params, so there is no second
       // definition of it to drift.
       cart_id: cartId || null,
+      // Dine-in / takeaway. Absent (an older till page) falls back to the
+      // shop's default inside createBill().
+      order_type: body.order_type ?? null,
     });
   } catch (err: any) {
     return c.json({ error: err?.message || "Failed to create bill" }, 400);
@@ -471,6 +477,9 @@ pos.get("/bills/:id", (c) => {
 // costing only and selling never deducts them, so a refund must not "give
 // back" ingredients that were never taken (it used to, via restoreStockForBill).
 //
+// Never given back either way: servings taken from an opened ingredient (the
+// milk is in the milkshake) and packing (the box left with the customer).
+//
 // A bill made by collecting a pre-order (cart_id 'preorder-…') never deducted
 // stock — collection skips it — so its refund never restores any, whatever the
 // caller asked for. The UI hides the checkbox for those; this is the backstop.
@@ -572,6 +581,7 @@ pos.get("/bills/:id/receipt", async (c) => {
     taxAmount: bill.tax_amount,
     total: bill.total,
     paymentMethod: bill.payment_method,
+    orderType: bill.order_type,
     cashierName: bill.cashier_name,
     customerName: bill.customer_name,
     amountGiven: bill.amount_given,

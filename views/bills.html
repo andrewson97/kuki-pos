@@ -64,6 +64,11 @@
       return ({ cash: 'Cash', card: 'Card', upi: 'LankaQR' })[m] || (m || '-');
     }
 
+    // NULL on bills from before the till asked — shown as nothing, never guessed.
+    function orderTypeLabel(t) {
+      return ({ takeaway: 'Takeaway', dine_in: 'Dine in' })[t] || '';
+    }
+
     // A bill made by collecting a pre-order never took anything out of stock,
     // so its refund can never put anything back (the server ignores the choice
     // for these too).
@@ -87,7 +92,7 @@
           <td>${b.customer_name || '-'}</td>
           <td>-</td>
           <td class="fw-bold">${formatCurrency(b.total)}</td>
-          <td><span class="badge bg-info">${payLabel(b.payment_method)}</span></td>
+          <td><span class="badge bg-info">${payLabel(b.payment_method)}</span>${orderTypeLabel(b.order_type) ? ` <span class="badge bg-light text-dark border">${orderTypeLabel(b.order_type)}</span>` : ''}</td>
           <td><span class="badge bg-${b.status === 'completed' ? 'success' : (b.status === 'refunded' ? 'warning text-dark' : 'danger')}">${b.status}</span></td>
           <td>${b.cashier_name || '-'}</td>
           <td><button class="btn btn-sm btn-outline-primary" onclick="viewBill(${b.id})">View</button></td>
@@ -105,6 +110,7 @@
             <strong>Time:</strong> ${formatDateTime(bill.created_at)}<br>
             <strong>Customer:</strong> ${bill.customer_name || 'Walk-in'}<br>
             <strong>Payment:</strong> ${payLabel(bill.payment_method)}<br>
+            ${orderTypeLabel(bill.order_type) ? `<strong>Order:</strong> ${orderTypeLabel(bill.order_type)}<br>` : ''}
             <strong>Cashier:</strong> ${bill.cashier_name}</p>
           </div>
           <div class="col-md-6 text-end">

@@ -3,8 +3,108 @@ import { getDb } from "../db/database";
 import { adminOnly, getUser } from "../middleware/auth";
 import { todayDate } from "../utils/helpers";
 import { heldByOtherCartsMap } from "../services/reservations";
+import { productPortionStatus } from "../services/portions";
 
 const products = new Hono();
+
+// The stock items a product is linked to: the opened ingredient it is made
+// from (product_ingredient_links, enforced at the till — src/services/portions.ts)
+// and the packing it uses (product_packing_links — src/services/packing.ts).
+// Attached to every product list so the product form can show and edit them.
+function attachStockLinks(rows: any[]): any[] {
+  const db = getDb();
+  const ingredients = db.query(`
+    SELECT l.product_id, l.stock_item_id, l.servings_per_unit, si.name AS stock_item_name, si.unit
+    FROM product_ingredient_links l JOIN stock_items si ON si.id = l.stock_item_id ORDER BY si.name
+  `).all() as any[];
+  const packing = db.query(`
+    SELECT l.product_id, l.stock_item_id, l.quantity, l.applies_to, si.name AS stock_item_name, si.unit
+    FROM product_packing_links l JOIN stock_items si ON si.id = l.stock_item_id ORDER BY si.name
+  `).all() as any[];
+  const group = (list: any[]) => {
+    const m = new Map<number, any[]>();
+    for (const l of list) {
+      if (!m.has(l.product_id)) m.set(l.product_id, []);
+      m.get(l.product_id)!.push(l);
+    }
+    return m;
+  };
+  const ing = group(ingredients);
+  const pack = group(packing);
+  for (const r of rows) {
+    r.ingredient_links = ing.get(r.id) || [];
+    r.packing_links = pack.get(r.id) || [];
+  }
+  return rows;
+}
+
+interface CleanLinks {
+  ingredient_links?: { stock_item_id: number; servings_per_unit: number }[];
+  packing_links?: { stock_item_id: number; quantity: number; applies_to: "takeaway" | "always" }[];
+}
+
+/**
+ * Validate the two link lists from the product form. Either may be absent —
+ * the mobile product form does not edit them — and absent means "leave what is
+ * stored alone", never "remove them all". A present list replaces the stored one.
+ */
+function parseStockLinks(body: any): CleanLinks | { error: string } {
+  const db = getDb();
+  const out: CleanLinks = {};
+  const itemName = (id: number) => (db.query("SELECT name FROM stock_items WHERE id = ?").get(id) as any)?.name as string | undefined;
+
+  if (body.ingredient_links !== undefined) {
+    if (!Array.isArray(body.ingredient_links)) return { error: "ingredient_links must be a list" };
+    const seen = new Set<number>();
+    out.ingredient_links = [];
+    for (const l of body.ingredient_links) {
+      const sid = Number(l?.stock_item_id);
+      if (!Number.isInteger(sid) || sid <= 0) continue; // an empty row on the form
+      if (!itemName(sid)) return { error: "One of the ingredients picked no longer exists. Reload and try again." };
+      const spu = Number(l?.servings_per_unit);
+      if (!Number.isFinite(spu) || spu <= 0) {
+        return { error: `Say how many of this product one ${itemName(sid)} makes (more than 0).` };
+      }
+      if (seen.has(sid)) return { error: `${itemName(sid)} is listed twice as an ingredient.` };
+      seen.add(sid);
+      out.ingredient_links.push({ stock_item_id: sid, servings_per_unit: spu });
+    }
+  }
+
+  if (body.packing_links !== undefined) {
+    if (!Array.isArray(body.packing_links)) return { error: "packing_links must be a list" };
+    const seen = new Set<number>();
+    out.packing_links = [];
+    for (const l of body.packing_links) {
+      const sid = Number(l?.stock_item_id);
+      if (!Number.isInteger(sid) || sid <= 0) continue;
+      if (!itemName(sid)) return { error: "One of the packing items picked no longer exists. Reload and try again." };
+      const qty = Number(l?.quantity);
+      if (!Number.isFinite(qty) || qty <= 0) return { error: `Say how many ${itemName(sid)} one of this product uses (more than 0).` };
+      const applies = l?.applies_to === "always" ? "always" : l?.applies_to === "takeaway" || l?.applies_to == null ? "takeaway" : null;
+      if (!applies) return { error: "Packing must apply to takeaway only, or to every sale." };
+      if (seen.has(sid)) return { error: `${itemName(sid)} is listed twice as packing.` };
+      seen.add(sid);
+      out.packing_links.push({ stock_item_id: sid, quantity: qty, applies_to: applies });
+    }
+  }
+  return out;
+}
+
+/** Write validated links. Call inside the product save's transaction. */
+function saveStockLinks(productId: number, links: CleanLinks) {
+  const db = getDb();
+  if (links.ingredient_links) {
+    db.query("DELETE FROM product_ingredient_links WHERE product_id = ?").run(productId);
+    const ins = db.query("INSERT INTO product_ingredient_links (product_id, stock_item_id, servings_per_unit) VALUES (?, ?, ?)");
+    for (const l of links.ingredient_links) ins.run(productId, l.stock_item_id, l.servings_per_unit);
+  }
+  if (links.packing_links) {
+    db.query("DELETE FROM product_packing_links WHERE product_id = ?").run(productId);
+    const ins = db.query("INSERT INTO product_packing_links (product_id, stock_item_id, quantity, applies_to) VALUES (?, ?, ?, ?)");
+    for (const l of links.packing_links) ins.run(productId, l.stock_item_id, l.quantity, l.applies_to);
+  }
+}
 
 function attachComponents(rows: any[]): any[] {
   const db = getDb();
@@ -36,7 +136,7 @@ products.get("/", (c) => {
       ? ""
       : "WHERE is_discontinued = 0";
   const all = db.query(`SELECT * FROM products ${where} ORDER BY name`).all() as any[];
-  return c.json(attachComponents(all));
+  return c.json(attachStockLinks(attachComponents(all)));
 });
 
 // The POS grid. `stock_quantity` keeps its old meaning (units on hand) because
@@ -66,6 +166,30 @@ products.get("/active", (c) => {
       comp.component_available_quantity =
         (comp.component_stock_quantity ?? 0) - (held.get(comp.component_product_id) ?? 0);
     }
+  }
+
+  // Products made from an opened ingredient (src/services/portions.ts):
+  // `portion` says how many can still be sold from what is opened, after other
+  // carts' holds, and through which ingredients — null when the product (and
+  // every component of it) has no ingredient link. A composite is limited by
+  // its components' servings the same way its stock is. The grid shows a
+  // product at servings_left 0 greyed out with "Open <ingredient>", rather than
+  // hiding it like an out-of-stock one: the fix is one tap away at the till.
+  const portions = productPortionStatus(cartId);
+  for (const r of rows) {
+    let servings = Infinity;
+    const links: any[] = [];
+    const own = portions.get(r.id);
+    if (own) { servings = own.servings_left; links.push(...own.links); }
+    for (const comp of r.components as any[]) {
+      const cs = portions.get(comp.component_product_id);
+      if (!cs || !(comp.quantity > 0)) continue;
+      servings = Math.min(servings, Math.floor(cs.servings_left / comp.quantity + 1e-9));
+      for (const l of cs.links) {
+        if (!links.some((x) => x.stock_item_id === l.stock_item_id)) links.push(l);
+      }
+    }
+    r.portion = Number.isFinite(servings) ? { servings_left: servings, links } : null;
   }
   return c.json(rows);
 });
@@ -131,7 +255,8 @@ function saveComponents(productId: number, components: any[] | undefined) {
 }
 
 products.post("/", adminOnly, async (c) => {
-  const { name, category, cost_price, selling_price, discount_price, is_active, track_stock, stock_quantity, stock_reorder_level, components } = await c.req.json();
+  const body = await c.req.json();
+  const { name, category, cost_price, selling_price, discount_price, is_active, track_stock, stock_quantity, stock_reorder_level, components } = body;
   const db = getDb();
   const dp = discount_price && discount_price > 0 && discount_price < selling_price ? discount_price : null;
   const cat = canonicalCategory(category);
@@ -142,6 +267,8 @@ products.post("/", adminOnly, async (c) => {
   // is no earlier figure to overwrite. Never negative.
   const openingRaw = Number(stock_quantity);
   const opening = ts && Number.isFinite(openingRaw) && openingRaw > 0 ? openingRaw : 0;
+  const links = parseStockLinks(body);
+  if ("error" in links) return c.json({ error: links.error }, 400);
   let id = 0;
   db.transaction(() => {
     // stock_updated_at is stamped here too: the row's stock was just set, so a
@@ -152,6 +279,7 @@ products.post("/", adminOnly, async (c) => {
     ).run(cleanName, cat, cost_price || 0, selling_price, dp, is_active ?? 1, ts, opening, ts ? (stock_reorder_level || 0) : 0);
     id = Number(result.lastInsertRowid);
     saveComponents(id, components);
+    saveStockLinks(id, links);
     // The opening count is a stock movement like any other, so it is logged as
     // a 'restocked_product' row — the action Stock History already reads — and
     // the product's history starts with where its first units came from.
@@ -402,7 +530,10 @@ products.put("/category-order", adminOnly, async (c) => {
 products.put("/:id", adminOnly, async (c) => {
   const id = c.req.param("id");
   // stock_quantity is deliberately NOT read from this payload. See the UPDATE.
-  const { name, category, cost_price, selling_price, discount_price, is_active, track_stock, stock_reorder_level, components } = await c.req.json();
+  const body = await c.req.json();
+  const { name, category, cost_price, selling_price, discount_price, is_active, track_stock, stock_reorder_level, components } = body;
+  const links = parseStockLinks(body);
+  if ("error" in links) return c.json({ error: links.error }, 400);
   const db = getDb();
   const dp = discount_price && discount_price > 0 && discount_price < selling_price ? discount_price : null;
   const cat = canonicalCategory(category);
@@ -432,10 +563,14 @@ products.put("/:id", adminOnly, async (c) => {
   //
   // Turning tracking off keeps the count as it is (sales simply stop deducting
   // from it), so turning it back on picks up where it left off instead of at 0.
-  db.query(
-    "UPDATE products SET name = ?, category = ?, cost_price = ?, selling_price = ?, discount_price = ?, is_active = ?, track_stock = ?, stock_reorder_level = COALESCE(?, stock_reorder_level) WHERE id = ?"
-  ).run(cleanName, cat, cost_price || 0, selling_price, dp, active, ts, reorder, id);
-  saveComponents(parseInt(id), components);
+  // One transaction: the product, its components and its stock links are one save.
+  db.transaction(() => {
+    db.query(
+      "UPDATE products SET name = ?, category = ?, cost_price = ?, selling_price = ?, discount_price = ?, is_active = ?, track_stock = ?, stock_reorder_level = COALESCE(?, stock_reorder_level) WHERE id = ?"
+    ).run(cleanName, cat, cost_price || 0, selling_price, dp, active, ts, reorder, id);
+    saveComponents(parseInt(id), components);
+    saveStockLinks(Number(id), links);
+  })();
   return c.json({ success: true });
 });
 
