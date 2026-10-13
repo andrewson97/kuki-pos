@@ -2259,6 +2259,9 @@
         return `<div style="display:flex;align-items:center;gap:8px;margin-top:6px;">
           <span class="badge" style="background:#2563eb;color:white;">OPENED</span>
           <span class="list-meta" style="flex:1;">${left} left · ${escapeHtml(formatDateTime(u.opened_at))}</span>
+          ${u.untouched && currentUser && currentUser.role === 'admin'
+            ? `<button class="btn btn-outline btn-sm" style="width:auto;flex:0 0 auto;color:var(--red);" onclick="undoOpened(${Number(u.id)}, ${Number(it.id)}, this)">Undo</button>`
+            : ''}
           <button class="btn btn-outline btn-sm" style="width:auto;flex:0 0 auto;" onclick="finishOpened(${Number(u.id)}, ${Number(it.id)}, this)">Finish</button>
         </div>`;
       }).join('');
@@ -2367,6 +2370,25 @@
         await loadUseStock();
         refreshAvailability();
       }, 'Opening…');
+    }
+
+    // Admin only (button shown to admins, server enforces it): put a box opened
+    // by mistake back into stock while nothing has been sold from it.
+    async function undoOpened(openedId, stockItemId, btn) {
+      const it = useStockItems.find(x => Number(x.id) === Number(stockItemId));
+      const name = (it && it.name) || 'item';
+      if (!confirm(`Put this ${name} back into stock unopened? Only for a box opened by mistake.`)) return;
+      await withBusy(btn, async () => {
+        try {
+          await api(`/api/stock/opened/${Number(openedId)}/undo`, { method: 'POST', body: {} });
+        } catch (err) {
+          toast((err && err.message) || 'Could not undo it', 'error');
+          return;
+        }
+        toast(`${name} put back into stock`);
+        await loadUseStock();
+        refreshAvailability();
+      }, '…');
     }
 
     async function finishOpened(openedId, stockItemId, btn) {

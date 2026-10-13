@@ -145,6 +145,8 @@
       await withBusy(btn, async () => {
         const r = await api(`/api/pos/bills/${id}/refund`, { method: 'POST', body: { reason: trimmed, restock } });
         toast(r.restocked ? 'Bill refunded — items back in stock' : 'Bill refunded — stock unchanged');
+        // Servings from an opened box go back only to a box that is still open.
+        if (r.portions && r.portions.not_returned > 0) toast('Some servings came from a box already finished — they could not go back', 'error');
         closeSheet('bill-sheet');
         loadBills();
       }, 'Refunding…');

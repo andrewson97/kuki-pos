@@ -2645,7 +2645,10 @@
           <div class="d-flex align-items-center gap-2 mt-1">
             <span class="badge bg-primary">Opened</span>
             <small>${left} left &middot; opened ${escapeHtml(formatDateTime(u.opened_at))}${u.opened_by_name ? ' by ' + escapeHtml(u.opened_by_name) : ''}</small>
-            <button class="btn btn-sm btn-outline-secondary py-0 px-2 ms-auto" onclick="finishOpened(${Number(u.id)}, ${Number(it.id)}, this)" title="Mark it finished now (spilled, gone off, used for something else)">Finish</button>
+            ${u.untouched && currentUser && currentUser.role === 'admin'
+              ? `<button class="btn btn-sm btn-outline-danger py-0 px-2 ms-auto" onclick="undoOpened(${Number(u.id)}, ${Number(it.id)}, this)" title="Opened by mistake: put it back into stock unopened (nothing sold from it yet)">Undo</button>`
+              : ''}
+            <button class="btn btn-sm btn-outline-secondary py-0 px-2 ${u.untouched && currentUser && currentUser.role === 'admin' ? '' : 'ms-auto'}" onclick="finishOpened(${Number(u.id)}, ${Number(it.id)}, this)" title="Mark it finished now (spilled, gone off, used for something else)">Finish</button>
           </div>`;
       }).join('');
       // No links left: an opened unit outlived the last product made from it.
@@ -2765,6 +2768,26 @@
         await loadUseStock();
         refreshAvailability();
       }, 'Opening...');
+    }
+
+    // Admin only (the button is shown to admins, the server enforces it): an
+    // Open made by mistake goes back into sealed stock, while nothing has been
+    // sold from it.
+    async function undoOpened(openedId, stockItemId, btn) {
+      const it = useStockItems.find(x => Number(x.id) === Number(stockItemId));
+      const name = (it && it.name) || 'item';
+      if (!confirm(`Put this ${name} back into stock unopened? Only for a box opened by mistake.`)) return;
+      await withBusy(btn, async () => {
+        try {
+          await api(`/api/stock/opened/${Number(openedId)}/undo`, { method: 'POST', body: {} });
+        } catch (err) {
+          showToast((err && err.message) || 'Could not undo it', 'error');
+          return;
+        }
+        showToast(`${name} put back into stock`);
+        await loadUseStock();
+        refreshAvailability();
+      }, '...');
     }
 
     async function finishOpened(openedId, stockItemId, btn) {

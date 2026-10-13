@@ -11,6 +11,7 @@ import {
   getCartHolds,
 } from "../services/reservations";
 import { adminOnly } from "../middleware/auth";
+import { returnPortionsForBill } from "../services/portions";
 import { todayDate, formatDateTime } from "../utils/helpers";
 
 const pos = new Hono();
@@ -477,8 +478,10 @@ pos.get("/bills/:id", (c) => {
 // costing only and selling never deducts them, so a refund must not "give
 // back" ingredients that were never taken (it used to, via restoreStockForBill).
 //
-// Never given back either way: servings taken from an opened ingredient (the
-// milk is in the milkshake) and packing (the box left with the customer).
+// Servings taken from an opened ingredient (a milk box) follow the same tick:
+// with "put back" they return to the box they came from, if that box is still
+// open (returnPortionsForBill); a box already finished stays finished. Packing
+// never comes back — the box left with the customer.
 //
 // A bill made by collecting a pre-order (cart_id 'preorder-…') never deducted
 // stock — collection skips it — so its refund never restores any, whatever the
@@ -501,6 +504,7 @@ pos.post("/bills/:id/refund", async (c) => {
 
   const items = db.query("SELECT product_id, quantity FROM bill_items WHERE bill_id = ?").all(id) as any[];
 
+  let portions = { returned: 0, not_returned: 0 };
   try {
     // .immediate() and the status re-check inside it: two taps (or two tills)
     // refunding the same bill must not both pass the check above and restore
@@ -530,6 +534,7 @@ pos.post("/bills/:id/refund", async (c) => {
             }
           }
         }
+        portions = returnPortionsForBill(Number(id));
       }
       db.query(
         "UPDATE bills SET status = 'refunded', refund_reason = ?, refunded_at = datetime('now'), refunded_by_user_id = ?, refund_restocked = ? WHERE id = ?"
@@ -542,6 +547,11 @@ pos.post("/bills/:id/refund", async (c) => {
         user.id, JSON.stringify({
           bill_id: id, token: bill.token_number, amount: bill.total, reason,
           restock, restock_requested: restockRequested, from_preorder: fromPreorder,
+          // Fractions of a unit given back to still-open boxes, and the share
+          // that could not be because its box was already finished.
+          ...(portions.returned || portions.not_returned
+            ? { portions_returned: portions.returned, portions_not_returned: portions.not_returned }
+            : {}),
         })
       );
     }).immediate();
@@ -549,7 +559,7 @@ pos.post("/bills/:id/refund", async (c) => {
     return c.json({ error: err?.message || "Refund failed" }, 400);
   }
 
-  return c.json({ success: true, restocked: restock, from_preorder: fromPreorder });
+  return c.json({ success: true, restocked: restock, from_preorder: fromPreorder, portions });
 });
 
 // Imported here rather than in the block at the top so this route's reprint

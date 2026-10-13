@@ -257,6 +257,72 @@ export function openStockUnit(stockItemId: number, userId: number, note?: string
 }
 
 /**
+ * Undo an Open made by mistake: the unit goes back into sealed stock and the
+ * opened row is removed, as if it had never been opened. Admin-only (the route
+ * enforces it), and only while it is untouched — nothing sold from it
+ * (no opened_unit_usage rows) and still whole. Refused too when other carts'
+ * holds on this ingredient would no longer be covered without it: taking the
+ * box away under a parked bill would leave that order unbillable.
+ */
+export function undoOpenStockUnit(openedId: number, userId: number) {
+  const db = getDb();
+  return db.transaction(() => {
+    const u = db.query(`
+      SELECT o.id, o.status, o.remaining, o.stock_item_id, si.name, si.unit, si.quantity
+      FROM opened_stock_units o JOIN stock_items si ON si.id = o.stock_item_id WHERE o.id = ?
+    `).get(openedId) as any;
+    if (!u) throw new PortionError("That opened item was not found", 404);
+    if (u.status !== "opened") throw new PortionError(`That ${u.name} is already finished, so it cannot be put back`);
+    const used = db.query("SELECT COUNT(*) AS n FROM opened_unit_usage WHERE opened_unit_id = ?").get(openedId) as any;
+    if (used.n > 0 || Math.abs((Number(u.remaining) || 0) - 1) > PORTION_EPSILON) {
+      throw new PortionError(`Something has already been sold from this ${u.name}, so it cannot go back into stock. Use Finish instead.`);
+    }
+    const openAfter = (openRemainingMap().get(u.stock_item_id) ?? 0) - 1;
+    const held = heldPortionsByOtherCarts("").get(u.stock_item_id) ?? 0;
+    if (held > openAfter + PORTION_EPSILON) {
+      throw new PortionError(`Carts or parked bills are holding servings from the opened ${u.name}. Sell or clear those first.`);
+    }
+    const onHand = Number(u.quantity) || 0;
+    const next = roundFrac(onHand + 1);
+    db.query(
+      "INSERT INTO stock_transactions (stock_item_id, type, quantity, reference, user_id) VALUES (?, 'adjustment', 1, ?, ?)"
+    ).run(u.stock_item_id, "Opened by mistake — put back into stock unopened", userId);
+    db.query("UPDATE stock_items SET quantity = ?, updated_at = datetime('now') WHERE id = ?").run(next, u.stock_item_id);
+    db.query("DELETE FROM opened_stock_units WHERE id = ?").run(openedId);
+    db.query("INSERT INTO activity_log (user_id, action, details) VALUES (?, 'undid_stock_open', ?)").run(
+      userId, JSON.stringify({ opened_unit_id: openedId, stock_item_id: u.stock_item_id, name: u.name, previous: onHand, new_quantity: next })
+    );
+    return { id: openedId, name: u.name, sealed_left: next };
+  }).immediate();
+}
+
+/**
+ * A refunded bill whose cashier ticked "Put items back into stock": give its
+ * servings back to the opened units they came from — but only to units that
+ * are still OPEN. A unit already finished (used up, or written off) stays
+ * finished; its share is reported back as not returned. Never past a whole
+ * unit. Plain, not its own transaction: the refund route calls it inside its own.
+ */
+export function returnPortionsForBill(billId: number): { returned: number; not_returned: number } {
+  const db = getDb();
+  const rows = db.query(`
+    SELECT u.opened_unit_id, SUM(u.fraction) AS fraction, o.status, o.remaining
+    FROM opened_unit_usage u JOIN opened_stock_units o ON o.id = u.opened_unit_id
+    WHERE u.bill_id = ? GROUP BY u.opened_unit_id
+  `).all(billId) as any[];
+  let returned = 0;
+  let notReturned = 0;
+  for (const r of rows) {
+    const fraction = Number(r.fraction) || 0;
+    if (r.status !== "opened") { notReturned += fraction; continue; }
+    const next = Math.min(1, roundFrac((Number(r.remaining) || 0) + fraction));
+    db.query("UPDATE opened_stock_units SET remaining = ? WHERE id = ?").run(next, r.opened_unit_id);
+    returned += next - (Number(r.remaining) || 0);
+  }
+  return { returned: roundFrac(returned), not_returned: roundFrac(notReturned) };
+}
+
+/**
  * Mark an opened unit finished before sales used it up (spilled, gone off, the
  * last bit went into something else). Whatever was left is recorded with the
  * reason; it does not go back into stock — an opened box is not sealed stock.
@@ -295,8 +361,10 @@ export function listPortionIngredients(): any[] {
     FROM product_ingredient_links l JOIN products p ON p.id = l.product_id
     ORDER BY p.name
   `).all() as any[];
+  // `untouched`: nothing sold from it yet — the only state an admin may undo.
   const opened = db.query(`
-    SELECT o.id, o.stock_item_id, o.remaining, o.opened_at, u.full_name AS opened_by_name
+    SELECT o.id, o.stock_item_id, o.remaining, o.opened_at, u.full_name AS opened_by_name,
+           NOT EXISTS (SELECT 1 FROM opened_unit_usage x WHERE x.opened_unit_id = o.id) AS untouched
     FROM opened_stock_units o LEFT JOIN users u ON u.id = o.opened_by
     WHERE o.status = 'opened' ORDER BY o.opened_at, o.id
   `).all() as any[];
@@ -319,6 +387,7 @@ export function listPortionIngredients(): any[] {
       remaining: roundFrac(Number(o.remaining) || 0),
       opened_at: o.opened_at,
       opened_by_name: o.opened_by_name,
+      untouched: !!o.untouched && Math.abs((Number(o.remaining) || 0) - 1) <= PORTION_EPSILON,
       servings_left: it.links.map((l: any) => ({ product_name: l.product_name, servings: servingsFrom(Number(o.remaining) || 0, l.servings_per_unit) })),
     });
   }

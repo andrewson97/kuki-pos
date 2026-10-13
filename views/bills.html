@@ -180,6 +180,10 @@
           await withBusy(confirmBtn, async () => {
             const r = await api(`/api/pos/bills/${id}/refund`, { method: 'POST', body: { reason: trimmed, restock } });
             showToast(r.restocked ? 'Bill refunded — items put back into stock' : 'Bill refunded — stock unchanged');
+            // Servings from an opened box go back only to a box that is still open.
+            if (r.portions && r.portions.not_returned > 0) {
+              showToast('Some servings came from an opened box that is already finished, so they could not go back.', 'warning');
+            }
             bootstrap.Modal.getInstance(document.getElementById('billDetailModal')).hide();
             await loadBills();
           }, 'Refunding...');

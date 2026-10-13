@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { getDb } from "../db/database";
 import { adminOnly, getUser } from "../middleware/auth";
-import { PortionError, finishStockUnit, listPortionIngredients, openStockUnit } from "../services/portions";
+import { PortionError, finishStockUnit, listPortionIngredients, openStockUnit, undoOpenStockUnit } from "../services/portions";
 
 const stock = new Hono();
 
@@ -339,6 +339,19 @@ stock.post("/opened/:id/finish", async (c) => {
   const body = await c.req.json().catch(() => ({} as any));
   try {
     return c.json({ success: true, ...finishStockUnit(id, getUser(c)!.id, body?.reason) });
+  } catch (err: any) {
+    if (err instanceof PortionError) return c.json({ error: err.message }, err.status);
+    throw err;
+  }
+});
+
+// Undo an Open made by mistake. Admin-only: it puts a unit back into sealed
+// stock, which is a correction to the record, not till work.
+stock.post("/opened/:id/undo", adminOnly, (c) => {
+  const id = Number(c.req.param("id"));
+  if (!Number.isInteger(id) || id <= 0) return c.json({ error: "Invalid opened item id" }, 400);
+  try {
+    return c.json({ success: true, ...undoOpenStockUnit(id, getUser(c)!.id) });
   } catch (err: any) {
     if (err instanceof PortionError) return c.json({ error: err.message }, err.status);
     throw err;
