@@ -27,10 +27,22 @@ import { getDb } from "../db/database";
 // unit is then worked out from those rows and the links, so two tills cannot
 // both sell the last milkshake in the box, and a parked bill keeps its share.
 
-/** Below this, a fraction of a unit is nothing: three thirds use up a box. */
-export const PORTION_EPSILON = 1e-4;
+// The largest yield a link may have (src/routes/products.ts refuses more). It
+// bounds the smallest serving at 1/1000 of a unit, which is what lets one
+// fixed tolerance below be tiny next to any real serving.
+export const MAX_SERVINGS_PER_UNIT = 1000;
 
-const round6 = (x: number) => Math.round(x * 1e6) / 1e6;
+/**
+ * Below this, a fraction of a unit is nothing: three thirds use up a box. It
+ * must stay far below the smallest serving (1 / MAX_SERVINGS_PER_UNIT) — it is
+ * 0.1% of one — or a box would be called finished with servings still in it,
+ * or a sale let through that the box cannot cover.
+ */
+export const PORTION_EPSILON = 1e-6;
+
+// Stored fractions are rounded to 9 places: drift from a thousand sales of
+// 1/999 stays under 1e-6, inside the tolerance above.
+const roundFrac = (x: number) => Math.round(x * 1e9) / 1e9;
 
 export class PortionError extends Error {
   constructor(message: string, public status: 400 | 404 = 400) { super(message); }
@@ -152,8 +164,12 @@ export function checkPortions(units: Map<number, LinkedUnits>, cartId?: string |
     }
     const left = servingsFrom(available, first.servings_per_unit);
     const heldNote = (held.get(need.stock_item_id) ?? 0) > PORTION_EPSILON ? ", after what other carts are holding" : "";
+    // Several products sharing the box: the whole cart's need, in servings of
+    // the product named, so "need" is comparable with "only N left".
+    const needServings = +(need.fraction * first.servings_per_unit).toFixed(3);
+    const others = need.parts.length > 1 ? " with the rest of this cart" : "";
     throw new PortionError(
-      `Only ${left} ${first.product_name} left in the opened ${need.name}${heldNote} (need ${first.units}). Open another ${need.name} from "Use stock"${sealedHint}.`
+      `Only ${left} ${first.product_name} left in the opened ${need.name}${heldNote} (need ${needServings}${others}). Open another ${need.name} from "Use stock"${sealedHint}.`
     );
   }
 }
@@ -179,8 +195,8 @@ export function consumePortions(billId: number, units: Map<number, LinkedUnits>,
         if (left <= PORTION_EPSILON) break;
         const take = Math.min(Number(u.remaining) || 0, left);
         if (take <= 0) continue;
-        const remaining = round6((Number(u.remaining) || 0) - take);
-        left = round6(left - take);
+        const remaining = roundFrac((Number(u.remaining) || 0) - take);
+        left = roundFrac(left - take);
         // Rounding dust is not a serving: anything under the tolerance is an
         // empty box, so it is finished rather than left "opened" with nothing in it.
         if (remaining <= PORTION_EPSILON) {
@@ -190,7 +206,7 @@ export function consumePortions(billId: number, units: Map<number, LinkedUnits>,
         } else {
           db.query("UPDATE opened_stock_units SET remaining = ? WHERE id = ?").run(remaining, u.id);
         }
-        insertUsage.run(u.id, billId, part.product_id, part.product_name, round6(take * part.servings_per_unit), round6(take));
+        insertUsage.run(u.id, billId, part.product_id, part.product_name, roundFrac(take * part.servings_per_unit), roundFrac(take));
       }
       // checkPortions() ran under the same write lock, so this cannot happen;
       // if it ever does, the sale must not commit having used less than it sold.
@@ -221,7 +237,7 @@ export function openStockUnit(stockItemId: number, userId: number, note?: string
     if (onHand < 1 - 1e-9) {
       throw new PortionError(`No sealed ${item.name} left (${+onHand.toFixed(3)}${unit} on hand). Restock it on the Stock page first.`);
     }
-    const next = round6(onHand - 1);
+    const next = roundFrac(onHand - 1);
     const makes = links.map((l) => `${+Number(l.servings_per_unit).toFixed(3)} ${l.name}`).join(" / ");
     const cleanNote = String(note || "").trim();
     const ref = `Opened at POS — makes ${makes}` + (cleanNote ? ` — ${cleanNote}` : "");
@@ -260,9 +276,9 @@ export function finishStockUnit(openedId: number, userId: number, note: string) 
       "UPDATE opened_stock_units SET status = 'finished', finish_reason = 'manual', finish_note = ?, finished_at = datetime('now'), finished_by = ? WHERE id = ?"
     ).run(reason, userId, openedId);
     db.query("INSERT INTO activity_log (user_id, action, details) VALUES (?, 'finished_stock_unit', ?)").run(
-      userId, JSON.stringify({ opened_unit_id: openedId, stock_item_id: u.stock_item_id, name: u.name, remaining_discarded: round6(Number(u.remaining) || 0), reason })
+      userId, JSON.stringify({ opened_unit_id: openedId, stock_item_id: u.stock_item_id, name: u.name, remaining_discarded: roundFrac(Number(u.remaining) || 0), reason })
     );
-    return { id: openedId, name: u.name, remaining_discarded: round6(Number(u.remaining) || 0) };
+    return { id: openedId, name: u.name, remaining_discarded: roundFrac(Number(u.remaining) || 0) };
   }).immediate();
 }
 
@@ -279,24 +295,28 @@ export function listPortionIngredients(): any[] {
     FROM product_ingredient_links l JOIN products p ON p.id = l.product_id
     ORDER BY p.name
   `).all() as any[];
-  if (!links.length) return [];
   const opened = db.query(`
     SELECT o.id, o.stock_item_id, o.remaining, o.opened_at, u.full_name AS opened_by_name
     FROM opened_stock_units o LEFT JOIN users u ON u.id = o.opened_by
     WHERE o.status = 'opened' ORDER BY o.opened_at, o.id
   `).all() as any[];
   const byItem = new Map<number, any>();
+  const entry = (id: number) => {
+    const it = byItem.get(id) || { stock_item_id: id, links: [], opened_units: [] };
+    byItem.set(id, it);
+    return it;
+  };
   for (const l of links) {
-    const it = byItem.get(l.stock_item_id) || { stock_item_id: l.stock_item_id, links: [], opened_units: [] };
-    it.links.push({ product_id: l.product_id, product_name: l.product_name, servings_per_unit: l.servings_per_unit });
-    byItem.set(l.stock_item_id, it);
+    entry(l.stock_item_id).links.push({ product_id: l.product_id, product_name: l.product_name, servings_per_unit: l.servings_per_unit });
   }
   for (const o of opened) {
-    const it = byItem.get(o.stock_item_id);
-    if (!it) continue; // opened before its last link was removed: nothing sells from it
+    // An item whose last link was removed while a unit stood open is still
+    // listed (links empty): nothing sells from it, but it must stay visible so
+    // someone can finish it rather than have it come back stale if relinked.
+    const it = entry(o.stock_item_id);
     it.opened_units.push({
       id: o.id,
-      remaining: round6(Number(o.remaining) || 0),
+      remaining: roundFrac(Number(o.remaining) || 0),
       opened_at: o.opened_at,
       opened_by_name: o.opened_by_name,
       servings_left: it.links.map((l: any) => ({ product_name: l.product_name, servings: servingsFrom(Number(o.remaining) || 0, l.servings_per_unit) })),
@@ -329,6 +349,9 @@ export function productPortionStatus(cartId?: string | null): Map<number, any> {
       ingredient_name: l.ingredient_name,
       servings_per_unit: l.servings_per_unit,
       servings_left: servings,
+      // The same figure as a fraction of one unit, so the till can add up what
+      // SEVERAL products in its cart take from one shared box.
+      available: roundFrac(available),
       is_open: (open.get(l.stock_item_id) ?? 0) > PORTION_EPSILON,
       sealed_quantity: Number(l.sealed_quantity) || 0,
       unit: l.unit,

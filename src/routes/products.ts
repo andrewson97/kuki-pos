@@ -3,7 +3,7 @@ import { getDb } from "../db/database";
 import { adminOnly, getUser } from "../middleware/auth";
 import { todayDate } from "../utils/helpers";
 import { heldByOtherCartsMap } from "../services/reservations";
-import { productPortionStatus } from "../services/portions";
+import { MAX_SERVINGS_PER_UNIT, productPortionStatus } from "../services/portions";
 
 const products = new Hono();
 
@@ -64,6 +64,11 @@ function parseStockLinks(body: any): CleanLinks | { error: string } {
       const spu = Number(l?.servings_per_unit);
       if (!Number.isFinite(spu) || spu <= 0) {
         return { error: `Say how many of this product one ${itemName(sid)} makes (more than 0).` };
+      }
+      // Bounded so a serving is never smaller than the portion maths' tolerance
+      // can tell apart from nothing (see PORTION_EPSILON).
+      if (spu > MAX_SERVINGS_PER_UNIT) {
+        return { error: `One ${itemName(sid)} can make at most ${MAX_SERVINGS_PER_UNIT} of a product. Use a bigger unit for it (a box, not a gram).` };
       }
       if (seen.has(sid)) return { error: `${itemName(sid)} is listed twice as an ingredient.` };
       seen.add(sid);

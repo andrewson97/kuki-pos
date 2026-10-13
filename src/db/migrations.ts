@@ -713,6 +713,10 @@ export function runMigrations(): void {
   // back to settings.default_order_type). Added as a column, never by
   // rebuilding the table.
   addColumn("bills", "order_type", "TEXT CHECK(order_type IN ('dine_in', 'takeaway'))");
+  // The same choice on a parked bill, so a dine-in order parked and resumed is
+  // not billed as the default. NULL for bills parked before it existed; the
+  // route stores only the two values, so no CHECK is needed here.
+  addColumn("parked_carts", "order_type", "TEXT");
 
   db.exec(`
     -- "This product is made from an OPENED unit of that ingredient": a milk box

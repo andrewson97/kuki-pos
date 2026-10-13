@@ -181,7 +181,9 @@ export function saleFingerprint(input: SaleFingerprintInput): string {
       fpNum(it?.original_price ?? it?.unit_price)
     );
   }
-  const orderType = String(input.order_type ?? "").trim().toLowerCase();
+  // Normalised exactly as resolveOrderType() reads it, so "dine-in" and
+  // "dine_in" — the same stored bill — are the same sale.
+  const orderType = String(input.order_type ?? "").trim().toLowerCase().replace(/[\s-]+/g, "_");
   if (orderType) parts.push("ot=" + fpStr(orderType));
   // \u001f is the ASCII unit separator: not typeable into a product name, and
   // the length prefixes above make it unforgeable in any case.

@@ -851,7 +851,7 @@ const PARK_MAX_ITEMS = 200;
 // name. Shared by the listing, the upsert's read-back and resume — so the three
 // can never return different shapes for the same row.
 const SELECT_PARKED = `
-  SELECT p.id, p.cart_id, p.label, p.items, p.customer_id, p.customer_label, p.discount,
+  SELECT p.id, p.cart_id, p.label, p.items, p.customer_id, p.customer_label, p.discount, p.order_type,
          p.user_id, u.full_name AS cashier_name, p.till_id, p.till_label,
          p.created_at, p.updated_at
   FROM parked_carts p
@@ -888,6 +888,9 @@ function shapeParked(row: any): any {
     customer_id: row.customer_id ?? null,
     customer_label: row.customer_label ?? "",
     discount: row.discount ?? 0,
+    // Dine in / takeaway as it was when parked; null for a bill parked before
+    // the choice existed (the till then stays on its default).
+    order_type: row.order_type ?? null,
     user_id: row.user_id ?? null,
     cashier_name: row.cashier_name ?? null,
     till_id: row.till_id ?? null,
@@ -1082,6 +1085,9 @@ pos.post("/parked", async (c) => {
     return c.json({ error: "till_label must be a string" }, 400);
   }
   const tillId = (typeof body.till_id === "string" ? body.till_id.trim() : "").slice(0, PARK_MAX_LEN) || null;
+  // Kept so a dine-in order parked and resumed is still billed as dine-in.
+  // Anything but the two values (an older till sends nothing) is stored as NULL.
+  const orderType = body.order_type === "dine_in" || body.order_type === "takeaway" ? body.order_type : null;
   const tillLabel =
     (typeof body.till_label === "string" ? body.till_label.trim() : "").slice(0, PARK_MAX_LEN) || tillId || "";
 
@@ -1090,8 +1096,8 @@ pos.post("/parked", async (c) => {
   // time a line is added. updated_at carries "last re-parked".
   const upsert = db.query(`
     INSERT INTO parked_carts
-      (cart_id, label, items, customer_id, customer_label, discount, user_id, till_id, till_label, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+      (cart_id, label, items, customer_id, customer_label, discount, user_id, till_id, till_label, order_type, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
     ON CONFLICT(cart_id) DO UPDATE SET
       label = excluded.label,
       items = excluded.items,
@@ -1101,6 +1107,7 @@ pos.post("/parked", async (c) => {
       user_id = excluded.user_id,
       till_id = excluded.till_id,
       till_label = excluded.till_label,
+      order_type = excluded.order_type,
       updated_at = excluded.updated_at
   `);
 
@@ -1114,7 +1121,8 @@ pos.post("/parked", async (c) => {
       discount,
       user.id,
       tillId,
-      tillLabel
+      tillLabel,
+      orderType
     );
     return db.query(`${SELECT_PARKED} WHERE p.cart_id = ?`).get(cartId) as any;
   }).immediate();

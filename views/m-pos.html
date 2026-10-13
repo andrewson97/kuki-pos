@@ -418,8 +418,7 @@
     // ===== Dine in / takeaway =====
     // Each sale starts on the shop's default (Settings → default_order_type);
     // the cashier flips it when the customer says otherwise. It travels in the
-    // bill body and the saved cart; a parked bill does not keep it. Same as the
-    // desktop till.
+    // bill body, the saved cart and a parked bill. Same as the desktop till.
     let orderType = 'takeaway';
     function defaultOrderType() {
       return (typeof appSettings !== 'undefined' && appSettings && appSettings.default_order_type === 'dine_in') ? 'dine_in' : 'takeaway';
@@ -665,12 +664,11 @@
       if (refuseIfLocked()) return;
       const p = products.find(x => x.id === id);
       if (!p) return;
-      // The opened ingredient cannot cover another: offer to open one instead
-      // of adding a line the hold sync would refuse.
-      if (p.portion) {
-        const inCart = (cart.find(c => c.product_id === id) || {}).quantity || 0;
-        if (inCart + 1 > p.portion.servings_left) { promptOpenFor(p); return; }
-      }
+      // The opened ingredient cannot cover another (counting everything else
+      // in this cart from the same box): offer to open one instead of adding a
+      // line the hold sync would refuse.
+      const short = portionShortfall(p, 1);
+      if (short) { promptOpenFor(p, short); return; }
       // A SALE STARTS HERE. Before anything goes in, see whether this is the
       // first item of a new one — if it is, it gets a cart id of its own.
       beginSaleIfCartEmpty();
@@ -808,7 +806,8 @@
       if (refuseIfLocked() || !cart[idx]) return;
       if (d > 0) {
         const p = products.find(x => x.id === cart[idx].product_id);
-        if (p && p.portion && cart[idx].quantity + d > p.portion.servings_left) { promptOpenFor(p); return; }
+        const short = p && portionShortfall(p, d);
+        if (short) { promptOpenFor(p, short); return; }
       }
       cart[idx].quantity += d; if (cart[idx].quantity <= 0) cart.splice(idx, 1); recalc(); queueCartSync();
     }
@@ -1144,21 +1143,16 @@
         // available_quantity already excludes THIS cart's own hold, so it is the
         // same figure the sync below checks against.
         const avail = p.available_quantity ?? p.stock_quantity ?? 0;
-        if (p.track_stock && qty > avail) {
-          trimmed.push(`${p.name} ${qty} → ${avail}`);
-          kept.push({ ...line, product_name: p.name, quantity: avail });
-          continue;
-        }
-        // Made from an opened ingredient that ran out (or was finished) while
-        // the till was away: trim it, or the sync below refuses the whole cart.
-        if (p.portion && qty > p.portion.servings_left) {
-          const left = Math.max(0, p.portion.servings_left);
-          if (!left) { dropped.push(`${p.name} (open a new ${portionLimit(p).ingredient_name || 'ingredient'})`); continue; }
-          trimmed.push(`${p.name} ${qty} → ${left}`);
-          kept.push({ ...line, product_name: p.name, quantity: left });
-          continue;
-        }
-        kept.push({ ...line, product_name: p.name, quantity: qty });
+        // Also made from an opened ingredient that ran out (or was finished)
+        // while the till was away. Both limits apply to a product that is
+        // tracked AND made from one — the smaller wins — or the sync below
+        // refuses the whole cart.
+        let allowed = qty;
+        if (p.track_stock) allowed = Math.min(allowed, avail);
+        if (p.portion) allowed = Math.min(allowed, Math.max(0, p.portion.servings_left));
+        if (allowed <= 0) { dropped.push(`${p.name} (open a new ${portionLimit(p).ingredient_name || 'ingredient'})`); continue; }
+        if (allowed < qty) trimmed.push(`${p.name} ${qty} → ${allowed}`);
+        kept.push({ ...line, product_name: p.name, quantity: allowed });
       }
 
       if (!kept.length) {
@@ -1301,6 +1295,7 @@
         customer_id: $('cust-id').value || '',
         customer_label: custName,
         discount: discountAmount(), // the amount only; a % is not parked
+        order_type: orderType,      // a parked dine-in order resumes as dine-in
         till_id: getTillId(),
         till_label: tillLabel(),
       };
@@ -1422,6 +1417,8 @@
       holdsOnServer = true;
       $('s-discount').value = bill.discount || 0;
       discountMode = 'amount'; // parked bills keep the amount; the % follows it
+      // Back to dine-in / takeaway as parked (none on an older bill: default).
+      setOrderType(bill.order_type || defaultOrderType(), { silent: true });
       if (bill.customer_id && bill.customer_label) pickCust(parseInt(bill.customer_id), bill.customer_label);
       else clearCust();
       reportClaims(); // this cart is the active claim now, not a parked one
@@ -2192,7 +2189,8 @@
           // Used only to tell "nothing in stock yet" apart from "those categories
           // don't exist here". Never fatal to the panel.
           api('/api/stock/categories').catch(() => null),
-          api('/api/stock/portions'),
+          // Never fatal either: plain Use still works without it.
+          api('/api/stock/portions').catch(() => []),
         ]);
         portionItems = new Map((Array.isArray(portions) ? portions : []).map(x => [Number(x.stock_item_id), x]));
         useStockItems = (Array.isArray(items) ? items : [])
@@ -2264,7 +2262,10 @@
           <button class="btn btn-outline btn-sm" style="width:auto;flex:0 0 auto;" onclick="finishOpened(${Number(u.id)}, ${Number(it.id)}, this)">Finish</button>
         </div>`;
       }).join('');
-      const action = sealedQty >= 1
+      // No links left: a unit outlived the last product made from it — it can
+      // only be finished, not opened again. Same as the desktop till.
+      const linked = portion.links.length > 0;
+      const action = linked && sealedQty >= 1
         ? `<button class="btn btn-primary btn-sm" style="width:auto;flex:0 0 auto;" onclick="openPortionItem(${Number(it.id)}, this)">Open</button>`
         : '<button class="btn btn-outline btn-sm" style="width:auto;flex:0 0 auto;" disabled>Open</button>';
       return `<div class="list-item">
@@ -2274,7 +2275,7 @@
         </div>
         ${opened}
         <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:6px;">
-          <span class="list-meta">One ${escapeHtml(it.unit || 'unit')} makes ${makes}</span>
+          <span class="list-meta">${linked ? `One ${escapeHtml(it.unit || 'unit')} makes ${makes}` : 'Nothing on the menu is made from this now — finish what is open'}</span>
           ${action}
         </div>
       </div>`;
@@ -2286,30 +2287,67 @@
       return links.slice().sort((a, b) => a.servings_left - b.servings_left)[0] || {};
     }
 
+    // Would `extra` more of p fit in what is opened? The link that cannot cover
+    // it, or null. Adds up every line in this cart that uses the same box.
+    // Same as the desktop till.
+    function portionShortfall(p, extra) {
+      if (!p || !p.portion) return null;
+      for (const l of p.portion.links) {
+        const spu = Number(l.servings_per_unit) || 1;
+        if (cartPortionUse(l.stock_item_id) + extra / spu > portionAvailable(l) + 1e-6) return l;
+      }
+      return null;
+    }
+
+    // What this cart's lines take from one ingredient, as a fraction of a unit.
+    function cartPortionUse(stockItemId) {
+      let used = 0;
+      for (const line of cart) {
+        const q = products.find(x => x.id === line.product_id);
+        const ql = q && q.portion && q.portion.links.find(k => k.stock_item_id === stockItemId);
+        if (ql) used += line.quantity / (Number(ql.servings_per_unit) || 1);
+      }
+      return used;
+    }
+
+    // The opened amount free for this cart, as a fraction of a unit.
+    function portionAvailable(l) {
+      return l.available != null ? Number(l.available) : l.servings_left / (Number(l.servings_per_unit) || 1);
+    }
+
     // Tapped a product whose opened ingredient cannot cover another one: offer
-    // to open a fresh unit, then add the product as if tapped again.
-    async function promptOpenFor(p) {
-      const l = portionLimit(p);
+    // to open a fresh unit, then add the product as if tapped again. A second
+    // tap while an open is in flight must not open a second box.
+    let openingInFlight = false;
+    async function promptOpenFor(p, link) {
+      if (openingInFlight) return;
+      const l = link || portionLimit(p);
       if (!l.stock_item_id) { toast(`${p.name} cannot be sold right now`, 'error'); return; }
       const name = l.ingredient_name || 'ingredient';
       if (!(Number(l.sealed_quantity) >= 1)) {
         toast(`${p.name} needs an opened ${name}, and none are left in stock — restock it first`, 'error');
         return;
       }
-      const why = l.is_open ? `Only ${l.servings_left} ${p.name} left from the opened ${name}.` : `${p.name} needs an opened ${name}.`;
+      const more = Math.max(0, Math.floor((portionAvailable(l) - cartPortionUse(l.stock_item_id)) * (Number(l.servings_per_unit) || 1) + 1e-6));
+      const why = l.is_open ? (more > 0 ? `Only ${more} more ${p.name} can come from the opened ${name}.` : `The opened ${name} is all taken by this cart.`) : `${p.name} needs an opened ${name}.`;
       if (!confirm(`${why}\n\nOpen a new ${name} now? It comes out of stock (${qtyText(l.sealed_quantity)} sealed left).`)) return;
+      openingInFlight = true;
       try {
-        await api(`/api/stock/items/${Number(l.stock_item_id)}/open`, { method: 'POST', body: {} });
-      } catch (err) {
-        toast((err && err.message) || `Could not open ${name}`, 'error');
-        return;
+        try {
+          await api(`/api/stock/items/${Number(l.stock_item_id)}/open`, { method: 'POST', body: {} });
+        } catch (err) {
+          toast((err && err.message) || `Could not open ${name}`, 'error');
+          return;
+        }
+        toast(`Opened a new ${name}`);
+        await refreshAvailability();
+      } finally {
+        openingInFlight = false;
       }
-      toast(`Opened a new ${name}`);
-      await refreshAvailability();
       if (useStockLoaded) loadUseStock();
       const fresh = products.find(x => x.id === p.id);
       // Only re-try when opening made room — never loop on a second ingredient.
-      if (fresh && (!fresh.portion || fresh.portion.servings_left > ((cart.find(c => c.product_id === p.id) || {}).quantity || 0))) addToCart(p.id);
+      if (fresh && !portionShortfall(fresh, 1)) addToCart(p.id);
     }
 
     async function openPortionItem(stockItemId, btn) {
@@ -2334,7 +2372,7 @@
     async function finishOpened(openedId, stockItemId, btn) {
       const it = useStockItems.find(x => Number(x.id) === Number(stockItemId));
       const name = (it && it.name) || 'item';
-      const reason = prompt(`Why is this ${name} finished before it was used up?\n(e.g. spilled, gone off, used in baking)`);
+      const reason = prompt(`Why is this ${name} finished before it was used up?\n(e.g. spilled, gone off, used in baking)\n\nWhatever is left in it is written off, and any cart or parked bill holding servings from it will need another one opened.`);
       if (reason === null) return;
       if (!reason.trim()) { toast('Say why it is being finished', 'error'); return; }
       await withBusy(btn, async () => {
