@@ -96,12 +96,12 @@
           <td><strong>#${String(b.token_number).padStart(3,'0')}</strong></td>
           <td>${formatDate(b.bill_date)}</td>
           <td>${formatTime(b.created_at)}</td>
-          <td>${b.customer_name || '-'}</td>
+          <td>${esc(b.customer_name || '-')}</td>
           <td>-</td>
           <td class="fw-bold">${formatCurrency(b.total)}</td>
           <td><span class="badge bg-info">${payLabel(b.payment_method)}</span>${orderTypeLabel(b.order_type) ? ` <span class="badge bg-light text-dark border">${orderTypeLabel(b.order_type)}</span>` : ''}</td>
           <td><span class="badge bg-${b.status === 'completed' ? 'success' : (b.status === 'refunded' ? 'warning text-dark' : 'danger')}">${b.status}</span>${b.refund_pending ? ' <span class="badge bg-warning text-dark" title="A refund is waiting for an admin">refund asked</span>' : ''}</td>
-          <td>${b.cashier_name || '-'}</td>
+          <td>${esc(b.cashier_name || '-')}</td>
           <td><button class="btn btn-sm btn-outline-primary" onclick="viewBill(${b.id})">View</button></td>
         </tr>
       `).join('') || '<tr><td colspan="10" class="text-center text-muted py-4">No bills found</td></tr>';
@@ -115,10 +115,10 @@
           <div class="col-md-6">
             <p><strong>Date:</strong> ${formatDate(bill.bill_date)}<br>
             <strong>Time:</strong> ${formatDateTime(bill.created_at)}<br>
-            <strong>Customer:</strong> ${bill.customer_name || 'Walk-in'}<br>
+            <strong>Customer:</strong> ${esc(bill.customer_name || 'Walk-in')}<br>
             <strong>Payment:</strong> ${payLabel(bill.payment_method)}<br>
             ${orderTypeLabel(bill.order_type) ? `<strong>Order:</strong> ${orderTypeLabel(bill.order_type)}<br>` : ''}
-            <strong>Cashier:</strong> ${bill.cashier_name}</p>
+            <strong>Cashier:</strong> ${esc(bill.cashier_name || '-')}</p>
           </div>
           <div class="col-md-6 text-end">
             <span class="badge bg-${bill.status === 'completed' ? 'success' : (bill.status === 'refunded' ? 'warning text-dark' : 'danger')} fs-6">${bill.status.toUpperCase()}</span>
@@ -133,7 +133,7 @@
         <table class="table table-sm">
           <thead><tr><th>Product</th><th>Qty</th><th>Price</th><th>Total</th></tr></thead>
           <tbody>
-            ${bill.items.map(i => `<tr><td>${i.product_name}</td><td>${i.quantity}</td><td>${formatCurrency(i.unit_price)}</td><td>${formatCurrency(i.total)}</td></tr>`).join('')}
+            ${bill.items.map(i => `<tr><td>${esc(i.product_name)}</td><td>${i.quantity}</td><td>${formatCurrency(i.unit_price)}</td><td>${formatCurrency(i.total)}</td></tr>`).join('')}
           </tbody>
           <tfoot>
             <tr><td colspan="3" class="text-end">Subtotal</td><td>${formatCurrency(bill.subtotal)}</td></tr>
@@ -150,7 +150,7 @@
             ${isAdmin() ? `
               <input class="form-control form-control-sm mt-2" data-role="note" placeholder="Note (needed to reject)">
               <div class="mt-2 d-flex gap-2"><button class="btn btn-sm btn-success" data-act="approve">Approve refund</button><button class="btn btn-sm btn-outline-danger" data-act="reject">Reject</button></div>`
-            : `<div class="mt-2"><button class="btn btn-sm btn-primary" id="btn-refund-admin-here">Admin: approve here</button></div>`}
+            : `<div class="mt-2 d-flex gap-2"><button class="btn btn-sm btn-primary" id="btn-refund-admin-here">Admin: approve here</button>${currentUser && currentUser.id === bill.refund_request.user_id ? '<button class="btn btn-sm btn-outline-secondary" id="btn-refund-withdraw">Withdraw request</button>' : ''}</div>`}
           </div>` : ''}
         ${bill.status === 'completed' && !bill.refund_request ? `
           <div id="refund-panel" class="border border-danger rounded p-3 mt-3 d-none">
@@ -193,6 +193,13 @@
               await reload();
             } catch (err) { showToast(esc((err && err.message) || 'Could not approve'), 'error'); }
           };
+          // The cashier who asked can take it back (nothing was refunded).
+          const withdrawBtn = document.getElementById('btn-refund-withdraw');
+          if (withdrawBtn) withdrawBtn.onclick = (e) => withBusy(e.currentTarget, async () => {
+            await api(`/api/pos/refund-requests/${Number(reqId)}/cancel`, { method: 'POST', body: {} });
+            showToast('Refund request withdrawn');
+            await reload();
+          }, 'Withdrawing...');
         }
       }
 
@@ -217,7 +224,9 @@
           if (!trimmed) { showToast('Reason is required', 'error'); return; }
           const restockBox = document.getElementById('refund-restock');
           const restock = !!(restockBox && restockBox.checked);
-          if (!confirm(`Refund this bill for ${formatCurrency(bill.total)}?\n${restock ? 'The items WILL be put back into stock.' : 'The items will NOT be put back into stock.'}\nThis cannot be undone.`)) return;
+          // A cashier's refund only becomes a request for an admin, so there is
+          // nothing yet to warn about undoing; an admin's happens now.
+          if (isAdmin() && !confirm(`Refund this bill for ${formatCurrency(bill.total)}?\n${restock ? 'The items WILL be put back into stock.' : 'The items will NOT be put back into stock.'}\nThis cannot be undone.`)) return;
           await withBusy(confirmBtn, async () => {
             await doRefund({ reason: trimmed, restock });
           }, 'Refunding...');

@@ -207,7 +207,7 @@
         pendWarn.textContent = `${todayData.pending_expenses} expense(s) pending admin approval. Shift cannot be closed until they are approved or rejected.`;
         pendWarn.style.display = 'block';
       } else if (refundsBlock) {
-        pendWarn.textContent = `${todayData.pending_refunds} refund(s) waiting for an admin. Shift cannot be closed until they are approved or rejected.`;
+        pendWarn.textContent = `${todayData.pending_refunds} cash refund(s) waiting for an admin. Shift cannot be closed until they are approved, rejected or withdrawn.`;
         pendWarn.style.display = 'block';
       } else if (syncBlock) {
         pendWarn.textContent = 'Sync the stock first (Step 1 above). The drawer can close once the stock is synced.';

@@ -13,6 +13,7 @@ import {
 import { adminOnly } from "../middleware/auth";
 import { returnPortionsForBill } from "../services/portions";
 import { ClosingError, resolveApprover, type Approver } from "../services/closing";
+import { cashShiftBlockReason } from "./cash";
 import { todayDate, formatDateTime } from "../utils/helpers";
 
 const pos = new Hono();
@@ -518,6 +519,16 @@ function performRefund(params: { billId: number; reason: string; restockRequeste
   const bill = db.query("SELECT * FROM bills WHERE id = ?").get(id) as any;
   if (!bill) throw new RefundError("Not found", 404);
 
+  // A CASH refund is money out of the drawer, and the drawer only counts what
+  // moves while a shift is open (from the open count to the close). Between
+  // shifts it would land in no drawer at all, so it waits for a shift — the
+  // same rule (cashShiftBlockReason) every other cash movement follows. Card
+  // and LankaQR refunds never touch the drawer and are not held back.
+  if (bill.payment_method === "cash") {
+    const blocked = cashShiftBlockReason();
+    if (blocked) throw new RefundError(`This is a cash refund, so it needs an open cash shift. ${blocked}`);
+  }
+
   const fromPreorder = String(bill.cart_id || "").startsWith("preorder-");
   const restock = params.restockRequested && !fromPreorder;
   const items = db.query("SELECT product_id, quantity FROM bill_items WHERE bill_id = ?").all(id) as any[];
@@ -556,7 +567,9 @@ function performRefund(params: { billId: number; reason: string; restockRequeste
       "UPDATE bills SET status = 'refunded', refund_reason = ?, refunded_at = datetime('now'), refunded_by_user_id = ?, refund_restocked = ?, refund_approved_by = ? WHERE id = ?"
     ).run(params.reason, params.refundedBy, restock ? 1 : 0, params.approvedBy, id);
     // Anything else still asking to refund this bill is moot now.
-    db.query("UPDATE refund_requests SET status = 'cancelled', decision_note = 'Bill refunded' WHERE bill_id = ? AND status = 'pending'").run(id);
+    db.query(
+      "UPDATE refund_requests SET status = 'cancelled', decision_note = 'Bill refunded', decided_by = ?, decided_at = datetime('now') WHERE bill_id = ? AND status = 'pending'"
+    ).run(params.approvedBy, id);
     // `restock` is what actually happened; `restock_requested` is what was
     // asked for — they differ only for a pre-order bill, where the request is
     // ignored. Stock History reads `restock` (a missing key = a refund from
@@ -653,6 +666,26 @@ pos.post("/bills/:id/refund-requests", async (c) => {
   }).immediate();
   if ("error" in result) return c.json({ error: result.error }, result.status);
   return c.json({ success: true, request: result.request });
+});
+
+// The cashier who asked takes it back (the customer changed their mind, the
+// admin cannot be reached and the drawer has to close). Withdrawing refunds
+// nothing, so it needs no admin; an admin may withdraw any request too.
+pos.post("/refund-requests/:id/cancel", (c) => {
+  const user = getUser(c)!;
+  const rid = Number(c.req.param("id"));
+  const db = getDb();
+  const req = db.query("SELECT * FROM refund_requests WHERE id = ?").get(rid) as any;
+  if (!req) return c.json({ error: "That refund request was not found" }, 404);
+  if (req.user_id !== user.id && user.role !== "admin") return c.json({ error: "Only the person who asked can withdraw it." }, 403);
+  const done = db.query(
+    "UPDATE refund_requests SET status = 'cancelled', decided_by = ?, decided_at = datetime('now'), decision_note = 'Withdrawn' WHERE id = ? AND status = 'pending'"
+  ).run(user.id, rid);
+  if (Number(done.changes || 0) !== 1) return c.json({ error: `That refund request is already ${req.status}.` }, 400);
+  db.query("INSERT INTO activity_log (user_id, action, details) VALUES (?, 'refund_request_withdrawn', ?)").run(
+    user.id, JSON.stringify({ refund_request_id: rid, bill_id: req.bill_id })
+  );
+  return c.json({ success: true });
 });
 
 // An admin decides — from their own login, or with their password at the

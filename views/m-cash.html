@@ -251,7 +251,7 @@
         submit.disabled = todayData.pending_expenses > 0 || refundsBlock || syncBlock;
         if (!(todayData.pending_expenses > 0)) {
           const msg = refundsBlock
-            ? `${todayData.pending_refunds} refund(s) waiting for an admin. Shift cannot close until they are approved or rejected.`
+            ? `${todayData.pending_refunds} cash refund(s) waiting for an admin. Shift cannot close until they are approved, rejected or withdrawn.`
             : syncBlock ? 'Sync the stock first (Step 1 above). The drawer can close once the stock is synced.' : '';
           $('pending-warn').textContent = msg;
           $('pending-warn').style.display = msg ? 'block' : 'none';

@@ -512,7 +512,7 @@ cash.post("/close", async (c) => {
   // counted — decide it first, exactly as with a pending expense.
   const refundsWaiting = pendingRefundCount();
   if (refundsWaiting > 0) {
-    return c.json({ error: `${refundsWaiting} refund${refundsWaiting > 1 ? "s are" : " is"} waiting for an admin. They must be approved or rejected before closing.` }, 400);
+    return c.json({ error: `${refundsWaiting} cash refund${refundsWaiting > 1 ? "s are" : " is"} waiting for an admin. Approve or reject ${refundsWaiting > 1 ? "them" : "it"} (or withdraw the request) before closing.` }, 400);
   }
 
   // Gate 1: the shift's stock has to be synced, and nothing moved since.
@@ -591,6 +591,8 @@ cash.post("/close", async (c) => {
     // under the write lock: still this shift open, stock still synced, money
     // still as expected, and the request (if any) still approved and unused.
     if (getCurrentOpenShift()?.id !== openRow.id) throw new ClosingError("This shift has just been closed.", 409);
+    // A cash refund asked for while the password above was being checked.
+    if (pendingRefundCount() > 0) throw new ClosingError("A cash refund is waiting for an admin. It must be approved or rejected before closing.", 400);
     if (!stockSyncState(openRow.id).valid) {
       throw new ClosingError("Stock changed while closing (a sale or a delivery). Sync the stock again.", 400, { needs_stock_sync: true });
     }
@@ -745,9 +747,16 @@ cash.get("/approvals/count", adminOnly, (c) => {
   return c.json({ count: row?.count || 0 });
 });
 
-/** Refunds waiting on an admin. Any of them blocks closing: see POST /close. */
+/**
+ * CASH refunds waiting on an admin — they would take money out of the drawer
+ * after it was counted, so any of them blocks closing (POST /close). Card and
+ * LankaQR refunds never touch the drawer and do not hold the close up.
+ */
 function pendingRefundCount(): number {
-  const row = getDb().query("SELECT COUNT(*) AS n FROM refund_requests WHERE status = 'pending'").get() as any;
+  const row = getDb().query(`
+    SELECT COUNT(*) AS n FROM refund_requests r JOIN bills b ON b.id = r.bill_id
+    WHERE r.status = 'pending' AND b.payment_method = 'cash'
+  `).get() as any;
   return row?.n ?? 0;
 }
 

@@ -99,7 +99,9 @@ window.Closing = (() => {
   function schedulePoll() {
     clearTimeout(pollTimer);
     pollTimer = null;
-    if (!shiftOpen() || document.hidden) return;
+    if (document.hidden) return;
+    // Between shifts only refunds can wait on the admin; a slow look for them.
+    if (!shiftOpen()) { if (cfg.isAdmin) pollTimer = setTimeout(refresh, 60000); return; }
     const s = syncState();
     const waiting = (s && s.sync && s.sync.status === 'pending') ||
       (today.close_request && today.close_request.status === 'pending') ||

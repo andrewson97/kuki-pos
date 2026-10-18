@@ -76,7 +76,7 @@
           </div>
           <div class="list-head" style="margin-top:4px;">
             <span class="list-meta">${formatTime(b.created_at)} · ${payLabel(b.payment_method)}${orderTypeLabel(b.order_type) ? ' · ' + orderTypeLabel(b.order_type) : ''}</span>
-            <span class="badge ${b.status === 'completed' ? 'success' : b.status === 'refunded' ? 'warning' : 'danger'}">${b.refund_pending ? 'refund asked' : b.status}</span>
+            <span class="badge ${b.refund_pending || b.status === 'refunded' ? 'warning' : b.status === 'completed' ? 'success' : 'danger'}">${b.refund_pending ? 'refund asked' : b.status}</span>
           </div>
         </div>`).join('');
     }
@@ -115,7 +115,7 @@
               ${isAdmin
                 ? `<input type="text" data-role="note" placeholder="Note (needed to reject)" style="margin-top:8px;">
                    <div class="btn-row" style="margin-top:8px;"><button class="btn btn-success" data-act="approve">Approve refund</button><button class="btn btn-outline" data-act="reject" style="color:var(--red);">Reject</button></div>`
-                : `<div style="margin-top:8px;"><button class="btn btn-primary" onclick="refundAdminHere(${Number(rq.id)}, ${Number(bill.token_number)}, ${Number(bill.total)})">Admin: approve here</button></div>`}
+                : `<div class="btn-row" style="margin-top:8px;"><button class="btn btn-primary" onclick="refundAdminHere(${Number(rq.id)}, ${Number(bill.token_number)}, ${Number(bill.total)})">Admin: approve here</button>${currentUser && currentUser.id === rq.user_id ? `<button class="btn btn-outline" onclick="withdrawRefund(this, ${Number(rq.id)})">Withdraw</button>` : ''}</div>`}
             </div>` : ''}
           <div class="btn-row" style="margin-top:14px;">
             <button class="btn btn-outline" onclick="reprint(${id})">Reprint</button>
@@ -158,7 +158,9 @@
       if (!trimmed) { toast('Reason is required', 'error'); return; }
       const box = $('refund-restock');
       const restock = !!(box && box.checked);
-      if (!confirm(`Refund Rs. ${total.toFixed(2)}?\n${restock ? 'Items WILL be put back into stock.' : 'Items will NOT be put back into stock.'}`)) return;
+      // A cashier's refund only becomes a request for an admin; an admin's happens now.
+      const admin = !!(currentUser && currentUser.role === 'admin');
+      if (admin && !confirm(`Refund Rs. ${total.toFixed(2)}?\n${restock ? 'Items WILL be put back into stock.' : 'Items will NOT be put back into stock.'}`)) return;
       await withBusy(btn, () => doRefund(id, total, { reason: trimmed, restock }), 'Refunding…');
     }
 
@@ -197,6 +199,16 @@
         try { await doRefund(id, total, body, creds); }
         catch (err) { toast((err && err.message) || 'Refund failed', 'error'); }
       };
+    }
+
+    // The cashier who asked takes the request back (nothing was refunded).
+    async function withdrawRefund(btn, reqId) {
+      await withBusy(btn, async () => {
+        await api(`/api/pos/refund-requests/${Number(reqId)}/cancel`, { method: 'POST', body: {} });
+        toast('Refund request withdrawn');
+        closeSheet('bill-sheet');
+        loadBills();
+      }, 'Withdrawing…');
     }
 
     // A refund already waiting, and the admin is holding this phone.
