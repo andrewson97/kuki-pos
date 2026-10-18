@@ -8,11 +8,20 @@ import type { SessionUser } from "../middleware/auth";
 
 const settings = new Hono();
 
+// Keys that live in the settings table but are the server's own business.
+const SERVER_ONLY_SETTINGS = new Set(["stock_sync_token_secret"]);
+
 settings.get("/", (c) => {
   const db = getDb();
   const rows = db.query("SELECT key, value FROM settings").all() as { key: string; value: string }[];
   const result: Record<string, string> = {};
-  for (const row of rows) result[row.key] = row.value;
+  for (const row of rows) {
+    // Server-side secrets kept in this table never go to a browser: every
+    // logged-in user reads this route. (The stock-sync token secret would let a
+    // till read the system's figures back out of the count list.)
+    if (SERVER_ONLY_SETTINGS.has(row.key)) continue;
+    result[row.key] = row.value;
+  }
   return c.json(result);
 });
 

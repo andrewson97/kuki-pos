@@ -90,17 +90,28 @@ window.Closing = (() => {
   // While something waits on an admin, look again every 15 s so the screen
   // changes by itself when they decide. Only /api/cash/today: the page's own
   // drawer count is never reloaded (or the notes typed in would be wiped).
+  //
+  // The machine this runs on sleeps when nothing asks it anything, and every
+  // request wakes it: so nobody polls from a hidden tab (it catches up the
+  // moment the tab is looked at again), and an admin with nothing waiting
+  // looks only once a minute — often enough to notice a new request, rare
+  // enough not to hold the machine up all night on a shift nobody closed.
   function schedulePoll() {
     clearTimeout(pollTimer);
     pollTimer = null;
-    if (!shiftOpen()) return;
+    if (!shiftOpen() || document.hidden) return;
     const s = syncState();
     const waiting = (s && s.sync && s.sync.status === 'pending') ||
-      (today.close_request && today.close_request.status === 'pending') ||
-      cfg.isAdmin; // the admin's queue refreshes too
-    if (!waiting) return;
-    pollTimer = setTimeout(refresh, 15000);
+      (today.close_request && today.close_request.status === 'pending');
+    if (waiting) pollTimer = setTimeout(refresh, 15000);
+    else if (cfg.isAdmin) pollTimer = setTimeout(refresh, 60000);
   }
+
+  document.addEventListener('visibilitychange', () => {
+    if (!cfg || !today) return;
+    if (document.hidden) { clearTimeout(pollTimer); pollTimer = null; }
+    else refresh();
+  });
 
   async function refresh() {
     try {
@@ -334,7 +345,7 @@ window.Closing = (() => {
       return `<tr><td>${esc(l.name)} <span class="cc-muted">${esc(l.unit || '')}</span></td>
         <td class="num">${qty(l.system_qty)}</td><td class="num">${qty(l.counted_qty)}</td>
         <td class="num ${d < 0 ? 'cc-diff-neg' : 'cc-diff-pos'}">${d > 0 ? '+' : ''}${qty(d)}</td>
-        <td class="num"><input class="cc-input" type="number" min="0" step="any" data-line="${Number(l.id)}" value="${qty(l.counted_qty)}"></td></tr>`;
+        <td class="num"><input class="cc-input" type="number" min="0" step="any" data-line="${Number(l.id)}" data-orig="${esc(String(l.counted_qty))}" value="${esc(String(l.counted_qty))}"></td></tr>`;
     }).join('');
     el.innerHTML = `<div class="cc-muted">Counted by ${esc(sync.user_name || '-')} at ${esc(time(sync.created_at))} &middot; ${(sync.lines || []).length} item(s), ${off.length} did not match.</div>
       <table class="cc-table"><thead><tr><th>Item</th><th class="num">System</th><th class="num">Counted</th><th class="num">Diff</th><th class="num">Approve as</th></tr></thead><tbody>${rows}</tbody></table>
@@ -345,8 +356,11 @@ window.Closing = (() => {
     const decide = async (btn, approve) => {
       const note = el.querySelector('[data-role="note"]').value.trim();
       if (!approve && !note) { cfg.notify('Say why it is rejected', 'error'); return; }
+      // Only figures the admin actually changed are sent as corrections; a line
+      // left alone is approved exactly as counted (no rounding on the way).
       const corrections = [];
       for (const inp of el.querySelectorAll('input[data-line]')) {
+        if (inp.value === inp.dataset.orig) continue;
         const v = Number(inp.value);
         if (inp.value === '' || !Number.isFinite(v) || v < 0) { cfg.notify('Approved figures must be 0 or more', 'error'); return; }
         corrections.push({ line_id: Number(inp.dataset.line), approved_qty: v });

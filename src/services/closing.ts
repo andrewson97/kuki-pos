@@ -37,6 +37,10 @@ export class ClosingError extends Error {
 
 export interface Approver { id: number; full_name: string; at_till: boolean }
 
+/** Admin-password checks still running, per cashier: see resolveApprover(). */
+const approvalsInFlight = new Map<number, number>();
+const DUMMY_HASH = Bun.password.hashSync("not-a-real-password", { algorithm: "bcrypt", cost: 10 });
+
 /**
  * Who is approving this request, if anyone. The logged-in user when they are an
  * admin; otherwise an admin who typed their username and password at this till
@@ -52,16 +56,31 @@ export async function resolveApprover(user: SessionUser, body: any): Promise<App
   // A till is not a login page: a cashier's session must not be able to guess
   // the owner's password without end. Five wrong tries from one user in 15
   // minutes and it stops checking for a while (each failure is logged below).
+  // Tries still being checked count too, and are counted BEFORE the await:
+  // otherwise a burst of parallel guesses all read "0 failures so far" and
+  // every one of them gets checked against the real password.
   const recent = getDb().query(
     "SELECT COUNT(*) AS n FROM activity_log WHERE user_id = ? AND action = 'admin_approval_failed' AND created_at >= datetime('now', '-15 minutes')"
   ).get(user.id) as any;
-  if ((recent?.n ?? 0) >= 5) {
+  const checking = approvalsInFlight.get(user.id) ?? 0;
+  if ((recent?.n ?? 0) + checking >= 5) {
     throw new ClosingError("Too many wrong admin passwords from this login. Wait 15 minutes, or have the admin approve from their own login.", 400);
   }
-  const row = getDb().query(
-    "SELECT id, full_name, role, is_active, password_hash FROM users WHERE username = ?"
-  ).get(username) as any;
-  const ok = row && row.is_active && row.role === "admin" && (await Bun.password.verify(password, row.password_hash));
+  approvalsInFlight.set(user.id, checking + 1);
+  let row: any;
+  let ok = false;
+  try {
+    row = getDb().query(
+      "SELECT id, full_name, role, is_active, password_hash FROM users WHERE username = ?"
+    ).get(username) as any;
+    // Hashed against a dummy when the user does not exist, so how long the
+    // answer takes does not say which admin usernames are real.
+    const hash = row?.password_hash || DUMMY_HASH;
+    ok = (await Bun.password.verify(password, hash)) && !!row && !!row.is_active && row.role === "admin";
+  } finally {
+    const left = (approvalsInFlight.get(user.id) ?? 1) - 1;
+    if (left > 0) approvalsInFlight.set(user.id, left); else approvalsInFlight.delete(user.id);
+  }
   if (!ok) {
     getDb().query("INSERT INTO activity_log (user_id, action, details) VALUES (?, 'admin_approval_failed', ?)").run(
       user.id, JSON.stringify({ admin_username: username })
@@ -82,13 +101,24 @@ export interface SyncItem { kind: "product" | "ingredient"; id: number; name: st
 // at, and the submit refuses the items whose figure has moved since, asking
 // for just those to be counted again.
 //
-// The token is an HMAC of the figure under a secret made at boot: the till
-// can hand it back but cannot read the figure out of it (a plain hash of a
-// small whole number would be guessed in a moment), so the count stays blind.
-// A restart in between only means "count those again".
-const TOKEN_SECRET = randomBytes(32);
+// The token is an HMAC of the figure under a secret: the till can hand it
+// back but cannot read the figure out of it (a plain hash of a small whole
+// number would be guessed in a moment), so the count stays blind.
+//
+// The secret is made ONCE and kept in settings, not made at boot. The machine
+// sleeps when idle and a deploy restarts it; a cashier counting fifty items on
+// a page that sends nothing can come back to a fresh process. A boot-time
+// secret turned every token "changed" and wiped the whole count.
+let tokenSecret: string | null = null;
+function getTokenSecret(): string {
+  if (tokenSecret) return tokenSecret;
+  const db = getDb();
+  db.query("INSERT OR IGNORE INTO settings (key, value) VALUES ('stock_sync_token_secret', ?)").run(randomBytes(32).toString("hex"));
+  tokenSecret = (db.query("SELECT value FROM settings WHERE key = 'stock_sync_token_secret'").get() as any).value as string;
+  return tokenSecret;
+}
 export function itemToken(kind: string, id: number, qty: number): string {
-  return createHmac("sha256", TOKEN_SECRET).update(`${kind}:${id}:${roundQty(qty)}`).digest("hex").slice(0, 20);
+  return createHmac("sha256", getTokenSecret()).update(`${kind}:${id}:${roundQty(qty)}`).digest("hex").slice(0, 20);
 }
 
 // Counts are of things on a shelf: whole pieces for products, and nothing
@@ -289,7 +319,27 @@ export function submitStockSync(params: { shiftOpenId: number; user: SessionUser
         { list_changed: true }
       );
     }
-    const moved = items.filter((i) => counted.get(`${i.kind}:${i.id}`)!.token !== itemToken(i.kind, i.id, i.system_qty));
+    const moved: { kind: string; id: number; name: string }[] =
+      items.filter((i) => counted.get(`${i.kind}:${i.id}`)!.token !== itemToken(i.kind, i.id, i.system_qty));
+    // An item counted from the list that has since sold down to 0 is no longer
+    // in `items`, but it moved all the same: its token says what it was listed
+    // at. Without this, "1 counted, then sold" went through as "1 found" and an
+    // approval put a cake that is gone back on the books. Only a line with no
+    // token at all (not from this list) is taken at face value below.
+    const listedNow = new Set(items.map((i) => `${i.kind}:${i.id}`));
+    for (const [key, c] of counted) {
+      if (listedNow.has(key) || !c.token) continue;
+      const [kind = "", idStr = ""] = key.split(":");
+      const id = Number(idStr);
+      const sys = currentSystemQty(kind, id);
+      if (sys == null) continue; // deleted meanwhile: nothing to compare
+      if (c.token !== itemToken(kind, id, sys)) {
+        const row = kind === "product"
+          ? db.query("SELECT name FROM products WHERE id = ?").get(id) as any
+          : db.query("SELECT name FROM stock_items WHERE id = ?").get(id) as any;
+        moved.push({ kind, id, name: row?.name || "An item" });
+      }
+    }
     if (moved.length) {
       throw new ClosingError(
         `${moved.map((m) => m.name).slice(0, 5).join(", ")}${moved.length > 5 ? ` and ${moved.length - 5} more` : ""} changed while you were counting (a sale or a delivery). Count ${moved.length === 1 ? "it" : "them"} again.`,
