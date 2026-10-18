@@ -244,12 +244,17 @@
         submit.textContent = 'Save closing count';
         submit.className = 'btn btn-success';
         submit.onclick = submitClose;
-        // Also blocked until the stock is synced (Step 1, public/js/closing.js).
+        // Also blocked by a refund waiting on an admin, and until the stock is
+        // synced (Step 1, public/js/closing.js).
         const syncBlock = !Closing.closeAllowed();
-        submit.disabled = todayData.pending_expenses > 0 || syncBlock;
+        const refundsBlock = (todayData.pending_refunds || 0) > 0;
+        submit.disabled = todayData.pending_expenses > 0 || refundsBlock || syncBlock;
         if (!(todayData.pending_expenses > 0)) {
-          $('pending-warn').textContent = syncBlock ? 'Sync the stock first (Step 1 above). The drawer can close once the stock is synced.' : '';
-          $('pending-warn').style.display = syncBlock ? 'block' : 'none';
+          const msg = refundsBlock
+            ? `${todayData.pending_refunds} refund(s) waiting for an admin. Shift cannot close until they are approved or rejected.`
+            : syncBlock ? 'Sync the stock first (Step 1 above). The drawer can close once the stock is synced.' : '';
+          $('pending-warn').textContent = msg;
+          $('pending-warn').style.display = msg ? 'block' : 'none';
         }
       }
     }

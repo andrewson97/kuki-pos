@@ -200,9 +200,14 @@
       const submitBtn = document.getElementById('submit-btn');
       const pendWarn = document.getElementById('pending-warning');
       const expensesBlock = mode === 'close' && (todayData?.pending_expenses || 0) > 0;
+      // A refund waiting on an admin would move the expected cash after the count.
+      const refundsBlock = mode === 'close' && (todayData?.pending_refunds || 0) > 0;
       const syncBlock = mode === 'close' && !Closing.closeAllowed();
       if (expensesBlock) {
         pendWarn.textContent = `${todayData.pending_expenses} expense(s) pending admin approval. Shift cannot be closed until they are approved or rejected.`;
+        pendWarn.style.display = 'block';
+      } else if (refundsBlock) {
+        pendWarn.textContent = `${todayData.pending_refunds} refund(s) waiting for an admin. Shift cannot be closed until they are approved or rejected.`;
         pendWarn.style.display = 'block';
       } else if (syncBlock) {
         pendWarn.textContent = 'Sync the stock first (Step 1 above). The drawer can close once the stock is synced.';
@@ -213,7 +218,7 @@
       submitBtn.textContent = mode === 'close'
         ? 'Save Closing Count'
         : (todayData?.close ? 'Open New Shift' : 'Save Opening Float');
-      submitBtn.disabled = expensesBlock || syncBlock;
+      submitBtn.disabled = expensesBlock || refundsBlock || syncBlock;
     }
 
     async function loadCash() {

@@ -102,7 +102,8 @@ window.Closing = (() => {
     if (!shiftOpen() || document.hidden) return;
     const s = syncState();
     const waiting = (s && s.sync && s.sync.status === 'pending') ||
-      (today.close_request && today.close_request.status === 'pending');
+      (today.close_request && today.close_request.status === 'pending') ||
+      (today.pending_refunds || 0) > 0; // the Close button unlocks once they are decided
     if (waiting) pollTimer = setTimeout(refresh, 15000);
     else if (cfg.isAdmin) pollTimer = setTimeout(refresh, 60000);
   }
@@ -296,20 +297,29 @@ window.Closing = (() => {
   }
   function closeDialog() { const o = document.getElementById('cc-overlay'); if (o) o.remove(); }
 
-  // Ask for an admin's username and password; resolves with them, or null if cancelled.
+  // Ask for an admin's username and password; resolves with them, or null if
+  // cancelled. Also used outside the Cash pages (a refund on the Bills pages),
+  // where Closing.init() never ran — so it needs nothing from cfg.
   function askAdmin(title, explain) {
+    injectStyles();
     return new Promise((resolve) => {
       const ov = dialog(`<h4 style="margin:0 0 6px;font-weight:700;">${esc(title)}</h4>
         <div class="cc-muted">${esc(explain)}</div>
         <label for="cc-adm-user">Admin username</label><input class="cc-text" id="cc-adm-user" autocomplete="off">
         <label for="cc-adm-pass">Admin password</label><input class="cc-text" id="cc-adm-pass" type="password" autocomplete="off">
+        <div class="cc-muted" id="cc-adm-err" style="color:#dc2626;display:none;margin-top:6px;"></div>
         <div class="cc-row"><button class="cc-btn cc-primary" id="cc-adm-go">Continue</button><button class="cc-btn" id="cc-adm-cancel">Cancel</button></div>`);
       const done = (v) => { closeDialog(); resolve(v); };
       ov.querySelector('#cc-adm-cancel').onclick = () => done(null);
       const go = () => {
         const admin_username = ov.querySelector('#cc-adm-user').value.trim();
         const admin_password = ov.querySelector('#cc-adm-pass').value;
-        if (!admin_username || !admin_password) { cfg.notify('Enter the admin username and password', 'error'); return; }
+        if (!admin_username || !admin_password) {
+          const e = ov.querySelector('#cc-adm-err');
+          e.textContent = 'Enter the admin username and password.';
+          e.style.display = 'block';
+          return;
+        }
         // The dialog closes; the credentials live only in this call.
         done({ admin_username, admin_password });
       };
@@ -497,15 +507,21 @@ window.Closing = (() => {
   async function renderApprovals() {
     const el = cfg.approvals;
     if (!el) return;
-    if (!cfg.isAdmin || !shiftOpen()) { el.innerHTML = ''; approvalsKey = ''; return; }
+    // Refunds can wait on the admin with no shift open, so the queue is looked
+    // at whatever the shift is doing.
+    if (!cfg.isAdmin) { el.innerHTML = ''; approvalsKey = ''; return; }
     let q;
     try { q = await api('/api/cash/approvals'); } catch { return; }
+    const refunds = q.refund_requests || [];
     // Same items still waiting: leave the panel (and any figure being corrected) as it is.
-    const key = q.stock_syncs.map((s) => 's' + s.id).concat(q.close_requests.map((r) => 'r' + r.id)).join(',');
+    const key = q.stock_syncs.map((s) => 's' + s.id).concat(q.close_requests.map((r) => 'r' + r.id), refunds.map((f) => 'f' + f.id)).join(',');
     if (key === approvalsKey && el.innerHTML) return;
     approvalsKey = key;
-    if (!q.stock_syncs.length && !q.close_requests.length) { el.innerHTML = ''; return; }
+    if (!q.stock_syncs.length && !q.close_requests.length && !refunds.length) { el.innerHTML = ''; return; }
     el.innerHTML = `<div class="cc-box cc-wait"><h4>&#128276; Waiting for your approval</h4>
+      ${refunds.map((f) => `<div style="margin-top:10px;" data-refund="${Number(f.id)}">${refundRequestHtml(f)}
+        <input class="cc-text" data-role="note" placeholder="Note (needed to reject)" style="margin-top:6px;">
+        <div class="cc-row"><button class="cc-btn cc-success" data-act="approve">Approve refund</button><button class="cc-btn cc-danger" data-act="reject">Reject</button></div></div>`).join('')}
       ${q.stock_syncs.map((s) => `<div style="margin-top:10px;"><strong>Stock count</strong><div data-sync="${Number(s.id)}"></div></div>`).join('')}
       ${q.close_requests.map((r) => `<div style="margin-top:12px;" data-req="${Number(r.id)}"><strong>Close the drawer</strong>
         <div>${esc(r.user_name || '-')} counted ${cfg.money(r.total_amount)} against ${cfg.money(r.expected_amount)} expected &mdash;
@@ -515,6 +531,10 @@ window.Closing = (() => {
         <input class="cc-text" data-role="note" placeholder="Note (needed to reject)" style="margin-top:6px;">
         <div class="cc-row"><button class="cc-btn cc-success" data-act="approve">Approve close</button><button class="cc-btn cc-danger" data-act="reject">Reject &mdash; count again</button></div></div>`).join('')}
     </div>`;
+    for (const f of refunds) {
+      const box = el.querySelector(`[data-refund="${Number(f.id)}"]`);
+      wireRefundDecision(box, f.id, null, refresh, cfg.notify, cfg.withBusy);
+    }
     for (const s of q.stock_syncs) renderReview(el.querySelector(`[data-sync="${Number(s.id)}"]`), s, null, false);
     for (const r of q.close_requests) {
       const box = el.querySelector(`[data-req="${Number(r.id)}"]`);
@@ -532,7 +552,38 @@ window.Closing = (() => {
     }
   }
 
+  // ----- Refund requests (shared with the Bills pages) --------------------------
+  const payWord = (m) => ({ cash: 'Cash', card: 'Card', upi: 'LankaQR' })[m] || (m || '-');
+  const rs = (n) => 'Rs. ' + (Math.round((Number(n) || 0) * 100) / 100).toFixed(2);
+
+  /** One waiting refund, described for the admin deciding it. */
+  function refundRequestHtml(f) {
+    return `<strong>Refund bill #${String(f.token_number).padStart(3, '0')}</strong> &mdash; ${rs(f.total)} (${esc(payWord(f.payment_method))})
+      <div>Asked by ${esc(f.user_name || '-')} at ${esc(time(f.created_at))}: &ldquo;${esc(f.reason)}&rdquo;</div>
+      <div class="cc-muted">${f.restock ? 'Items WILL be put back into stock.' : 'Items will NOT be put back into stock.'}</div>`;
+  }
+
+  /**
+   * Wire Approve / Reject on a refund request box (a [data-act] pair and a
+   * [data-role="note"] input). creds: an admin's typed-in password, or null
+   * for an admin's own login. Approving IS the refund.
+   */
+  function wireRefundDecision(box, requestId, creds, after, notify, busy) {
+    const decide = async (btn, approve) => {
+      const note = (box.querySelector('[data-role="note"]') || {}).value?.trim() || '';
+      if (!approve && !note) { notify('Say why the refund is rejected', 'error'); return; }
+      await busy(btn, async () => {
+        await api(`/api/pos/refund-requests/${Number(requestId)}/${approve ? 'approve' : 'reject'}`, { method: 'POST', body: { note, ...(creds || {}) } });
+        notify(approve ? 'Refund approved — the bill is refunded' : 'Refund rejected');
+        await after(approve);
+      }, '…');
+    };
+    box.querySelector('[data-act="approve"]').onclick = (e) => decide(e.currentTarget, true);
+    box.querySelector('[data-act="reject"]').onclick = (e) => decide(e.currentTarget, false);
+  }
+
   return {
+    askAdmin, refundRequestHtml, wireRefundDecision,
     init, update, refresh, closeAllowed, needsApproval, clearGate,
     startCount, cancelCount, submitCount, adminApproveSync,
     requestApproval, adminApproveClose, adminApproveRequest, closeOnRequest,
