@@ -1,3 +1,4 @@
+import { createHmac, randomBytes } from "node:crypto";
 import { getDb } from "../db/database";
 import type { SessionUser } from "../middleware/auth";
 
@@ -48,6 +49,15 @@ export async function resolveApprover(user: SessionUser, body: any): Promise<App
   const username = String(body?.admin_username ?? "").trim();
   const password = String(body?.admin_password ?? "");
   if (!username && !password) return null;
+  // A till is not a login page: a cashier's session must not be able to guess
+  // the owner's password without end. Five wrong tries from one user in 15
+  // minutes and it stops checking for a while (each failure is logged below).
+  const recent = getDb().query(
+    "SELECT COUNT(*) AS n FROM activity_log WHERE user_id = ? AND action = 'admin_approval_failed' AND created_at >= datetime('now', '-15 minutes')"
+  ).get(user.id) as any;
+  if ((recent?.n ?? 0) >= 5) {
+    throw new ClosingError("Too many wrong admin passwords from this login. Wait 15 minutes, or have the admin approve from their own login.", 400);
+  }
   const row = getDb().query(
     "SELECT id, full_name, role, is_active, password_hash FROM users WHERE username = ?"
   ).get(username) as any;
@@ -64,6 +74,26 @@ export async function resolveApprover(user: SessionUser, body: any): Promise<App
 }
 
 export interface SyncItem { kind: "product" | "ingredient"; id: number; name: string; unit: string; category: string; system_qty: number }
+
+// A sale (or delivery) between loading the count list and submitting it would
+// otherwise read as a mismatch: 5 cakes counted, 1 sold before Submit, system
+// now 4 — "1 found", and approving it puts a cake on the books that is not on
+// the shelf. So every listed item carries a token of the figure it was listed
+// at, and the submit refuses the items whose figure has moved since, asking
+// for just those to be counted again.
+//
+// The token is an HMAC of the figure under a secret made at boot: the till
+// can hand it back but cannot read the figure out of it (a plain hash of a
+// small whole number would be guessed in a moment), so the count stays blind.
+// A restart in between only means "count those again".
+const TOKEN_SECRET = randomBytes(32);
+export function itemToken(kind: string, id: number, qty: number): string {
+  return createHmac("sha256", TOKEN_SECRET).update(`${kind}:${id}:${roundQty(qty)}`).digest("hex").slice(0, 20);
+}
+
+// Counts are of things on a shelf: whole pieces for products, and nothing
+// absurd for anything (1e308 would round to Infinity and poison the stock).
+const MAX_COUNT = 1_000_000;
 
 /**
  * What has to be counted: tracked finished products and store-room items
@@ -173,8 +203,15 @@ function applySync(syncId: number, approver: { id: number; full_name: string }, 
       db.query("UPDATE stock_sync_lines SET applied_delta = 0 WHERE id = ?").run(l.id);
       continue;
     }
+    // Deleted since the count, or a product no longer tracked / discontinued:
+    // there is no count of it left to correct, so nothing is written.
     const current = currentSystemQty(l.item_kind, l.item_id);
-    if (current == null) continue; // deleted since the count: nothing left to correct
+    const stillCounted = l.item_kind !== "product" ||
+      !!db.query("SELECT 1 FROM products WHERE id = ? AND track_stock = 1 AND is_discontinued = 0").get(l.item_id);
+    if (current == null || !stillCounted) {
+      db.query("UPDATE stock_sync_lines SET applied_delta = 0 WHERE id = ?").run(l.id);
+      continue;
+    }
     const next = Math.max(0, roundQty(current + delta));
     const applied = roundQty(next - current);
     const why = `Stock sync at close: counted ${approved} (system said ${l.system_qty}) — approved by ${approver.full_name}`;
@@ -203,52 +240,78 @@ function settle(syncId: number, status: "matched" | "approved", approver: Approv
 }
 
 /**
- * Record a count. `counts` is [{ kind, id, counted }] and must cover every item
- * listSyncItems() returns NOW — if the list grew since the screen loaded it (a
- * delivery came in), the count is refused so nothing goes uncounted. A count
- * for an item that has since dropped to 0 is still compared (finding stock the
- * system thinks is gone is exactly what this is for).
+ * Record a count. `counts` is [{ kind, id, counted, token }] and must cover
+ * every item listSyncItems() returns NOW — if the list grew since the screen
+ * loaded it (a delivery came in), the count is refused so nothing goes
+ * uncounted. An item whose figure moved while it was being counted (its token
+ * no longer matches) is refused too, and only those need counting again. A
+ * count for an item that has since dropped to 0 is still compared — finding
+ * stock the system thinks is gone is exactly what this is for — but only for
+ * things that are counted at all (a tracked, current product or a stock item).
+ *
+ * While a count is WAITING for an admin, a cashier cannot send another one.
+ * Otherwise "count again" until it matches would make a shortage vanish
+ * before the admin ever saw it. A mistake is for the admin to correct or send
+ * back; an admin (or their password at the till) may replace it.
  */
 export function submitStockSync(params: { shiftOpenId: number; user: SessionUser; approver: Approver | null; counts: any[] }) {
   const db = getDb();
   if (!Array.isArray(params.counts)) throw new ClosingError("counts must be a list");
-  const counted = new Map<string, number>();
+  const counted = new Map<string, { qty: number; token: string }>();
   for (const c of params.counts) {
     const kind = c?.kind === "product" ? "product" : c?.kind === "ingredient" ? "ingredient" : null;
     const id = Number(c?.id);
     const raw = c?.counted;
     if (!kind || !Number.isInteger(id) || id <= 0) throw new ClosingError("Each count needs a kind (product / ingredient) and an id.");
     const n = raw === "" || raw == null ? NaN : Number(raw);
-    if (!Number.isFinite(n) || n < 0) throw new ClosingError("Every count must be a number, 0 or more.");
-    counted.set(`${kind}:${id}`, roundQty(n));
+    if (!Number.isFinite(n) || n < 0 || n > MAX_COUNT) throw new ClosingError("Every count must be a number from 0 up.");
+    if (kind === "product" && !Number.isInteger(n)) throw new ClosingError("Products are counted in whole pieces.");
+    counted.set(`${kind}:${id}`, { qty: roundQty(n), token: String(c?.token ?? "") });
   }
 
   return db.transaction(() => {
+    if (!params.approver) {
+      const waiting = db.query("SELECT 1 FROM stock_syncs WHERE shift_open_id = ? AND status = 'pending'").get(params.shiftOpenId);
+      if (waiting) {
+        throw new ClosingError(
+          "A stock count is already waiting for an admin. If it has a mistake, the admin can correct it or send it back for a recount.",
+          409,
+          { sync_pending: true }
+        );
+      }
+    }
     const items = listSyncItems();
     const missing = items.filter((i) => !counted.has(`${i.kind}:${i.id}`));
     if (missing.length) {
       throw new ClosingError(
-        `${missing.map((m) => m.name).slice(0, 5).join(", ")}${missing.length > 5 ? ` and ${missing.length - 5} more` : ""} ${missing.length === 1 ? "was" : "were"} not counted. Reload the list and count again.`,
+        `${missing.map((m) => m.name).slice(0, 5).join(", ")}${missing.length > 5 ? ` and ${missing.length - 5} more` : ""} ${missing.length === 1 ? "was" : "were"} not counted. The list has been reloaded — count ${missing.length === 1 ? "it" : "them"} too.`,
         409,
         { list_changed: true }
       );
     }
+    const moved = items.filter((i) => counted.get(`${i.kind}:${i.id}`)!.token !== itemToken(i.kind, i.id, i.system_qty));
+    if (moved.length) {
+      throw new ClosingError(
+        `${moved.map((m) => m.name).slice(0, 5).join(", ")}${moved.length > 5 ? ` and ${moved.length - 5} more` : ""} changed while you were counting (a sale or a delivery). Count ${moved.length === 1 ? "it" : "them"} again.`,
+        409,
+        { list_changed: true, changed: moved.map((m) => ({ kind: m.kind, id: m.id })) }
+      );
+    }
     const listed = new Set(items.map((i) => `${i.kind}:${i.id}`));
-    const lines: any[] = items.map((i) => ({ ...i, counted_qty: counted.get(`${i.kind}:${i.id}`)! }));
-    for (const [key, qty] of counted) {
+    const lines: any[] = items.map((i) => ({ ...i, counted_qty: counted.get(`${i.kind}:${i.id}`)!.qty }));
+    for (const [key, c] of counted) {
       if (listed.has(key)) continue;
       const [kind = "", idStr = ""] = key.split(":");
       const id = Number(idStr);
-      const sys = currentSystemQty(kind, id);
-      if (sys == null) continue; // deleted meanwhile
       const row = kind === "product"
-        ? db.query("SELECT name, 'pcs' AS unit FROM products WHERE id = ?").get(id) as any
+        ? db.query("SELECT name, 'pcs' AS unit FROM products WHERE id = ? AND track_stock = 1 AND is_discontinued = 0").get(id) as any
         : db.query("SELECT name, unit FROM stock_items WHERE id = ?").get(id) as any;
-      lines.push({ kind, id, name: row.name, unit: row.unit || "", system_qty: sys, counted_qty: qty });
+      if (!row) continue; // deleted, untracked or discontinued meanwhile: not counted stock
+      lines.push({ kind, id, name: row.name, unit: row.unit || "", system_qty: currentSystemQty(kind, id) ?? 0, counted_qty: c.qty });
     }
     const mismatches = lines.filter((l) => Math.abs(l.counted_qty - l.system_qty) > QTY_EPS);
 
-    // A newer count replaces a pending one; a decided one stays as history.
+    // Only an approver gets here with a count waiting; theirs replaces it.
     db.query("UPDATE stock_syncs SET status = 'superseded' WHERE shift_open_id = ? AND status = 'pending'").run(params.shiftOpenId);
     const syncId = Number(db.query(
       "INSERT INTO stock_syncs (shift_open_id, user_id, status, mismatch_count) VALUES (?, ?, 'pending', ?)"
@@ -287,7 +350,7 @@ export function decideStockSync(params: {
   for (const c of params.corrections || []) {
     const lid = Number(c?.line_id);
     const q = Number(c?.approved_qty);
-    if (!Number.isInteger(lid) || !Number.isFinite(q) || q < 0) throw new ClosingError("Corrected figures must be numbers, 0 or more.");
+    if (!Number.isInteger(lid) || !Number.isFinite(q) || q < 0 || q > MAX_COUNT) throw new ClosingError("Corrected figures must be numbers from 0 up.");
     corrections.set(lid, roundQty(q));
   }
   return db.transaction(() => {
@@ -295,8 +358,11 @@ export function decideStockSync(params: {
     if (!sync) throw new ClosingError("That stock sync was not found", 404);
     if (sync.status !== "pending") throw new ClosingError(`That stock sync is already ${sync.status}.`);
     if (sync.shift_open_id !== params.shiftOpenId) throw new ClosingError("That stock sync belongs to a shift that is no longer open.");
-    const lineIds = new Set((db.query("SELECT id FROM stock_sync_lines WHERE sync_id = ?").all(params.syncId) as any[]).map((r) => r.id));
-    for (const lid of corrections.keys()) if (!lineIds.has(lid)) throw new ClosingError("A corrected figure is for a line that is not on this sync.");
+    const kindOf = new Map((db.query("SELECT id, item_kind FROM stock_sync_lines WHERE sync_id = ?").all(params.syncId) as any[]).map((r) => [r.id, r.item_kind]));
+    for (const [lid, q] of corrections) {
+      if (!kindOf.has(lid)) throw new ClosingError("A corrected figure is for a line that is not on this sync.");
+      if (kindOf.get(lid) === "product" && !Number.isInteger(q)) throw new ClosingError("Products are counted in whole pieces.");
+    }
     if (params.approve) {
       applySync(params.syncId, params.approver, corrections);
       settle(params.syncId, "approved", params.approver, note);

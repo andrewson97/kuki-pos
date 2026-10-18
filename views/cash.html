@@ -51,7 +51,7 @@
             <div id="cc-gate" class="mt-2"></div>
             <div class="mt-3">
               <label class="form-label">Notes <small class="text-muted">(optional)</small></label>
-              <textarea class="form-control" id="count-notes" rows="2" placeholder="e.g., found Rs.100 on floor"></textarea>
+              <textarea class="form-control" id="count-notes" rows="2" placeholder="e.g., found Rs.100 on floor" oninput="Closing.clearGate()"></textarea>
             </div>
             <button class="btn btn-primary w-100 mt-3" id="submit-btn" onclick="submitCount(this)">Save Opening Float</button>
           </div>
@@ -82,7 +82,9 @@
         sync: document.getElementById('cc-sync'),
         gate: document.getElementById('cc-gate'),
         approvals: document.getElementById('cc-approvals'),
-        notify: (msg, kind) => showToast(msg, kind === 'error' ? 'error' : 'success'),
+        // showToast() writes innerHTML, and these messages carry product names
+        // and admins' notes: escaped here, so they show as typed.
+        notify: (msg, kind) => showToast(escText(msg), kind === 'error' ? 'error' : 'success'),
         money: formatCurrency,
         withBusy,
         isAdmin: currentUser && currentUser.role === 'admin',
@@ -104,6 +106,10 @@
         </div>
       `).join('');
       document.getElementById('denominations').innerHTML = html;
+    }
+
+    function escText(v) {
+      return String(v == null ? '' : v).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
     }
 
     // Money is compared to the cent. Floats summed in the browser leave tails
@@ -130,6 +136,8 @@
       document.getElementById('line_coins').textContent = formatCurrency(coins);
       total = money(total + coins);
       document.getElementById('counted-total').textContent = formatCurrency(total);
+      // A refused over-limit count waiting for approval is not this count any more.
+      Closing.clearGate();
 
       // Variance against the SERVER's expected figure (expected_now), never one
       // re-derived here: the browser used to leave the pre-order deposits out,
@@ -227,7 +235,7 @@
           <td>${h.user_name || '-'}</td>
           <td class="text-end">${formatCurrency(h.total_amount)}</td>
           <td class="text-end ${h.variance == null ? '' : varianceClass(h.variance)}">${h.variance == null ? '-' : signedCurrency(h.variance)}</td>
-          <td class="small text-muted">${h.variance_approved_by_name || ''}</td>
+          <td class="small text-muted">${escText(h.variance_approved_by_name || '')}</td>
         </tr>
       `).join('') || '<tr><td colspan="6" class="text-center text-muted py-3">No records yet</td></tr>';
     }
@@ -266,10 +274,14 @@
           // The count stays on screen; closing.js offers "request" / "approve here".
           if (err && err.status === 409 && err.data && err.data.needs_approval) {
             Closing.needsApproval(body, err.data);
-            showToast(err.message, 'warning');
+            showToast(escText(err.message), 'warning');
             return;
           }
-          throw err;
+          // Refused for the stock (moved since the sync): Step 1 has to say so.
+          if (err && err.data && err.data.needs_stock_sync) await Closing.refresh();
+          // Escaped: the message can carry an admin's note.
+          showToast(escText((err && err.message) || 'Could not save'), 'error');
+          return;
         }
         if (mode === 'open') {
           showToast('Opening float saved');

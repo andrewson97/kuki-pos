@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { getDb } from "../db/database";
 import { adminOnly, getUser } from "../middleware/auth";
 import {
-  ClosingError, decideStockSync, getStockSync, listSyncItems, resolveApprover, stockSyncState, submitStockSync,
+  ClosingError, decideStockSync, getStockSync, itemToken, listSyncItems, resolveApprover, stockSyncState, submitStockSync,
   type Approver,
 } from "../services/closing";
 import { todayDate } from "../utils/helpers";
@@ -300,8 +300,11 @@ function expectedFor(openRow: any) {
 /** Rs. A close more than this over OR short needs an admin (settings.cash_variance_limit). */
 function varianceLimit(): number {
   const row = getDb().query("SELECT value FROM settings WHERE key = 'cash_variance_limit'").get() as any;
-  const n = Number(row?.value);
-  return Number.isFinite(n) && n >= 0 ? n : 200;
+  // Blank is not "0 allowed" (Number("") is 0): that would send every close to
+  // the owner. Anything unreadable falls back to the default.
+  const raw = String(row?.value ?? "").trim();
+  const n = Number(raw);
+  return raw !== "" && Number.isFinite(n) && n >= 0 ? n : 200;
 }
 
 /** Over the limit either way, with half a cent of slack for the float tail. */
@@ -317,23 +320,16 @@ function latestCloseRequest(shiftOpenId: number) {
 }
 
 /**
- * A stock sync as the person asking may see it. The count is blind for a
- * cashier: while a sync is waiting, the system's figures are left out and each
- * line only says whether it matched — or a recount would just copy the screen.
- * An admin sees everything.
+ * A stock sync as the person asking may see it. A cashier gets how many lines
+ * did not match and nothing per line — no system figure, and not even WHICH
+ * line was off, since that is enough to home in on the system's figure. An
+ * admin sees everything.
  */
 function syncForViewer(sync: any, isAdmin: boolean) {
   if (!sync) return null;
   if (isAdmin) return sync;
-  return {
-    ...sync,
-    lines: (sync.lines || []).map((l: any) => ({
-      id: l.id, item_kind: l.item_kind, item_id: l.item_id, name: l.name, unit: l.unit,
-      counted_qty: l.counted_qty,
-      matched: Math.abs(Number(l.counted_qty) - Number(l.system_qty)) <= 1e-9,
-      approved_qty: l.approved_qty,
-    })),
-  };
+  const { lines, ...rest } = sync;
+  return { ...rest, line_count: (lines || []).length };
 }
 
 function closingError(c: any, err: any) {
@@ -427,10 +423,12 @@ cash.post("/open", async (c) => {
 
 // --- Stock sync (gate 1 of closing) -----------------------------------------
 
-// What to count. Blind: names and units only, never the system's figures.
+// What to count: names and units, never the system's figures. Each item's
+// token lets the submit tell whether its figure moved while it was being
+// counted, without the till being able to read the figure (itemToken()).
 cash.get("/stock-sync/items", (c) => {
   if (!getCurrentOpenShift()) return c.json({ error: "No open shift." }, 400);
-  return c.json(listSyncItems().map(({ system_qty, ...rest }) => rest));
+  return c.json(listSyncItems().map(({ system_qty, ...rest }) => ({ ...rest, token: itemToken(rest.kind, rest.id, system_qty) })));
 });
 
 // Submit a count. Body: { counts: [{ kind, id, counted }], admin_username?, admin_password? }
@@ -576,7 +574,25 @@ cash.post("/close", async (c) => {
   }
 
   const n = count.notes;
-  const closeId = db.transaction(() => {
+  let closeId: number;
+  try {
+    closeId = db.transaction(() => {
+    // Everything above was read outside this lock, and the admin password check
+    // awaited in between — long enough for a second close, a sale or a change
+    // of heart to land. So the facts the close rests on are checked again here,
+    // under the write lock: still this shift open, stock still synced, money
+    // still as expected, and the request (if any) still approved and unused.
+    if (getCurrentOpenShift()?.id !== openRow.id) throw new ClosingError("This shift has just been closed.", 409);
+    if (!stockSyncState(openRow.id).valid) {
+      throw new ClosingError("Stock changed while closing (a sale or a delivery). Sync the stock again.", 400, { needs_stock_sync: true });
+    }
+    if (Math.abs(expectedFor(openRow).expected - expected) > 0.005) {
+      throw new ClosingError("Cash came in or went out while closing. Count the drawer again.", 409);
+    }
+    if (requestId) {
+      const used = db.query("UPDATE cash_close_requests SET status = 'used' WHERE id = ? AND status = 'approved'").run(requestId);
+      if (Number(used.changes || 0) !== 1) throw new ClosingError("That approval has already been used.", 409);
+    }
     const id = Number(db.query(`
       INSERT INTO cash_counts (count_type, count_date, user_id, notes_20, notes_50, notes_100, notes_500, notes_1000, notes_2000, notes_5000, coins_total, total_amount, expected_amount, variance, notes, variance_approved_by, stock_sync_id)
       VALUES ('close', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -585,7 +601,7 @@ cash.post("/close", async (c) => {
       n.notes_20, n.notes_50, n.notes_100, n.notes_500, n.notes_1000, n.notes_2000, n.notes_5000,
       count.coins_total, counted, expected, variance, notes, varianceApprovedBy, syncState.sync?.id ?? null
     ).lastInsertRowid);
-    if (requestId) db.query("UPDATE cash_close_requests SET status = 'used', used_close_id = ? WHERE id = ?").run(id, requestId);
+    if (requestId) db.query("UPDATE cash_close_requests SET used_close_id = ? WHERE id = ?").run(id, requestId);
     // Anything still waiting on this shift is moot now.
     db.query("UPDATE cash_close_requests SET status = 'superseded' WHERE shift_open_id = ? AND status IN ('pending', 'approved')").run(openRow.id);
     if (varianceApprovedBy && overLimit(variance, limit)) {
@@ -594,7 +610,10 @@ cash.post("/close", async (c) => {
       );
     }
     return id;
-  }).immediate();
+    }).immediate();
+  } catch (err: any) {
+    return closingError(c, err);
+  }
 
   // The breakdown comes back so the close screen can show WHY expected is what
   // it is. expected_amount / variance keep their existing meaning and are the

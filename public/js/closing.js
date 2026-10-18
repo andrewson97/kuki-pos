@@ -142,14 +142,17 @@ window.Closing = (() => {
         <div class="cc-row"><button class="cc-btn" onclick="Closing.startCount(this)">Sync again</button></div></div>`;
       return;
     }
+    // Waiting on an admin. The cashier is told HOW MANY lines were off, never
+    // which — and cannot send a new count meanwhile (the server refuses it):
+    // "count again until it matches" would hide a shortage from the admin.
     if (s && s.status === 'pending') {
-      const off = (s.lines || []).filter((l) => l.matched === false || (l.system_qty != null && Math.abs(l.counted_qty - l.system_qty) > 1e-9));
+      const n = Number(s.mismatch_count) || 0;
+      const total = Number(s.line_count ?? (s.lines || []).length);
       el.innerHTML = `<div class="cc-box cc-wait"><h4>&#9203; Step 1 &mdash; waiting for an admin</h4>
-        <div>${off.length} item${off.length === 1 ? '' : 's'} did not match the system: <strong>${off.map((l) => esc(l.name)).join(', ')}</strong>.</div>
-        <div class="cc-muted">An admin has been asked to approve the count. Count those again if you think you made a mistake.</div>
+        <div>${n} of ${total} item${total === 1 ? '' : 's'} did not match the system. The count has been sent to an admin to approve.</div>
+        <div class="cc-muted">Made a mistake? Tell the admin &mdash; they can correct the figure or send it back for a recount.</div>
         <div class="cc-row">
-          <button class="cc-btn" onclick="Closing.startCount(this)">Count again</button>
-          ${cfg.isAdmin ? '<span class="cc-muted">Review it in "Waiting for approval" below.</span>'
+          ${cfg.isAdmin ? '<span class="cc-muted">Review it in "Waiting for your approval" above.</span>'
             : `<button class="cc-btn cc-primary" onclick="Closing.adminApproveSync(${Number(s.id)})">Admin: approve here</button>`}
         </div></div>`;
       return;
@@ -178,9 +181,23 @@ window.Closing = (() => {
     }, 'Loading…');
   }
 
+  // What has been typed so far, by "kind:id", so a reloaded list (something
+  // arrived, or changed while being counted) keeps every other figure.
+  function typedCounts() {
+    const typed = {};
+    countItems.forEach((it, i) => {
+      const inp = document.getElementById(`cc-count-${i}`);
+      if (inp && inp.value !== '') typed[`${it.kind}:${it.id}`] = inp.value;
+    });
+    return typed;
+  }
+
   // The blind count: names and units only. Blank is not 0 — every listed item
-  // has to be counted on purpose, and "0" typed in is a real count.
-  function renderCountForm() {
+  // has to be counted on purpose, and "0" typed in is a real count. `keep`
+  // refills figures already typed; `flag` marks the items to count again.
+  function renderCountForm(keep, flag) {
+    keep = keep || {};
+    flag = flag || new Set();
     const el = cfg.sync;
     if (!countItems.length) {
       el.innerHTML = `<div class="cc-box cc-step" data-role="count-form"><h4>&#128230; Step 1 &mdash; sync the stock</h4>
@@ -194,8 +211,13 @@ window.Closing = (() => {
       const cat = `${it.kind === 'product' ? 'Products' : 'Store room'} · ${it.category || ''}`;
       const catRow = cat !== lastCat ? `<tr><td colspan="2" class="cc-cat">${esc(cat)}</td></tr>` : '';
       lastCat = cat;
-      return `${catRow}<tr><td>${esc(it.name)} <span class="cc-muted">${esc(it.unit || '')}</span></td>
-        <td class="num"><input class="cc-input" type="number" min="0" step="any" inputmode="decimal" id="cc-count-${i}" aria-label="Count of ${esc(it.name)}"></td></tr>`;
+      const key = `${it.kind}:${it.id}`;
+      const again = flag.has(key);
+      const val = !again && keep[key] != null ? ` value="${esc(keep[key])}"` : '';
+      // Products are whole pieces; store-room items may be 2.5 kg.
+      const step = it.kind === 'product' ? '1' : 'any';
+      return `${catRow}<tr${again ? ' style="background:#fff7ed;"' : ''}><td>${esc(it.name)} <span class="cc-muted">${esc(it.unit || '')}</span>${again ? ' <strong class="cc-diff-pos">count again</strong>' : ''}</td>
+        <td class="num"><input class="cc-input" type="number" min="0" step="${step}" inputmode="${it.kind === 'product' ? 'numeric' : 'decimal'}" id="cc-count-${i}"${val} aria-label="Count of ${esc(it.name)}"></td></tr>`;
     }).join('');
     el.innerHTML = `<div class="cc-box cc-step" data-role="count-form"><h4>&#128230; Step 1 &mdash; count the stock (${countItems.length} item${countItems.length === 1 ? '' : 's'})</h4>
       <div class="cc-muted">Count what is actually there and type it in. Type 0 if it is gone.</div>
@@ -213,17 +235,30 @@ window.Closing = (() => {
       if (raw === '' || raw == null) { cfg.notify(`Enter a count for ${countItems[i].name} (0 if there are none).`, 'error'); document.getElementById(`cc-count-${i}`).focus(); return; }
       const n = Number(raw);
       if (!Number.isFinite(n) || n < 0) { cfg.notify(`The count for ${countItems[i].name} must be 0 or more.`, 'error'); return; }
-      counts.push({ kind: countItems[i].kind, id: countItems[i].id, counted: n });
+      if (countItems[i].kind === 'product' && !Number.isInteger(n)) { cfg.notify(`${countItems[i].name} is counted in whole pieces.`, 'error'); return; }
+      counts.push({ kind: countItems[i].kind, id: countItems[i].id, counted: n, token: countItems[i].token });
     }
     await cfg.withBusy(btn, async () => {
       let res;
       try {
         res = await api('/api/cash/stock-sync', { method: 'POST', body: { counts, ...(creds || {}) } });
       } catch (err) {
+        // The list moved under the count: reload it, keep every figure typed,
+        // and clear (and mark) only the items that must be counted again.
         if (err && err.data && err.data.list_changed) {
           cfg.notify(err.message, 'error');
+          const keep = typedCounts();
+          const flag = new Set((err.data.changed || []).map((c) => `${c.kind}:${c.id}`));
           countItems = await api('/api/cash/stock-sync/items');
-          renderCountForm();
+          for (const it of countItems) if (keep[`${it.kind}:${it.id}`] == null) flag.add(`${it.kind}:${it.id}`);
+          renderCountForm(keep, flag);
+          return;
+        }
+        // Someone else's count is already waiting on the admin.
+        if (err && err.data && err.data.sync_pending) {
+          counting = false;
+          cfg.notify(err.message, 'error');
+          await refresh();
           return;
         }
         throw err;
@@ -345,6 +380,18 @@ window.Closing = (() => {
     const r = today.close_request;
     const lim = cfg.money(today.variance_limit ?? 200);
     const word = (v) => `${v > 0 ? 'over' : 'short'} by ${cfg.money(Math.abs(v))}`;
+    // A count the server just refused is NEWER than any request on record
+    // (the cashier counted again), so it wins: requesting replaces the old
+    // request, and an old approval no longer applies to this count.
+    if (gateInfo && gateBody) {
+      const older = r && (r.status === 'pending' || r.status === 'approved')
+        ? `<div class="cc-muted">This replaces the earlier ${r.status === 'pending' ? 'request still waiting' : 'approval'} (counted ${cfg.money(r.total_amount)}).</div>` : '';
+      el.innerHTML = `<div class="cc-box cc-bad"><h4>&#9888;&#65039; The drawer is ${word(gateInfo.variance)}</h4>
+        <div>That is more than the ${lim} allowed, so an admin has to approve this close.</div>${older}
+        <div class="cc-row"><button class="cc-btn cc-primary" onclick="Closing.requestApproval(this)">Request admin approval</button>
+        <button class="cc-btn" onclick="Closing.adminApproveClose()">Admin: approve here</button></div></div>`;
+      return;
+    }
     if (r && r.status === 'pending') {
       el.innerHTML = `<div class="cc-box cc-wait"><h4>&#9203; Waiting for an admin to approve the close</h4>
         <div>Counted ${cfg.money(r.total_amount)} &mdash; ${word(r.variance)} (limit ${lim}). Asked by ${esc(r.user_name || '-')} at ${esc(time(r.created_at))}.</div>
@@ -358,18 +405,18 @@ window.Closing = (() => {
         <div class="cc-row"><button class="cc-btn cc-success" onclick="Closing.closeOnRequest(${Number(r.id)}, this)">Close the drawer now</button></div></div>`;
       return;
     }
-    let rejected = '';
-    if (r && r.status === 'rejected') {
-      rejected = `<div class="cc-box cc-bad"><h4>&#10060; Close rejected</h4><div>${esc(r.decided_by_name || 'The admin')}: &ldquo;${esc(r.decision_note || '')}&rdquo;. Count the drawer again.</div></div>`;
-    }
-    if (gateInfo && gateBody) {
-      el.innerHTML = rejected + `<div class="cc-box cc-bad"><h4>&#9888;&#65039; The drawer is ${word(gateInfo.variance)}</h4>
-        <div>That is more than the ${lim} allowed, so an admin has to approve this close.</div>
-        <div class="cc-row"><button class="cc-btn cc-primary" onclick="Closing.requestApproval(this)">Request admin approval</button>
-        <button class="cc-btn" onclick="Closing.adminApproveClose()">Admin: approve here</button></div></div>`;
-      return;
-    }
-    el.innerHTML = rejected;
+    el.innerHTML = r && r.status === 'rejected'
+      ? `<div class="cc-box cc-bad"><h4>&#10060; Close rejected</h4><div>${esc(r.decided_by_name || 'The admin')}: &ldquo;${esc(r.decision_note || '')}&rdquo;. Count the drawer again.</div></div>`
+      : '';
+  }
+
+  // The drawer count on screen changed: a refused count waiting for "request" /
+  // "approve here" is not this count any more, so it must not be sent.
+  function clearGate() {
+    if (!gateBody) return;
+    gateBody = null;
+    gateInfo = null;
+    renderGate();
   }
 
   async function requestApproval(btn) {
@@ -395,6 +442,7 @@ window.Closing = (() => {
       if (cfg.onClosed) await cfg.onClosed();
     } catch (err) {
       cfg.notify((err && err.message) || 'Could not close', 'error');
+      await refresh();
     }
   }
 
@@ -415,7 +463,16 @@ window.Closing = (() => {
 
   async function closeOnRequest(reqId, btn) {
     await cfg.withBusy(btn, async () => {
-      const res = await api('/api/cash/close', { method: 'POST', body: { close_request_id: reqId } });
+      let res;
+      try {
+        res = await api('/api/cash/close', { method: 'POST', body: { close_request_id: reqId } });
+      } catch (err) {
+        // Refused (stock moved, cash moved): show why, and bring the panels up
+        // to date so the screen stops offering a close that cannot happen.
+        cfg.notify((err && err.message) || 'Could not close', 'error');
+        await refresh();
+        return;
+      }
       cfg.notify(`Drawer closed (${res.variance > 0 ? 'over' : 'short'} by ${cfg.money(Math.abs(res.variance))}, approved)`);
       if (cfg.onClosed) await cfg.onClosed();
     }, 'Closing…');
@@ -462,7 +519,7 @@ window.Closing = (() => {
   }
 
   return {
-    init, update, closeAllowed, needsApproval,
+    init, update, refresh, closeAllowed, needsApproval, clearGate,
     startCount, cancelCount, submitCount, adminApproveSync,
     requestApproval, adminApproveClose, adminApproveRequest, closeOnRequest,
   };

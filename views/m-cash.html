@@ -74,7 +74,7 @@
 
       <div class="field" style="margin-top:14px;">
         <label>Notes (optional)</label>
-        <input type="text" id="notes-input" placeholder="e.g., found Rs.100 on floor">
+        <input type="text" id="notes-input" placeholder="e.g., found Rs.100 on floor" oninput="Closing.clearGate()">
       </div>
       <button class="btn btn-primary" id="submit-btn" style="margin-top:6px;">Save</button>
     </div>
@@ -154,6 +154,8 @@
       $('lt-coins').textContent = fmt(coins);
       total = money(total + coins);
       $('counted-total').textContent = fmt(total);
+      // A refused over-limit count waiting for approval is not this count any more.
+      Closing.clearGate();
       // Variance against the SERVER's expected figure (expected_now), never one
       // re-derived here: this page used to leave the pre-order deposits out, so
       // the screen and the stored close disagreed on any day with a deposit.
@@ -284,6 +286,8 @@
             toast(err.message, 'error');
             return;
           }
+          // Refused for the stock (moved since the sync): Step 1 has to say so.
+          if (err && err.data && err.data.needs_stock_sync) await Closing.refresh();
           throw err;
         }
         // Quote the close the server stored, not the figure on screen a moment
