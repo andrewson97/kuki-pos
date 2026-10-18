@@ -104,7 +104,7 @@
     <div class="quick-links">
       <a class="quick-link" href="/m/pos"><span class="qi">🛒</span>POS</a>
       <a class="quick-link" href="/m/bills"><span class="qi">🧾</span>Bills</a>
-      <a class="quick-link" href="/m/cash"><span class="qi">💵</span>Cash Drawer</a>
+      <a class="quick-link" href="/m/cash" id="ql-cash"><span class="qi">💵</span>Cash Drawer</a>
       <a class="quick-link" href="/m/expenses"><span class="qi">💸</span>Expenses</a>
       <a class="quick-link" href="/m/products"><span class="qi">🎂</span>Products</a>
       <a class="quick-link" href="/m/stock"><span class="qi">📦</span>Stock</a>
@@ -125,7 +125,22 @@
         renderPending(data.pending_expenses, currentUser.role === 'admin');
         renderTasks(data.tasks);
         renderStock(data);
+        if (currentUser.role === 'admin') showCashApprovals();
       } catch (err) { toast(err.message, 'error'); }
+    }
+
+    // The owner on their phone: closing the drawer is waiting on them (a stock
+    // count that did not match, or a variance over the limit). A red count on
+    // the Cash Drawer link, where the approval is done. Never fatal to the page.
+    async function showCashApprovals() {
+      try {
+        const { count } = await api('/api/cash/approvals/count');
+        if (!count) return;
+        const b = document.createElement('span');
+        b.textContent = count;
+        b.style.cssText = 'display:inline-block;margin-left:6px;background:var(--red);color:white;border-radius:999px;padding:1px 7px;font-size:0.75rem;font-weight:800;';
+        $('ql-cash').appendChild(b);
+      } catch {}
     }
 
     // The server leaves the money out of the response for a cashier, so there is

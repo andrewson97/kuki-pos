@@ -57,6 +57,13 @@
                 <div class="text-muted" style="font-size:0.85rem;">When on, cashiers can't take any payment until the day's opening float is recorded, and sales are blocked once the drawer is closed for the day.</div>
               </label>
             </div>
+            <div class="row mb-3">
+              <div class="col-md-6">
+                <label class="form-label" for="s-variance-limit">Variance allowed at close (Rs)</label>
+                <input type="number" class="form-control" id="s-variance-limit" min="0" step="any">
+                <div class="text-muted" style="font-size:0.85rem;">A drawer closing more than this over <em>or</em> short needs an admin's approval.</div>
+              </div>
+            </div>
             <button class="btn btn-primary" onclick="saveSettings(this)">Save Settings</button>
           </div>
 
@@ -113,6 +120,7 @@
       document.getElementById('s-printer-type').value = s.printer_type || 'none';
       document.getElementById('s-printer-address').value = s.printer_address || '';
       document.getElementById('s-enforce-shift').checked = (s.enforce_cash_shift ?? '1') === '1';
+      document.getElementById('s-variance-limit').value = s.cash_variance_limit ?? '200';
 
       // Load activity log
       const log = await api('/api/settings/activity-log?limit=50');
@@ -165,6 +173,15 @@
       return `${(n / 1024 / 1024).toFixed(1)} MB`;
     }
 
+    // Blank or nonsense must not save as "0 allowed" (every close would need the
+    // owner) — throws, which withBusy shows as a toast and nothing is saved.
+    function varianceLimitInput() {
+      const raw = document.getElementById('s-variance-limit').value.trim();
+      const n = Number(raw);
+      if (raw === '' || !Number.isFinite(n) || n < 0) throw new Error('Variance allowed at close must be an amount of 0 or more');
+      return String(n);
+    }
+
     async function saveSettings(btn) {
       await withBusy(btn, async () => {
         await api('/api/settings', {
@@ -179,6 +196,7 @@
             printer_type: document.getElementById('s-printer-type').value,
             printer_address: document.getElementById('s-printer-address').value,
             enforce_cash_shift: document.getElementById('s-enforce-shift').checked ? '1' : '0',
+            cash_variance_limit: varianceLimitInput(),
           },
         });
         showToast('Settings saved!');
