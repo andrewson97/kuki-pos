@@ -799,6 +799,92 @@ export function runMigrations(): void {
     );
     CREATE INDEX IF NOT EXISTS idx_product_packing_links_item ON product_packing_links(stock_item_id);
   `);
+
+  // --- feature/stock-sync-cash-close -----------------------------------------
+  // Closing the cash drawer now has two gates (src/services/closing.ts):
+  //   1. A STOCK SYNC for the shift: everything with stock above 0 counted. A
+  //      count that differs from the system needs an admin's approval before
+  //      the stock is changed and the drawer may close. Any stock movement after
+  //      the sync settles means syncing again.
+  //   2. A drawer VARIANCE above settings.cash_variance_limit (either way) needs
+  //      an admin's approval before the close is accepted.
+  // An admin approves from their own login, or by typing their password at the
+  // till; an admin's own sync or close needs no approval.
+  db.exec(`
+    -- One count of the shop's stock during a shift. shift_open_id is the
+    -- cash_counts 'open' row, which is what "this shift" means everywhere else.
+    -- status: matched (counts agreed, nothing to approve), pending (waiting for
+    -- an admin), approved (an admin accepted the counts, possibly corrected,
+    -- and stock was changed), rejected (count again), superseded (a newer sync
+    -- replaced a pending one). settled_at is when it became matched/approved.
+    -- settled_snapshot is every in-stock quantity at that moment (JSON,
+    -- "product:12" / "ingredient:3" → qty): when the stock no longer equals it,
+    -- something moved after the sync and the shift needs a new one. A snapshot,
+    -- not a timestamp, because a sale in the same second as the sync must count.
+    CREATE TABLE IF NOT EXISTS stock_syncs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      shift_open_id INTEGER NOT NULL REFERENCES cash_counts(id),
+      user_id INTEGER REFERENCES users(id),
+      status TEXT NOT NULL CHECK(status IN ('matched', 'pending', 'approved', 'rejected', 'superseded')),
+      mismatch_count INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      decided_by INTEGER REFERENCES users(id),
+      decided_at TEXT,
+      decision_note TEXT,
+      settled_at TEXT,
+      settled_snapshot TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_stock_syncs_shift ON stock_syncs(shift_open_id, id);
+
+    -- One counted item. system_qty is what the system said when the count was
+    -- submitted; counted_qty what was counted; approved_qty what the admin
+    -- accepted (the count, or their correction of it); applied_delta what was
+    -- actually added to / taken off stock on approval. name/unit are copied so
+    -- the record still reads after a rename or a delete.
+    CREATE TABLE IF NOT EXISTS stock_sync_lines (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      sync_id INTEGER NOT NULL REFERENCES stock_syncs(id) ON DELETE CASCADE,
+      item_kind TEXT NOT NULL CHECK(item_kind IN ('product', 'ingredient')),
+      item_id INTEGER NOT NULL,
+      name TEXT NOT NULL,
+      unit TEXT NOT NULL DEFAULT '',
+      system_qty REAL NOT NULL,
+      counted_qty REAL NOT NULL,
+      approved_qty REAL,
+      applied_delta REAL
+    );
+    CREATE INDEX IF NOT EXISTS idx_stock_sync_lines_sync ON stock_sync_lines(sync_id);
+
+    -- A cashier's request to close a drawer whose variance is over the limit.
+    -- count_json is the count exactly as submitted (notes + coins), so the
+    -- approved close is THAT count and nobody retypes it. expected_amount and
+    -- variance are as of the request; the close refuses if the expected figure
+    -- has moved since (money came in or went out after the admin looked).
+    -- status: pending, approved, rejected, used (the close happened),
+    -- superseded (a newer request replaced a pending one).
+    CREATE TABLE IF NOT EXISTS cash_close_requests (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      shift_open_id INTEGER NOT NULL REFERENCES cash_counts(id),
+      user_id INTEGER REFERENCES users(id),
+      count_json TEXT NOT NULL,
+      total_amount REAL NOT NULL,
+      expected_amount REAL NOT NULL,
+      variance REAL NOT NULL,
+      notes TEXT,
+      status TEXT NOT NULL CHECK(status IN ('pending', 'approved', 'rejected', 'used', 'superseded')),
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      decided_by INTEGER REFERENCES users(id),
+      decided_at TEXT,
+      decision_note TEXT,
+      used_close_id INTEGER REFERENCES cash_counts(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_cash_close_requests_shift ON cash_close_requests(shift_open_id, id);
+  `);
+  // Who let a close over the variance limit through (an admin closing it
+  // themselves, an admin's password at the till, or an approved request), and
+  // the stock sync it closed on. NULL for every close before this existed.
+  addColumn("cash_counts", "variance_approved_by", "INTEGER");
+  addColumn("cash_counts", "stock_sync_id", "INTEGER");
 }
 
 export function seedDefaults(): void {
@@ -838,6 +924,8 @@ export function seedDefaults(): void {
     category_order: "[]",
     // What the till's Takeaway / Dine-in toggle starts on for each new sale.
     default_order_type: "takeaway",
+    // Rs: a drawer closing more than this over OR short needs an admin's approval.
+    cash_variance_limit: "200",
   };
   for (const [key, value] of Object.entries(defaults)) {
     db.query("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)").run(key, value);
