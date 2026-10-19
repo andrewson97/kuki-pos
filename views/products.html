@@ -133,6 +133,13 @@
               <label class="form-label">Reorder level (alert below)</label>
               <input type="number" class="form-control" id="product-reorder" step="1" min="0" value="0">
             </div>
+            <div class="col-12 mt-2">
+              <div class="form-check">
+                <input class="form-check-input" type="checkbox" id="product-daily-sync">
+                <label class="form-check-label" for="product-daily-sync">Count in the daily stock sync
+                  <span class="text-muted" style="font-size:0.8rem;">&mdash; asked for before the cash drawer closes, whenever it has stock above 0</span></label>
+              </div>
+            </div>
             <div class="col-12 text-muted" id="onhand-hint" style="font-size:0.8rem;display:none;">Saving this form never changes the count. Use <strong>Adjust stock</strong> in the product list for deliveries, waste or a recount. Turning tracking off keeps the count as it is.</div>
           </div>
           <div class="mb-3">
@@ -706,6 +713,7 @@
       document.getElementById('product-active').checked = true;
       document.getElementById('product-margin').innerHTML = '';
       document.getElementById('product-track-stock').checked = false;
+      document.getElementById('product-daily-sync').checked = false; // new products start unticked
       document.getElementById('product-qty').value = 0;
       document.getElementById('product-reorder').value = 0;
       syncStockFields();
@@ -731,6 +739,7 @@
       document.getElementById('product-discount').value = p.discount_price || '';
       document.getElementById('product-active').checked = !!p.is_active;
       document.getElementById('product-track-stock').checked = !!p.track_stock;
+      document.getElementById('product-daily-sync').checked = !!p.daily_sync;
       document.getElementById('product-onhand').textContent = p.stock_quantity || 0;
       document.getElementById('product-reorder').value = p.stock_reorder_level || 0;
       syncStockFields();
@@ -757,6 +766,8 @@
         discount_price: discountInput ? parseFloat(discountInput) : null,
         is_active: document.getElementById('product-active').checked ? 1 : 0,
         track_stock: document.getElementById('product-track-stock').checked ? 1 : 0,
+        // Only meaningful with tracking on (the server clears it otherwise).
+        daily_sync: document.getElementById('product-track-stock').checked && document.getElementById('product-daily-sync').checked ? 1 : 0,
         stock_reorder_level: parseFloat(document.getElementById('product-reorder').value) || 0,
         components: currentComponents.filter(c => c.component_product_id && c.quantity > 0),
         // Sent whole: they replace what is stored. A row edited to 0 is sent

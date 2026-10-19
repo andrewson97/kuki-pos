@@ -885,6 +885,15 @@ export function runMigrations(): void {
   // the stock sync it closed on. NULL for every close before this existed.
   addColumn("cash_counts", "variance_approved_by", "INTEGER");
   addColumn("cash_counts", "stock_sync_id", "INTEGER");
+
+  // --- feature/daily-sync-selection ------------------------------------------
+  // Which items the closing stock sync asks to be counted: the admin ticks them
+  // on the Stock page (or in the product / stock item form). Only ticked items
+  // with stock above 0 are listed (listSyncItems). The owner chose to start
+  // with NOTHING ticked — existing rows and new ones alike default to 0 — so
+  // until something is ticked the sync is a one-tap empty count.
+  addColumn("products", "daily_sync", "INTEGER NOT NULL DEFAULT 0");
+  addColumn("stock_items", "daily_sync", "INTEGER NOT NULL DEFAULT 0");
 }
 
 export function seedDefaults(): void {

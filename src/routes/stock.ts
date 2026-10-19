@@ -43,13 +43,14 @@ stock.get("/items/:id", (c) => {
 });
 
 stock.post("/items", adminOnly, async (c) => {
-  const { name, category_id, unit, quantity, reorder_level, cost_per_unit, expiry_date } = await c.req.json();
+  const { name, category_id, unit, quantity, reorder_level, cost_per_unit, expiry_date, daily_sync } = await c.req.json();
   const db = getDb();
   const user = getUser(c)!;
 
+  // daily_sync: counted in the closing stock sync. Unticked unless asked for.
   const result = db.query(
-    "INSERT INTO stock_items (name, category_id, unit, quantity, reorder_level, cost_per_unit, expiry_date) VALUES (?, ?, ?, ?, ?, ?, ?)"
-  ).run(name, category_id, unit || "pcs", quantity || 0, reorder_level || 0, cost_per_unit || 0, expiry_date || null);
+    "INSERT INTO stock_items (name, category_id, unit, quantity, reorder_level, cost_per_unit, expiry_date, daily_sync) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+  ).run(name, category_id, unit || "pcs", quantity || 0, reorder_level || 0, cost_per_unit || 0, expiry_date || null, daily_sync ? 1 : 0);
 
   const itemId = Number(result.lastInsertRowid);
 
@@ -65,11 +66,13 @@ stock.post("/items", adminOnly, async (c) => {
 
 stock.put("/items/:id", adminOnly, async (c) => {
   const id = c.req.param("id");
-  const { name, category_id, unit, reorder_level, cost_per_unit, expiry_date } = await c.req.json();
+  const { name, category_id, unit, reorder_level, cost_per_unit, expiry_date, daily_sync } = await c.req.json();
   const db = getDb();
+  // daily_sync absent (an older form, the mobile page) keeps what is stored.
+  const sync = daily_sync === undefined || daily_sync === null ? null : (daily_sync ? 1 : 0);
   db.query(
-    "UPDATE stock_items SET name = ?, category_id = ?, unit = ?, reorder_level = ?, cost_per_unit = ?, expiry_date = ?, updated_at = datetime('now') WHERE id = ?"
-  ).run(name, category_id, unit, reorder_level, cost_per_unit, expiry_date || null, id);
+    "UPDATE stock_items SET name = ?, category_id = ?, unit = ?, reorder_level = ?, cost_per_unit = ?, expiry_date = ?, daily_sync = COALESCE(?, daily_sync), updated_at = datetime('now') WHERE id = ?"
+  ).run(name, category_id, unit, reorder_level, cost_per_unit, expiry_date || null, sync, id);
   return c.json({ success: true });
 });
 
@@ -354,6 +357,49 @@ stock.post("/opened/:id/undo", adminOnly, (c) => {
     return c.json({ success: true, ...undoOpenStockUnit(id, getUser(c)!.id) });
   } catch (err: any) {
     if (err instanceof PortionError) return c.json({ error: err.message }, err.status);
+    throw err;
+  }
+});
+
+// --- Daily stock sync selection ----------------------------------------------
+// Which items the closing stock sync asks to be counted (src/services/closing.ts
+// listSyncItems). Body: { items: [{ kind: 'product' | 'ingredient', id, on }] }
+// — one checkbox, or "tick all" on a list, in one call. Products must track
+// their stock to be counted, so ticking an untracked one is refused.
+stock.post("/daily-sync", adminOnly, async (c) => {
+  const body = await c.req.json().catch(() => ({} as any));
+  if (!Array.isArray(body.items) || !body.items.length) return c.json({ error: "items must be a non-empty list" }, 400);
+  const db = getDb();
+  const user = getUser(c)!;
+  try {
+    const changed = db.transaction(() => {
+      let n = 0;
+      for (const it of body.items) {
+        const id = Number(it?.id);
+        const on = it?.on === true || it?.on === 1 ? 1 : 0;
+        if (!Number.isInteger(id) || id <= 0) throw new TxnError("Each item needs an id");
+        if (it?.kind === "product") {
+          const p = db.query("SELECT name, track_stock FROM products WHERE id = ?").get(id) as any;
+          if (!p) throw new TxnError("Product not found", 404);
+          if (on && !p.track_stock) throw new TxnError(`${p.name} does not track its stock, so it cannot be counted. Turn tracking on first.`);
+          n += Number(db.query("UPDATE products SET daily_sync = ? WHERE id = ? AND daily_sync != ?").run(on, id, on).changes || 0);
+        } else if (it?.kind === "ingredient") {
+          if (!db.query("SELECT 1 FROM stock_items WHERE id = ?").get(id)) throw new TxnError("Stock item not found", 404);
+          n += Number(db.query("UPDATE stock_items SET daily_sync = ? WHERE id = ? AND daily_sync != ?").run(on, id, on).changes || 0);
+        } else {
+          throw new TxnError("kind must be product or ingredient");
+        }
+      }
+      if (n) {
+        db.query("INSERT INTO activity_log (user_id, action, details) VALUES (?, 'daily_sync_selection', ?)").run(
+          user.id, JSON.stringify({ changed: n, items: body.items.slice(0, 200) })
+        );
+      }
+      return n;
+    }).immediate();
+    return c.json({ success: true, changed });
+  } catch (err: any) {
+    if (err instanceof TxnError) return c.json({ error: err.message }, err.status);
     throw err;
   }
 });

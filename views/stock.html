@@ -55,8 +55,9 @@
 
       <div class="table-container">
         <h6 class="px-3 pt-3 fw-bold mb-0" style="color:#6b5a4a;">Stock Items <small class="text-muted fw-normal">&mdash; ingredients, packing and anything else counted separately from your products</small></h6>
+        <div class="px-3 pt-1 small text-muted" id="sync-help-items">Tick <strong>Daily sync</strong> for what has to be counted before the cash drawer closes. Only ticked items with stock above 0 are asked for.</div>
         <table class="table table-hover mb-0">
-          <thead><tr><th>Name</th><th>Category</th><th>Quantity</th><th>Unit</th><th>Cost/Unit</th><th>Reorder Level</th><th>Expiry</th><th>Actions</th></tr></thead>
+          <thead><tr><th style="width:90px;" title="Counted in the daily stock sync at closing"><input type="checkbox" class="form-check-input me-1" id="sync-all-items" onchange="tickAllShown('ingredient', this)" title="Tick / untick every item shown"> Daily sync</th><th>Name</th><th>Category</th><th>Quantity</th><th>Unit</th><th>Cost/Unit</th><th>Reorder Level</th><th>Expiry</th><th>Actions</th></tr></thead>
           <tbody id="stock-table"></tbody>
         </table>
       </div>
@@ -70,7 +71,7 @@
           </select>
         </div>
         <table class="table table-hover mb-0">
-          <thead><tr><th>Product</th><th>Category</th><th>On Hand</th><th>Reorder Level</th><th>Actions</th></tr></thead>
+          <thead><tr><th style="width:90px;" title="Counted in the daily stock sync at closing"><input type="checkbox" class="form-check-input me-1" id="sync-all-products" onchange="tickAllShown('product', this)" title="Tick / untick every product shown"> Daily sync</th><th>Product</th><th>Category</th><th>On Hand</th><th>Reorder Level</th><th>Actions</th></tr></thead>
           <tbody id="tracked-products-table"></tbody>
         </table>
       </div>
@@ -113,6 +114,12 @@
           <div class="row mb-3">
             <div class="col"><label class="form-label">Reorder Level</label><input type="number" class="form-control" id="stock-reorder" step="any" min="0" value="0"></div>
             <div class="col"><label class="form-label">Expiry Date</label><input type="date" class="form-control" id="stock-expiry"></div>
+          </div>
+          <div class="form-check">
+            <input class="form-check-input" type="checkbox" id="stock-daily-sync">
+            <label class="form-check-label" for="stock-daily-sync">Count in the daily stock sync
+              <div class="text-muted" style="font-size:0.8rem;">Asked for before the cash drawer closes, whenever it has stock above 0.</div>
+            </label>
           </div>
         </div>
         <div class="modal-footer"><button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button><button class="btn btn-primary" onclick="saveStockItem(this)">Save</button></div>
@@ -274,8 +281,10 @@
         return;
       }
       panel.style.display = 'block';
+      shownProducts = list;
+      syncHeaderBox('sync-all-products', list);
       if (!list.length) {
-        tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted py-3">No matches</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-3">No matches</td></tr>';
         return;
       }
       tbody.innerHTML = list.map(p => {
@@ -285,6 +294,7 @@
           : low ? '<span class="badge bg-warning text-dark">LOW</span>'
           : '';
         return `<tr class="${out ? 'table-danger' : (low ? 'table-warning' : '')}">
+          <td>${syncBox('product', p)}</td>
           <td class="fw-bold">${escapeHtml(p.name)} ${status}</td>
           <td>${escapeHtml(p.category || '-')}</td>
           <td class="${out ? 'text-danger' : (low ? 'text-warning' : '')} fw-bold">${p.stock_quantity}</td>
@@ -410,11 +420,14 @@
         if (cat && i.category_id != cat) return false;
         return true;
       });
+      shownItems = filtered;
+      syncHeaderBox('sync-all-items', filtered);
       document.getElementById('stock-table').innerHTML = filtered.map(i => {
         const isLow = i.reorder_level > 0 && i.quantity <= i.reorder_level;
         return `<tr class="${isLow ? 'table-danger' : ''}">
-          <td class="fw-bold">${i.name} ${isLow ? '<span class="badge-low-stock">LOW</span>' : ''}</td>
-          <td>${i.category_name || '-'}</td>
+          <td>${syncBox('ingredient', i)}</td>
+          <td class="fw-bold">${escapeHtml(i.name)} ${isLow ? '<span class="badge-low-stock">LOW</span>' : ''}</td>
+          <td>${escapeHtml(i.category_name || '-')}</td>
           <td class="${isLow ? 'text-danger fw-bold' : ''}">${i.quantity}</td>
           <td>${i.unit}</td>
           <td>${formatCurrency(i.cost_per_unit)}</td>
@@ -426,7 +439,58 @@
             ${currentUser.role === 'admin' ? `<button class="btn btn-sm btn-outline-danger" onclick="deleteStockItem(${i.id}, this)">Delete</button>` : ''}
           </td>
         </tr>`;
-      }).join('') || '<tr><td colspan="8" class="text-center text-muted py-4">No stock items</td></tr>';
+      }).join('') || '<tr><td colspan="9" class="text-center text-muted py-4">No stock items</td></tr>';
+    }
+
+    // ===== Daily stock sync selection =====
+    // The "Daily sync" ticks decide what the closing stock sync (Cash Drawer →
+    // Step 1) asks to be counted: ticked items with stock above 0. Admins
+    // change them; anyone else sees them read-only. Saved the moment a box
+    // changes, through POST /api/stock/daily-sync.
+    let shownItems = [], shownProducts = [];
+    const canEditSync = () => !!(currentUser && currentUser.role === 'admin');
+
+    function syncBox(kind, row) {
+      return `<input type="checkbox" class="form-check-input" ${row.daily_sync ? 'checked' : ''} ${canEditSync() ? '' : 'disabled'}
+        onchange="setDailySync([{ kind: '${kind}', id: ${Number(row.id)}, on: this.checked }])"
+        title="${row.daily_sync ? 'Counted' : 'Not counted'} in the daily stock sync" aria-label="Daily sync: ${escapeHtml(row.name)}">`;
+    }
+
+    // The header box: ticked when every row shown is, half-ticked when some are.
+    function syncHeaderBox(id, rows) {
+      const box = document.getElementById(id);
+      if (!box) return;
+      const on = rows.filter(r => r.daily_sync).length;
+      box.checked = rows.length > 0 && on === rows.length;
+      box.indeterminate = on > 0 && on < rows.length;
+      box.disabled = !canEditSync() || !rows.length;
+    }
+
+    // Tick or untick every row the filters show (not the hidden ones).
+    function tickAllShown(kind, box) {
+      const rows = kind === 'product' ? shownProducts : shownItems;
+      const items = rows.filter(r => !!r.daily_sync !== box.checked).map(r => ({ kind, id: r.id, on: box.checked }));
+      if (!items.length) return;
+      setDailySync(items);
+    }
+
+    async function setDailySync(items) {
+      try {
+        await api('/api/stock/daily-sync', { method: 'POST', body: { items } });
+      } catch (err) {
+        showToast(escapeHtml((err && err.message) || 'Could not save'), 'error');
+        renderStock(); renderTrackedProducts(); // put the boxes back as stored
+        return;
+      }
+      for (const it of items) {
+        const list = it.kind === 'product' ? trackedProducts : stockItems;
+        const row = list.find(r => r.id === it.id);
+        if (row) row.daily_sync = it.on ? 1 : 0;
+      }
+      renderStock();
+      renderTrackedProducts();
+      const total = stockItems.filter(r => r.daily_sync).length + trackedProducts.filter(r => r.daily_sync).length;
+      showToast(`Saved — ${total} item${total === 1 ? '' : 's'} in the daily stock sync`);
     }
 
     // Deleting a stock item also deletes its movement history, so the server
@@ -464,6 +528,7 @@
       document.getElementById('stock-cost').value = '0';
       document.getElementById('stock-reorder').value = '0';
       document.getElementById('stock-expiry').value = '';
+      document.getElementById('stock-daily-sync').checked = false; // new items start unticked
       document.getElementById('stock-qty').disabled = false;
       new bootstrap.Modal(document.getElementById('stockModal')).show();
     }
@@ -480,6 +545,7 @@
       document.getElementById('stock-cost').value = i.cost_per_unit;
       document.getElementById('stock-reorder').value = i.reorder_level;
       document.getElementById('stock-expiry').value = i.expiry_date || '';
+      document.getElementById('stock-daily-sync').checked = !!i.daily_sync;
       new bootstrap.Modal(document.getElementById('stockModal')).show();
     }
 
@@ -492,6 +558,7 @@
         cost_per_unit: parseFloat(document.getElementById('stock-cost').value) || 0,
         reorder_level: parseFloat(document.getElementById('stock-reorder').value) || 0,
         expiry_date: document.getElementById('stock-expiry').value || null,
+        daily_sync: document.getElementById('stock-daily-sync').checked ? 1 : 0,
       };
       await withBusy(btn, async () => {
         if (id) {

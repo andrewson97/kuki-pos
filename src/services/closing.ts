@@ -131,18 +131,24 @@ const MAX_COUNT = 1_000_000;
  * counted — only what is still sealed, which is stock_items.quantity.
  * Discontinued products are left out (they are off the menu for good), but
  * inactive ones stay in: off the menu today is still on the shelf.
+ *
+ * Only what the admin ticked for the daily sync (products.daily_sync /
+ * stock_items.daily_sync, set on the Stock page). Unticking or ticking an item
+ * changes this list, and so the snapshot a settled sync is checked against —
+ * a sync settled before the change asks to be done again, which is right: it
+ * no longer counted the list the shop now closes on.
  */
 export function listSyncItems(): SyncItem[] {
   const db = getDb();
   const products = db.query(`
     SELECT id, name, category, stock_quantity AS qty FROM products
-    WHERE track_stock = 1 AND is_discontinued = 0 AND stock_quantity > ${QTY_EPS}
+    WHERE track_stock = 1 AND is_discontinued = 0 AND daily_sync = 1 AND stock_quantity > ${QTY_EPS}
     ORDER BY category, name
   `).all() as any[];
   const items = db.query(`
     SELECT si.id, si.name, si.unit, si.quantity AS qty, COALESCE(sc.name, 'Uncategorised') AS category
     FROM stock_items si LEFT JOIN stock_categories sc ON sc.id = si.category_id
-    WHERE si.quantity > ${QTY_EPS}
+    WHERE si.daily_sync = 1 AND si.quantity > ${QTY_EPS}
     ORDER BY sc.name, si.name
   `).all() as any[];
   return [
@@ -354,8 +360,8 @@ export function submitStockSync(params: { shiftOpenId: number; user: SessionUser
       const [kind = "", idStr = ""] = key.split(":");
       const id = Number(idStr);
       const row = kind === "product"
-        ? db.query("SELECT name, 'pcs' AS unit FROM products WHERE id = ? AND track_stock = 1 AND is_discontinued = 0").get(id) as any
-        : db.query("SELECT name, unit FROM stock_items WHERE id = ?").get(id) as any;
+        ? db.query("SELECT name, 'pcs' AS unit FROM products WHERE id = ? AND track_stock = 1 AND is_discontinued = 0 AND daily_sync = 1").get(id) as any
+        : db.query("SELECT name, unit FROM stock_items WHERE id = ? AND daily_sync = 1").get(id) as any;
       if (!row) continue; // deleted, untracked or discontinued meanwhile: not counted stock
       lines.push({ kind, id, name: row.name, unit: row.unit || "", system_qty: currentSystemQty(kind, id) ?? 0, counted_qty: c.qty });
     }

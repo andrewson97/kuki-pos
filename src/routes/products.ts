@@ -280,8 +280,10 @@ products.post("/", adminOnly, async (c) => {
     // product created today at zero really did "run out" today, not at an
     // unknown time in the past.
     const result = db.query(
-      "INSERT INTO products (name, category, cost_price, selling_price, discount_price, is_active, track_stock, stock_quantity, stock_reorder_level, stock_updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))"
-    ).run(cleanName, cat, cost_price || 0, selling_price, dp, is_active ?? 1, ts, opening, ts ? (stock_reorder_level || 0) : 0);
+      "INSERT INTO products (name, category, cost_price, selling_price, discount_price, is_active, track_stock, stock_quantity, stock_reorder_level, stock_updated_at, daily_sync) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?)"
+    ).run(cleanName, cat, cost_price || 0, selling_price, dp, is_active ?? 1, ts, opening, ts ? (stock_reorder_level || 0) : 0,
+      // Counted in the closing stock sync: only a tracked product has a count.
+      ts && body.daily_sync ? 1 : 0);
     id = Number(result.lastInsertRowid);
     saveComponents(id, components);
     saveStockLinks(id, links);
@@ -571,8 +573,12 @@ products.put("/:id", adminOnly, async (c) => {
   // One transaction: the product, its components and its stock links are one save.
   db.transaction(() => {
     db.query(
-      "UPDATE products SET name = ?, category = ?, cost_price = ?, selling_price = ?, discount_price = ?, is_active = ?, track_stock = ?, stock_reorder_level = COALESCE(?, stock_reorder_level) WHERE id = ?"
-    ).run(cleanName, cat, cost_price || 0, selling_price, dp, active, ts, reorder, id);
+      "UPDATE products SET name = ?, category = ?, cost_price = ?, selling_price = ?, discount_price = ?, is_active = ?, track_stock = ?, stock_reorder_level = COALESCE(?, stock_reorder_level), " +
+        // daily_sync: off with tracking (an untracked product has no count);
+        // absent from the body (the mobile form) keeps what is stored.
+        "daily_sync = CASE WHEN ? = 0 THEN 0 ELSE COALESCE(?, daily_sync) END WHERE id = ?"
+    ).run(cleanName, cat, cost_price || 0, selling_price, dp, active, ts, reorder, ts,
+      body.daily_sync === undefined || body.daily_sync === null ? null : (body.daily_sync ? 1 : 0), id);
     saveComponents(parseInt(id), components);
     saveStockLinks(Number(id), links);
   })();
