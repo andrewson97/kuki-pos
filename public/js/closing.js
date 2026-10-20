@@ -105,7 +105,8 @@ window.Closing = (() => {
     const s = syncState();
     const waiting = (s && s.sync && s.sync.status === 'pending') ||
       (today.close_request && today.close_request.status === 'pending') ||
-      (today.pending_refunds || 0) > 0; // the Close button unlocks once they are decided
+      (today.pending_refunds || 0) > 0 || // the Close button unlocks once they are decided
+      (today.pending_disposals || 0) > 0; // and Step 1 opens once waste reports are
     if (waiting) pollTimer = setTimeout(refresh, 15000);
     else if (cfg.isAdmin) pollTimer = setTimeout(refresh, 60000);
   }
@@ -184,6 +185,14 @@ window.Closing = (() => {
       head = '&#10060; Step 1 &mdash; the count was rejected';
       msg = `${esc(s.decided_by_name || 'The admin')} rejected it${s.decision_note ? `: &ldquo;${esc(s.decision_note)}&rdquo;` : ''}. Count the stock again.`;
       cls = 'cc-bad';
+    }
+    // A waste report still waiting: its goods are binned but still on the
+    // books, so the count would show them as missing. Decided first.
+    const waste = Number(today.pending_disposals) || 0;
+    if (waste > 0) {
+      el.innerHTML = `<div class="cc-box cc-wait"><h4>&#9203; Step 1 &mdash; waiting for waste reports</h4>
+        <div>${waste} waste report${waste === 1 ? ' is' : 's are'} waiting for an admin. The stock is counted once ${waste === 1 ? 'it is' : 'they are'} approved or rejected.</div></div>`;
+      return;
     }
     el.innerHTML = `<div class="cc-box ${cls}"><h4>${head}</h4><div>${msg}</div>
       <div class="cc-row"><button class="cc-btn cc-primary" onclick="Closing.startCount(this)">Start stock sync</button></div></div>`;

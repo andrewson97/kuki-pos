@@ -92,6 +92,12 @@ export async function resolveApprover(user: SessionUser, body: any): Promise<App
   return { id: row.id, full_name: row.full_name, at_till: true };
 }
 
+/** Waste reports (src/routes/disposals.ts) still waiting on an admin. */
+export function pendingDisposalCount(): number {
+  const row = getDb().query("SELECT COUNT(*) AS n FROM disposal_requests WHERE status = 'pending'").get() as any;
+  return row?.n ?? 0;
+}
+
 export interface SyncItem { kind: "product" | "ingredient"; id: number; name: string; unit: string; category: string; system_qty: number }
 
 // A sale (or delivery) between loading the count list and submitting it would
@@ -346,6 +352,17 @@ export function submitStockSync(params: { shiftOpenId: number; user: SessionUser
   }
 
   return db.transaction(() => {
+    // A waste report still waiting: the goods are in the bin but still on the
+    // books, so counting now would show them as missing — a shortage that is
+    // not one. It is decided first (approved or rejected), then counted.
+    const waste = pendingDisposalCount();
+    if (waste > 0) {
+      throw new ClosingError(
+        `${waste} waste report${waste > 1 ? "s are" : " is"} waiting for an admin. ${waste > 1 ? "They have" : "It has"} to be approved or rejected before the stock is counted.`,
+        409,
+        { disposals_pending: true }
+      );
+    }
     if (!params.approver) {
       const waiting = db.query("SELECT 1 FROM stock_syncs WHERE shift_open_id = ? AND status = 'pending'").get(params.shiftOpenId);
       if (waiting) {

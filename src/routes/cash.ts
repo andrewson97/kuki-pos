@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { getDb } from "../db/database";
 import { adminOnly, getUser } from "../middleware/auth";
 import {
-  ClosingError, decideStockSync, getStockSync, itemToken, listSyncItems, resolveApprover, stockSyncState, submitStockSync,
+  ClosingError, decideStockSync, getStockSync, itemToken, listSyncItems, pendingDisposalCount, resolveApprover, stockSyncState, submitStockSync,
   type Approver,
 } from "../services/closing";
 import { todayDate } from "../utils/helpers";
@@ -390,6 +390,8 @@ cash.get("/today", (c) => {
     pending_expenses,
     // Refunds waiting on an admin: they block the close like pending expenses.
     pending_refunds: open ? pendingRefundCount() : 0,
+    // Waste reports waiting on an admin: they block the stock count and the close.
+    pending_disposals: open ? pendingDisposalCount() : 0,
     variance_limit: varianceLimit(),
     stock_sync: syncState
       ? { valid: syncState.valid, stale: syncState.stale, stale_reason: syncState.stale_reason, sync: syncForViewer(syncState.sync, user.role === "admin") }
@@ -513,6 +515,12 @@ cash.post("/close", async (c) => {
   const refundsWaiting = pendingRefundCount();
   if (refundsWaiting > 0) {
     return c.json({ error: `${refundsWaiting} cash refund${refundsWaiting > 1 ? "s are" : " is"} waiting for an admin. Approve or reject ${refundsWaiting > 1 ? "them" : "it"} (or withdraw the request) before closing.` }, 400);
+  }
+  // A waste report still waiting would change the stock after it was synced
+  // (and the goods are already gone) — decided first, like the rest.
+  const wasteWaiting = pendingDisposalCount();
+  if (wasteWaiting > 0) {
+    return c.json({ error: `${wasteWaiting} waste report${wasteWaiting > 1 ? "s are" : " is"} waiting for an admin. ${wasteWaiting > 1 ? "They have" : "It has"} to be approved or rejected before closing.` }, 400);
   }
 
   // Gate 1: the shift's stock has to be synced, and nothing moved since.
