@@ -11,7 +11,7 @@ import {
   queuePrint,
 } from "../services/printer";
 import { formatDateTime, todayDate } from "../utils/helpers";
-import { cashShiftBlockReason } from "./cash";
+import { cashShiftBlockReason, drawerHandlerBlockReason } from "./cash";
 
 // ---------------------------------------------------------------------------
 // Pre-orders: a customer orders ahead (a custom birthday cake described in
@@ -641,7 +641,7 @@ preorders.post("/", async (c) => {
     // shift rule as a sale: money that arrives outside an open shift can never
     // be reconciled by a close. Card/UPI never touches the drawer.
     if (method === "cash") {
-      const blocked = cashShiftBlockReason();
+      const blocked = cashShiftBlockReason() ?? drawerHandlerBlockReason(user);
       if (blocked) return c.json({ error: blocked }, 400);
     }
     deposit = { amount: money(amount), payment_method: method, paid_on: paidOn };
@@ -904,7 +904,7 @@ preorders.post("/:id/payments", async (c) => {
       }
 
       if (method === "cash") {
-        const blocked = cashShiftBlockReason();
+        const blocked = cashShiftBlockReason() ?? drawerHandlerBlockReason(user);
         if (blocked) throw new Refused(400, { error: blocked });
       }
 
@@ -954,6 +954,13 @@ preorders.delete("/:id/payments/:paymentId", adminOnly, (c) => {
   if (!order) return c.json({ error: "Not found" }, 404);
   if (order.status === "collected") {
     return c.json({ error: "This order has been collected and billed; its payments cannot be altered." }, 400);
+  }
+  // A cash payment deleted moves what the drawer should hold: not while it is
+  // being handed over.
+  const pay = db.query("SELECT payment_method FROM pre_order_payments WHERE id = ? AND pre_order_id = ?").get(paymentId, id) as any;
+  if (pay?.payment_method === "cash") {
+    const blocked = drawerHandlerBlockReason(user);
+    if (blocked) return c.json({ error: blocked }, 400);
   }
   // A cancelled order whose deposit was settled (refunded or kept) is closed
   // the same way: deposit_settled_amount, the drawer's refund figure and any
@@ -1063,7 +1070,7 @@ preorders.post("/:id/cancel", adminOnly, async (c) => {
         });
       }
       if (hasDeposit && action === "refund" && refundMethod === "cash") {
-        const blocked = cashShiftBlockReason();
+        const blocked = cashShiftBlockReason() ?? drawerHandlerBlockReason(user);
         if (blocked) {
           throw new Refused(400, { error: `A cash refund comes out of the drawer. ${blocked}` });
         }
@@ -1315,7 +1322,7 @@ preorders.post("/:id/collect", async (c) => {
       // Same rule as POST /api/pos/bill. No replay exemption is needed any
       // more: an order that reaches this line has no bill yet (checked just
       // above), so this request is always a new sale.
-      const blocked = cashShiftBlockReason();
+      const blocked = cashShiftBlockReason() ?? (method === "cash" && cashToCollect > CENT ? drawerHandlerBlockReason(user) : null);
       if (blocked) throw new Refused(400, { error: blocked });
 
       let bill: CreatedBill;

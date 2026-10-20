@@ -24,6 +24,7 @@ import cashRoutes from "./routes/cash";
 import taskRoutes from "./routes/tasks";
 import historyRoutes from "./routes/history";
 import mobileRoutes from "./routes/mobile";
+import disposalRoutes from "./routes/disposals";
 
 // Initialize database
 runMigrations();
@@ -164,6 +165,7 @@ app.route("/api/cash", cashRoutes);
 app.route("/api/tasks", taskRoutes);
 app.route("/api/history", historyRoutes);
 app.route("/api/mobile", mobileRoutes);
+app.route("/api/disposals", disposalRoutes);
 
 // Auto-redirect phones hitting the main admin pages to their mobile equivalents.
 // Skip when ?desktop=1 is set (lets you force the full UI from a phone).

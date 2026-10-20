@@ -13,7 +13,7 @@ import {
 import { adminOnly } from "../middleware/auth";
 import { returnPortionsForBill } from "../services/portions";
 import { ClosingError, resolveApprover, type Approver } from "../services/closing";
-import { cashShiftBlockReason } from "./cash";
+import { cashShiftBlockReason, drawerHandlerBlockReason } from "./cash";
 import { todayDate, formatDateTime } from "../utils/helpers";
 
 const pos = new Hono();
@@ -171,6 +171,12 @@ pos.post("/bill", async (c) => {
     if (latestOpen && latestOpen.count_date !== today) {
       return c.json({ error: `A shift from ${latestOpen.count_date} is still open. Close it on the Cash Drawer page before starting today's sales.` }, 400);
     }
+  }
+  // Cash goes into the drawer, so only its holder (or an admin) takes it, and
+  // not while the drawer is being handed over. Card and LankaQR are untouched.
+  if ((body.payment_method || "cash") === "cash" && !knownReplay) {
+    const blocked = drawerHandlerBlockReason(user);
+    if (blocked) return c.json({ error: blocked, cash_blocked: true }, 400);
   }
 
   let bill;
@@ -527,6 +533,11 @@ function performRefund(params: { billId: number; reason: string; restockRequeste
   if (bill.payment_method === "cash") {
     const blocked = cashShiftBlockReason();
     if (blocked) throw new RefundError(`This is a cash refund, so it needs an open cash shift. ${blocked}`);
+    // And it is paid out by whoever refunds it, so they must hold the drawer
+    // (or be an admin), and not while it is being handed over.
+    const payer = db.query("SELECT id, role FROM users WHERE id = ?").get(params.refundedBy) as any;
+    const notHolder = payer ? drawerHandlerBlockReason(payer) : null;
+    if (notHolder) throw new RefundError(`This is a cash refund, paid out of the drawer. ${notHolder}`);
   }
 
   const fromPreorder = String(bill.cart_id || "").startsWith("preorder-");
@@ -652,9 +663,14 @@ pos.post("/bills/:id/refund-requests", async (c) => {
   if (typeof parsed === "string") return c.json({ error: parsed }, 400);
   const db = getDb();
   const result = db.transaction(() => {
-    const bill = db.query("SELECT status, token_number, total FROM bills WHERE id = ?").get(id) as any;
+    const bill = db.query("SELECT status, token_number, total, payment_method FROM bills WHERE id = ?").get(id) as any;
     if (!bill) return { status: 404 as const, error: "Not found" };
     if (bill.status !== "completed") return { status: 400 as const, error: "Bill is already " + bill.status };
+    // A cash refund is paid out by the one asking, so they must hold the drawer.
+    if (bill.payment_method === "cash") {
+      const blocked = drawerHandlerBlockReason(user);
+      if (blocked) return { status: 400 as const, error: `This is a cash refund, paid out of the drawer. ${blocked}` };
+    }
     if (pendingRefundRequest(id)) return { status: 409 as const, error: "A refund of this bill is already waiting for an admin." };
     const rid = Number(db.query(
       "INSERT INTO refund_requests (bill_id, user_id, reason, restock, status) VALUES (?, ?, ?, ?, 'pending')"
@@ -1562,6 +1578,30 @@ function listHoldsWithClaims(): any[] {
     });
   }
 
+  // A pending disposal request holds its product under cart 'disposal-<id>'
+  // (src/routes/disposals.ts) so binned stock cannot be sold. No till claims
+  // that cart, so without this it would read as an unclaimed, stranded hold and
+  // the "release unreported holds" sweep would put binned stock back on sale.
+  // The request is a stored fact like a parked bill, so it is a claim of its own.
+  const disposalRows = db.query(`
+    SELECT r.id, r.reason, r.requested_at, u.full_name AS user_name
+    FROM disposal_requests r
+    LEFT JOIN users u ON u.id = r.requested_by
+    WHERE r.status = 'pending'
+  `).all() as any[];
+  for (const d of disposalRows) {
+    byCart.set(`disposal-${d.id}`, {
+      state: "disposal",
+      till_id: null,
+      till_label: "",
+      user_name: d.user_name ?? null,
+      last_seen_at: d.requested_at,
+      label: `Disposal request #${d.id} — ${d.reason}`,
+      disposal_request_id: d.id,
+      source: "disposal_request",
+    });
+  }
+
   return holds.map((h: any) => ({ ...h, claim: byCart.get(h.cart_id) ?? null }));
 }
 
@@ -1579,6 +1619,15 @@ pos.delete("/reservations/:id", adminOnly, (c) => {
     "SELECT r.id, r.quantity, r.cart_id, p.name AS product_name FROM stock_reservations r LEFT JOIN products p ON p.id = r.product_id WHERE r.id = ?"
   ).get(id) as any;
   if (!hold) return c.json({ error: "Hold not found" }, 404);
+  // A pending disposal's hold is not stranded: it is binned stock. Releasing it
+  // here would put it back on sale while the request still says it is gone, so
+  // the request has to be decided instead (rejecting it releases the hold).
+  if (String(hold.cart_id).startsWith("disposal-")) {
+    return c.json(
+      { error: `This stock is held by ${hold.cart_id.replace("disposal-", "disposal request #")}. Approve or reject that request instead.` },
+      409
+    );
+  }
 
   db.transaction(() => {
     releaseHold(id);
@@ -1659,6 +1708,10 @@ function unreportedReason(claim: any, cutoff: string): UnreportedReason | null {
   // listing already lets parked_carts override a till's claim. Discard the bill
   // (which hands the stock back) or release the row by hand instead.
   if (claim.source === "parked_carts") return null;
+
+  // A pending disposal request: binned stock, decided only by approving or
+  // rejecting the request. Never swept, at any age, for the same reason.
+  if (claim.source === "disposal_request") return null;
 
   // What is left is a till's self-report on a cart with no parked bill behind
   // it. It counts only while the till is still checking in. Both timestamps are

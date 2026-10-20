@@ -1,5 +1,6 @@
 import { createHmac, randomBytes } from "node:crypto";
 import { getDb } from "../db/database";
+import { addLedgerEntry, chargeDecisionNeeded, chargeUndecided, readChargeDecision } from "./accounts";
 import type { SessionUser } from "../middleware/auth";
 
 // --- Closing the drawer: stock sync and admin approval ------------------------
@@ -90,6 +91,12 @@ export async function resolveApprover(user: SessionUser, body: any): Promise<App
     throw new ClosingError("That admin username or password is wrong.", 400);
   }
   return { id: row.id, full_name: row.full_name, at_till: true };
+}
+
+/** Waste reports (src/routes/disposals.ts) still waiting on an admin. */
+export function pendingDisposalCount(): number {
+  const row = getDb().query("SELECT COUNT(*) AS n FROM disposal_requests WHERE status = 'pending'").get() as any;
+  return row?.n ?? 0;
 }
 
 export interface SyncItem { kind: "product" | "ingredient"; id: number; name: string; unit: string; category: string; system_qty: number }
@@ -330,7 +337,13 @@ function settle(syncId: number, status: "matched" | "approved", approver: Approv
  * before the admin ever saw it. A mistake is for the admin to correct or send
  * back; an admin (or their password at the till) may replace it.
  */
-export function submitStockSync(params: { shiftOpenId: number; user: SessionUser; approver: Approver | null; counts: any[] }) {
+export function submitStockSync(params: {
+  shiftOpenId: number; user: SessionUser; approver: Approver | null; counts: any[];
+  /** Who holds the drawer now: a shortage this count finds is charged to them. */
+  holderId: number;
+  /** The charge decision when an approver settles it at once (readChargeDecision). */
+  chargeBody?: any;
+}) {
   const db = getDb();
   if (!Array.isArray(params.counts)) throw new ClosingError("counts must be a list");
   const counted = new Map<string, { qty: number; token: string }>();
@@ -346,6 +359,17 @@ export function submitStockSync(params: { shiftOpenId: number; user: SessionUser
   }
 
   return db.transaction(() => {
+    // A waste report still waiting: the goods are in the bin but still on the
+    // books, so counting now would show them as missing — a shortage that is
+    // not one. It is decided first (approved or rejected), then counted.
+    const waste = pendingDisposalCount();
+    if (waste > 0) {
+      throw new ClosingError(
+        `${waste} waste report${waste > 1 ? "s are" : " is"} waiting for an admin. ${waste > 1 ? "They have" : "It has"} to be approved or rejected before the stock is counted.`,
+        409,
+        { disposals_pending: true }
+      );
+    }
     if (!params.approver) {
       const waiting = db.query("SELECT 1 FROM stock_syncs WHERE shift_open_id = ? AND status = 'pending'").get(params.shiftOpenId);
       if (waiting) {
@@ -412,18 +436,25 @@ export function submitStockSync(params: { shiftOpenId: number; user: SessionUser
 
     // Only an approver gets here with a count waiting; theirs replaces it.
     db.query("UPDATE stock_syncs SET status = 'superseded' WHERE shift_open_id = ? AND status = 'pending'").run(params.shiftOpenId);
+    // holder_user_id: who held the drawer while this was counted — a shortage
+    // found here is theirs to answer for (see chargeSyncShortage).
     const syncId = Number(db.query(
-      "INSERT INTO stock_syncs (shift_open_id, user_id, status, mismatch_count) VALUES (?, ?, 'pending', ?)"
-    ).run(params.shiftOpenId, params.user.id, mismatches.length).lastInsertRowid);
+      "INSERT INTO stock_syncs (shift_open_id, user_id, status, mismatch_count, holder_user_id) VALUES (?, ?, 'pending', ?, ?)"
+    ).run(params.shiftOpenId, params.user.id, mismatches.length, params.holderId).lastInsertRowid);
     const ins = db.query(
-      "INSERT INTO stock_sync_lines (sync_id, item_kind, item_id, name, unit, system_qty, counted_qty) VALUES (?, ?, ?, ?, ?, ?, ?)"
+      "INSERT INTO stock_sync_lines (sync_id, item_kind, item_id, name, unit, system_qty, counted_qty, unit_value) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
     );
-    for (const l of lines) ins.run(syncId, l.kind, l.id, l.name, l.unit, l.system_qty, l.counted_qty);
+    for (const l of lines) ins.run(syncId, l.kind, l.id, l.name, l.unit, l.system_qty, l.counted_qty, unitValue(l.kind, l.id));
 
     if (!mismatches.length) {
       settle(syncId, "matched", null, null);
     } else if (params.approver) {
       applySync(syncId, params.approver, new Map());
+      // An admin counting (or approving at the till as the count is sent) has
+      // no separate review step, so the count itself carries the decision on
+      // any shortage — charge the holder or write it off. Without one the
+      // whole count is refused (rolled back) and the till asks.
+      chargeSyncShortage(syncId, decideShortage(syncId, params.chargeBody), params.approver);
       settle(syncId, "approved", params.approver, params.approver.at_till ? "Approved with the admin's password at the till" : "Counted by an admin");
     }
     db.query("INSERT INTO activity_log (user_id, action, details) VALUES (?, 'stock_synced', ?)").run(
@@ -441,6 +472,8 @@ export function submitStockSync(params: { shiftOpenId: number; user: SessionUser
 export function decideStockSync(params: {
   syncId: number; approver: Approver; approve: boolean; note?: string | null;
   corrections?: { line_id: number; approved_qty: number }[]; shiftOpenId: number | null;
+  /** Approving: charge the shortage to the holder or write it off (readChargeDecision). */
+  chargeBody?: any;
 }) {
   const db = getDb();
   const note = String(params.note ?? "").trim() || null;
@@ -464,6 +497,9 @@ export function decideStockSync(params: {
     }
     if (params.approve) {
       applySync(params.syncId, params.approver, corrections);
+      // Valued on the APPROVED figures (after corrections), so a figure the
+      // admin corrected upwards is not charged.
+      chargeSyncShortage(params.syncId, decideShortage(params.syncId, params.chargeBody), params.approver);
       settle(params.syncId, "approved", params.approver, note);
     } else {
       db.query("UPDATE stock_syncs SET status = 'rejected', decided_by = ?, decided_at = datetime('now'), decision_note = ? WHERE id = ?")
@@ -479,4 +515,86 @@ export function decideStockSync(params: {
 
 export function getStockSync(id: number) {
   return syncWithLines(id);
+}
+
+// --- Stock shortages and the holder's pending account --------------------------
+
+/**
+ * What one unit of an item is worth for charging a shortage: a product at its
+ * SELLING price (the owner's choice — what the shop lost the chance to sell it
+ * for), a store-room item at its cost per unit (it has no selling price).
+ * Copied onto the sync line at count time, so a later price change does not
+ * change what a past shortage cost.
+ */
+function unitValue(kind: string, id: number): number {
+  const db = getDb();
+  const row = kind === "product"
+    ? db.query("SELECT selling_price AS v FROM products WHERE id = ?").get(id) as any
+    : db.query("SELECT cost_per_unit AS v FROM stock_items WHERE id = ?").get(id) as any;
+  return Math.max(0, Number(row?.v) || 0);
+}
+
+/**
+ * The shortage a sync found, in money: for every line where the figure that
+ * stands (approved, else counted) is BELOW what the system said, the missing
+ * quantity times its unit value. Overages count for nothing — the owner chose
+ * that a find never offsets a loss.
+ */
+export function syncShortageValue(syncId: number): number {
+  const lines = getDb().query("SELECT system_qty, counted_qty, approved_qty, unit_value FROM stock_sync_lines WHERE sync_id = ?").all(syncId) as any[];
+  let total = 0;
+  for (const l of lines) {
+    const stands = l.approved_qty != null ? Number(l.approved_qty) : Number(l.counted_qty);
+    const missing = Number(l.system_qty) - stands;
+    if (missing > QTY_EPS) total += missing * (Number(l.unit_value) || 0);
+  }
+  return Math.round(total * 100) / 100;
+}
+
+/** Lines short with no price to charge them at — the admin is told, so they can set the amount. */
+export function syncUnpricedShortLines(syncId: number): string[] {
+  const lines = getDb().query("SELECT name, system_qty, counted_qty, approved_qty, unit_value FROM stock_sync_lines WHERE sync_id = ?").all(syncId) as any[];
+  return lines.filter((l) => {
+    const stands = l.approved_qty != null ? Number(l.approved_qty) : Number(l.counted_qty);
+    return Number(l.system_qty) - stands > QTY_EPS && !(Number(l.unit_value) > 0);
+  }).map((l) => l.name);
+}
+
+/**
+ * The admin's decision on a sync's shortage, read from the body. A shortage
+ * with no decision sent is refused (409 needs_charge_decision): nothing is
+ * charged to anyone by default. No shortage: nothing to decide.
+ */
+function decideShortage(syncId: number, body: any): { charge: boolean; amount: number; note: string | null } {
+  const value = syncShortageValue(syncId);
+  const unpriced = syncUnpricedShortLines(syncId).length > 0;
+  if (!(value > 0) && !unpriced) return { charge: false, amount: 0, note: null };
+  if (chargeUndecided(body)) {
+    const s = getDb().query("SELECT s.holder_user_id, s.user_id, u.full_name FROM stock_syncs s LEFT JOIN users u ON u.id = COALESCE(s.holder_user_id, s.user_id) WHERE s.id = ?").get(syncId) as any;
+    const { error, ...extra } = chargeDecisionNeeded(value, { id: s?.holder_user_id ?? s?.user_id, name: s?.full_name || "the holder" });
+    throw new ClosingError(error, 409, extra);
+  }
+  const d = readChargeDecision(body, value);
+  if (typeof d === "string") throw new ClosingError(d);
+  return d;
+}
+
+/**
+ * Record the admin's decision on a sync's shortage: charge it to whoever held
+ * the drawer when it was counted, or write it off with a reason. Inside the
+ * caller's transaction.
+ */
+function chargeSyncShortage(syncId: number, decision: { charge: boolean; amount: number; note: string | null }, approver: { id: number; full_name: string }) {
+  const db = getDb();
+  const sync = db.query("SELECT holder_user_id, user_id FROM stock_syncs WHERE id = ?").get(syncId) as any;
+  const holder = sync?.holder_user_id ?? sync?.user_id;
+  if (decision.charge && decision.amount > 0 && holder) {
+    addLedgerEntry({
+      userId: holder, kind: "stock_short", amount: decision.amount, sourceType: "stock_sync", sourceId: syncId,
+      note: `Stock short at the count #${syncId}${decision.note ? ` — ${decision.note}` : ""} (approved by ${approver.full_name})`, createdBy: approver.id,
+    });
+    db.query("UPDATE stock_syncs SET charge_amount = ?, charged_to = ? WHERE id = ?").run(decision.amount, holder, syncId);
+  } else if (!decision.charge) {
+    db.query("UPDATE stock_syncs SET charge_amount = 0, write_off_note = ? WHERE id = ?").run(decision.note, syncId);
+  }
 }

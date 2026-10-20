@@ -299,16 +299,20 @@ async function refreshSidebarBadges() {
         setNavBadge('pending_expenses', data.count, '#dc3545');
       }
     } catch {}
-    // Closing the drawer waits on the owner: a stock count that did not match,
-    // or a variance over the limit (see public/js/closing.js).
-    try {
-      const res = await fetch('/api/cash/approvals/count');
-      if (res.ok) {
-        const data = await res.json();
-        setNavBadge('cash_approvals', data.count, '#dc3545');
-      }
-    } catch {}
   }
+  // The Cash Drawer badge: for an admin, what waits on them (a stock count that
+  // did not match, a variance over the limit, a handover counted off — see
+  // public/js/closing.js); for anyone, a drawer being handed to them to accept.
+  try {
+    let count = 0;
+    if (currentUser.role === 'admin') {
+      const res = await fetch('/api/cash/approvals/count');
+      if (res.ok) count += Number((await res.json()).count) || 0;
+    }
+    const res = await fetch('/api/cash/handovers/incoming');
+    if (res.ok) count += ((await res.json()) || []).length;
+    setNavBadge('cash_approvals', count, '#dc3545');
+  } catch {}
 
   // Pre-orders: what is owed to a customer today, plus anything already late.
   // Every role sees it — a cashier who cannot see that three cakes are due

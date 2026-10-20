@@ -961,6 +961,185 @@ export function runMigrations(): void {
   // The admin who allowed a refund (the same admin when they did it
   // themselves). NULL for every refund before approval existed.
   addColumn("bills", "refund_approved_by", "INTEGER");
+
+  // --- Disposal requests -----------------------------------------------------
+  // A cashier reports waste ("3 fish buns dropped", "2 kg flour spoiled") and an
+  // admin approves or rejects it. Nothing here IS the disposal: approval writes
+  // the ordinary records an admin's own waste writes (product_disposals for a
+  // product, a 'waste' stock_transactions row for an ingredient), so reports and
+  // Stock History need no special case. This table is only the request and its
+  // decision. See src/routes/disposals.ts.
+  //
+  // item_name / unit are snapshots so a request still reads correctly if the
+  // item is renamed or deleted while it waits. business_date is the day the
+  // waste was REPORTED: the goods left the shelf then, so that is the day an
+  // approved loss is booked against, however late the approval comes.
+  //
+  // A pending request for a tracked product holds its quantity in
+  // stock_reservations under cart_id 'disposal-<id>', so the tills cannot sell
+  // stock that is already in the bin; approval and rejection both release it.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS disposal_requests (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      item_kind TEXT NOT NULL CHECK(item_kind IN ('product', 'ingredient')),
+      item_id INTEGER NOT NULL,
+      item_name TEXT NOT NULL,
+      unit TEXT NOT NULL DEFAULT '',
+      quantity REAL NOT NULL CHECK(quantity > 0),
+      reason TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'approved', 'rejected')),
+      business_date TEXT NOT NULL,
+      requested_by INTEGER REFERENCES users(id),
+      requested_at TEXT NOT NULL DEFAULT (datetime('now')),
+      decided_by INTEGER REFERENCES users(id),
+      decided_at TEXT,
+      reject_reason TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_disposal_requests_status ON disposal_requests(status, requested_at);
+  `);
+
+  // --- feature/drawer-accountability -----------------------------------------
+  // One person is accountable for the cash drawer at a time — the HOLDER. The
+  // opener holds it; a HANDOVER passes it on (the giver syncs the stock and
+  // counts the cash, the receiver counts and accepts); an admin can TAKE OVER
+  // a drawer whose holder is not there. Only the holder (or an admin) takes
+  // cash, closes the drawer or hands it over. When an admin approves a cash or
+  // stock SHORTAGE, they choose to charge it to the holder's PENDING ACCOUNT
+  // (cashier_ledger) or write it off. See src/services/accounts.ts and the
+  // handover routes in src/routes/cash.ts.
+  //
+  // holder_user_id on an 'open' cash_counts row: who holds that shift's drawer
+  // now. NULL = the opener (every shift opened before this existed).
+  addColumn("cash_counts", "holder_user_id", "INTEGER");
+  // On a 'close' row: what was charged to whom for that close's shortage.
+  addColumn("cash_counts", "charged_amount", "REAL");
+  addColumn("cash_counts", "charged_to", "INTEGER");
+  // A stock sync: who held the drawer when it was counted (who a shortage is
+  // charged to), and what the admin decided about the shortage.
+  addColumn("stock_syncs", "holder_user_id", "INTEGER");
+  addColumn("stock_syncs", "charge_amount", "REAL");
+  addColumn("stock_syncs", "charged_to", "INTEGER");
+  addColumn("stock_syncs", "write_off_note", "TEXT");
+  // Per line: what one unit is worth for charging (selling price for a product,
+  // cost per unit for a store-room item), copied at count time.
+  addColumn("stock_sync_lines", "unit_value", "REAL");
+  // A close request's approval carries the charge decision to the close.
+  addColumn("cash_close_requests", "charge_decision", "TEXT");
+  addColumn("cash_close_requests", "charge_note", "TEXT");
+  // The amount the admin chose to charge (null: the shortage as counted).
+  addColumn("cash_close_requests", "charge_amount", "REAL");
+  db.exec(`
+    -- A drawer passing from one person to another. kind 'handover': the giver
+    -- (from_user_id) counted the cash and synced the stock and asked to_user_id
+    -- to take it; 'takeover': an admin took it from an absent holder (answered
+    -- at once). status: pending (waiting for the receiver; cash payments pause),
+    -- awaiting_admin (the receiver's count was off by more than the limit),
+    -- accepted (the receiver holds the drawer; accepted_at is the new
+    -- baseline the close counts from), declined, cancelled.
+    -- variance = receiver_total - receiver_expected; a shortage is the giver's.
+    CREATE TABLE IF NOT EXISTS drawer_handovers (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      shift_open_id INTEGER NOT NULL REFERENCES cash_counts(id),
+      kind TEXT NOT NULL DEFAULT 'handover' CHECK(kind IN ('handover', 'takeover')),
+      from_user_id INTEGER REFERENCES users(id),
+      to_user_id INTEGER NOT NULL REFERENCES users(id),
+      status TEXT NOT NULL CHECK(status IN ('pending', 'awaiting_admin', 'accepted', 'declined', 'cancelled')),
+      giver_count_json TEXT,
+      giver_total REAL,
+      giver_expected REAL,
+      giver_notes TEXT,
+      stock_sync_id INTEGER REFERENCES stock_syncs(id),
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      receiver_count_json TEXT,
+      receiver_total REAL,
+      receiver_expected REAL,
+      variance REAL,
+      receiver_notes TEXT,
+      answered_at TEXT,
+      accepted_at TEXT,
+      decline_reason TEXT,
+      decided_by INTEGER REFERENCES users(id),
+      decided_at TEXT,
+      decision TEXT CHECK(decision IN ('charge', 'write_off')),
+      decision_note TEXT,
+      charge_amount REAL
+    );
+    CREATE INDEX IF NOT EXISTS idx_drawer_handovers_shift ON drawer_handovers(shift_open_id, id);
+    CREATE INDEX IF NOT EXISTS idx_drawer_handovers_to ON drawer_handovers(to_user_id, status);
+
+    -- A cashier's pending account. amount > 0 is owed to the shop (a charged
+    -- shortage, or a charge the admin added); amount < 0 reduces it (a payment
+    -- or a write-off the admin recorded). The balance is SUM(amount). Rows are
+    -- never edited or deleted: a mistake is put right with another row.
+    -- source_type / source_id point at what caused it ('close', 'stock_sync',
+    -- 'handover', 'manual').
+    CREATE TABLE IF NOT EXISTS cashier_ledger (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL REFERENCES users(id),
+      amount REAL NOT NULL,
+      kind TEXT NOT NULL CHECK(kind IN ('cash_short', 'stock_short', 'charge', 'payment', 'write_off')),
+      source_type TEXT NOT NULL DEFAULT 'manual',
+      source_id INTEGER,
+      note TEXT,
+      created_by INTEGER REFERENCES users(id),
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_cashier_ledger_user ON cashier_ledger(user_id, id);
+  `);
+
+  // --- feature/cash-collection -----------------------------------------------
+  // After a close, an admin takes cash out of the drawer (to the bank or the
+  // safe) and records it here against that close. The next opening should
+  // count exactly what was left: the close's count minus what was collected
+  // (the CARRIED amount). An opening that differs needs an admin, who charges
+  // a shortfall to the last holder or the opener, or writes it off.
+  db.exec(`
+    -- Cash taken out of the drawer after a close (close_id: that 'close'
+    -- cash_counts row). Only while no shift has opened since; voided (never
+    -- deleted) if recorded by mistake, before the next opening.
+    CREATE TABLE IF NOT EXISTS cash_collections (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      close_id INTEGER NOT NULL REFERENCES cash_counts(id),
+      amount REAL NOT NULL CHECK(amount > 0),
+      note TEXT,
+      user_id INTEGER REFERENCES users(id),
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      voided_by INTEGER REFERENCES users(id),
+      voided_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_cash_collections_close ON cash_collections(close_id);
+
+    -- An opening count that does not match what was carried, waiting on (or
+    -- decided by) an admin. Like cash_close_requests, for the opening.
+    -- charge_decision: 'charge' | 'write_off' (a shortfall only); charge_to: the
+    -- user charged.
+    CREATE TABLE IF NOT EXISTS cash_open_requests (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      prev_close_id INTEGER REFERENCES cash_counts(id),
+      user_id INTEGER NOT NULL REFERENCES users(id),
+      count_json TEXT NOT NULL,
+      total_amount REAL NOT NULL,
+      expected_amount REAL NOT NULL,
+      variance REAL NOT NULL,
+      notes TEXT,
+      status TEXT NOT NULL CHECK(status IN ('pending', 'approved', 'rejected', 'superseded', 'used')),
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      decided_by INTEGER REFERENCES users(id),
+      decided_at TEXT,
+      decision_note TEXT,
+      charge_decision TEXT,
+      charge_to INTEGER REFERENCES users(id),
+      charge_amount REAL,
+      charge_note TEXT,
+      used_open_id INTEGER REFERENCES cash_counts(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_cash_open_requests_close ON cash_open_requests(prev_close_id, id);
+  `);
+  // On an 'open' row: what was carried over from the last close (its count
+  // minus collections), and the opening's difference from it. NULL on shifts
+  // opened before this existed (and on the very first opening).
+  addColumn("cash_counts", "carried_amount", "REAL");
+  addColumn("cash_counts", "open_variance", "REAL");
 }
 
 export function seedDefaults(): void {
@@ -1002,6 +1181,9 @@ export function seedDefaults(): void {
     default_order_type: "takeaway",
     // Rs: a drawer closing more than this over OR short needs an admin's approval.
     cash_variance_limit: "200",
+    // 1: a cash shortage WITHIN the limit is charged to the holder too (no
+    // approval needed for it). 0 (default): the limit is a tolerance, not charged.
+    charge_small_shortages: "0",
   };
   for (const [key, value] of Object.entries(defaults)) {
     db.query("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)").run(key, value);

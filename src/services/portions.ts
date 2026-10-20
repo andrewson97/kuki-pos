@@ -133,7 +133,9 @@ function heldPortionsByOtherCarts(cartId?: string | null): Map<number, number> {
   const sql = `
     SELECT l.stock_item_id, COALESCE(SUM(r.quantity / l.servings_per_unit), 0) AS held
     FROM stock_reservations r JOIN product_ingredient_links l ON l.product_id = r.product_id
-    ${cart ? "WHERE r.cart_id != ?" : ""}
+    -- A waste report's hold ('disposal-<id>', src/routes/disposals.ts) is goods
+    -- already in the bin, not servings about to be made from an opened box.
+    WHERE r.cart_id NOT LIKE 'disposal-%' ${cart ? "AND r.cart_id != ?" : ""}
     GROUP BY l.stock_item_id`;
   const rows = (cart ? getDb().query(sql).all(cart) : getDb().query(sql).all()) as any[];
   return new Map(rows.map((r) => [Number(r.stock_item_id), Number(r.held) || 0]));

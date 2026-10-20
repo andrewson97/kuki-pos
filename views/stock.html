@@ -56,6 +56,18 @@
         <button class="btn btn-warning w-100" onclick="submitUsage(this)" id="usage-submit-btn" disabled>Confirm Usage</button>
       </div>
 
+      <!-- Disposal requests: a cashier reports waste, an admin approves it.
+           Filled by renderDisposals(); hidden when there is nothing to show. -->
+      <div class="table-container mb-4" id="disposal-panel" style="display:none;">
+        <div class="d-flex align-items-center justify-content-between px-3 pt-3 mb-2 flex-wrap gap-2">
+          <h6 class="fw-bold mb-0" style="color:#6b5a4a;">Disposal Requests <small class="text-muted fw-normal" id="disposal-subtitle"></small></h6>
+        </div>
+        <table class="table table-hover mb-0">
+          <thead><tr><th>Item</th><th>Qty</th><th>Reason</th><th>Reported</th><th>Status</th><th>Actions</th></tr></thead>
+          <tbody id="disposal-table"></tbody>
+        </table>
+      </div>
+
       <div class="table-container">
         <h6 class="px-3 pt-3 fw-bold mb-0" style="color:#6b5a4a;">Stock Items <small class="text-muted fw-normal">&mdash; ingredients, packing and anything else counted separately from your products</small></h6>
         <div class="px-3 pt-1 small text-muted" id="sync-help-items">Tick <strong>Daily sync</strong> for what has to be counted before the cash drawer closes &mdash; a whole group below (items added to it later are included), or single items. Only items with stock above 0 are asked for. The ticks are locked so they cannot be changed by accident: press <strong>&#128274; Edit daily sync</strong> (top right) to change them.</div>
@@ -96,6 +108,32 @@
           <thead><tr><th>Product</th><th>Qty Held</th><th>Cart</th><th>Cashier</th><th>Claimed By</th><th>Held For</th><th>Actions</th></tr></thead>
           <tbody id="held-stock-table"></tbody>
         </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- Report waste (disposal request) Modal -->
+  <div class="modal fade" id="disposalModal" tabindex="-1">
+    <div class="modal-dialog">
+      <div class="modal-content">
+        <div class="modal-header"><h5 class="modal-title">Report waste &mdash; <span id="dsp-name"></span></h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+        <div class="modal-body">
+          <input type="hidden" id="dsp-kind"><input type="hidden" id="dsp-id">
+          <p class="small text-muted mb-3">Thrown away, expired, damaged or dropped. An admin approves it before it comes off the stock count. Until then the quantity is set aside so it cannot be sold.</p>
+          <div class="mb-2 small">On hand: <strong id="dsp-onhand"></strong></div>
+          <div class="mb-3">
+            <label class="form-label">How many were thrown away?</label>
+            <div class="input-group">
+              <input type="number" class="form-control" id="dsp-qty" min="0" step="1">
+              <span class="input-group-text" id="dsp-unit"></span>
+            </div>
+          </div>
+          <div class="mb-1">
+            <label class="form-label">Reason (required)</label>
+            <input type="text" class="form-control" id="dsp-reason" maxlength="500" placeholder="e.g., expired, dropped, damaged">
+          </div>
+        </div>
+        <div class="modal-footer"><button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button><button class="btn btn-danger" onclick="submitDisposal(this)">Send for approval</button></div>
       </div>
     </div>
   </div>
@@ -242,13 +280,16 @@
     initApp('/stock', loadStock);
 
     async function loadStock() {
-      const [items, cats, allProducts, holds, groups] = await Promise.all([
+      const [items, cats, allProducts, holds, disposals, groups] = await Promise.all([
         api('/api/stock/items'),
         api('/api/stock/categories'),
         api('/api/products'),
         api('/api/pos/reservations'),
+        // An admin gets everyone's requests, a cashier only their own.
+        api('/api/disposals?limit=30'),
         api('/api/stock/daily-sync/groups').catch(() => []),
       ]);
+      disposalRequests = disposals;
       stockItems = items;
       categories = cats;
       syncGroups = groups;
@@ -265,6 +306,7 @@
       renderStock();
       renderTrackedProducts();
       renderHeldStock();
+      renderDisposals();
       document.getElementById('stock-search').addEventListener('input', () => { renderStock(); renderTrackedProducts(); });
       document.getElementById('stock-cat-filter').addEventListener('change', renderStock);
     }
@@ -311,10 +353,11 @@
           <td>${escapeHtml(p.category || '-')}</td>
           <td class="${out ? 'text-danger' : (low ? 'text-warning' : '')} fw-bold">${p.stock_quantity}</td>
           <td>${p.stock_reorder_level}</td>
-          <td>
+          <td>${currentUser.role === 'admin' ? `
             <button class="btn btn-sm btn-success" onclick="showAdjust(${p.id}, 'received')">Add</button>
             <button class="btn btn-sm btn-outline-danger" onclick="showAdjust(${p.id}, 'waste')" title="Dispose expired or damaged">Dispose</button>
-            <button class="btn btn-sm btn-outline-primary" onclick="showAdjust(${p.id}, 'count')">Count</button>
+            <button class="btn btn-sm btn-outline-primary" onclick="showAdjust(${p.id}, 'count')">Count</button>`
+            : `<button class="btn btn-sm btn-outline-danger" onclick="showDisposalRequest('product', ${p.id})">Report waste</button>`}
           </td>
         </tr>`;
       }).join('');
@@ -322,6 +365,115 @@
 
     function escapeHtml(s) {
       return String(s == null ? '' : s).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+    }
+
+    // ===== Disposal requests =====
+    // A cashier reports waste here and an admin approves or rejects it
+    // (src/routes/disposals.ts). Pending requests hold their product stock so
+    // it cannot be sold meanwhile; approval writes the same records an admin's
+    // own Dispose writes, so reports and Stock History need nothing special.
+    let disposalRequests = [];
+
+    const fmtQty = n => String(+Number(n).toFixed(3));
+
+    function renderDisposals() {
+      const panel = document.getElementById('disposal-panel');
+      const tbody = document.getElementById('disposal-table');
+      const isAdmin = currentUser.role === 'admin';
+      const pending = disposalRequests.filter(r => r.status === 'pending');
+      // Admin: every pending request, then the latest decisions for context.
+      // Cashier: their own requests, newest first, so they see what happened.
+      const rows = isAdmin
+        ? pending.concat(disposalRequests.filter(r => r.status !== 'pending').slice(0, 10))
+        : disposalRequests.slice(0, 15);
+      if (!rows.length) { panel.style.display = 'none'; return; }
+      panel.style.display = 'block';
+      document.getElementById('disposal-subtitle').innerHTML = isAdmin
+        ? (pending.length
+            ? `&mdash; <span class="text-danger fw-bold">${pending.length} waiting for your approval</span>; the stock stays set aside until you decide`
+            : '&mdash; nothing waiting; recent decisions below')
+        : '&mdash; waste you reported; an admin approves it before it comes off the count';
+      tbody.innerHTML = rows.map(r => {
+        const unit = r.unit && r.unit !== 'pcs' ? ` ${escapeHtml(r.unit)}` : '';
+        const kind = r.item_kind === 'ingredient' ? 'Ingredient' : 'Product';
+        const badge = r.status === 'pending'
+          ? '<span class="badge bg-warning text-dark">Waiting</span>'
+          : r.status === 'approved'
+            ? '<span class="badge bg-success">Approved</span>'
+            : '<span class="badge bg-secondary">Rejected</span>';
+        const decided = r.status !== 'pending' && r.decided_by_name
+          ? `<small class="d-block text-muted">by ${escapeHtml(r.decided_by_name)}</small>` : '';
+        const why = r.status === 'rejected' && r.reject_reason
+          ? `<small class="d-block text-muted">"${escapeHtml(r.reject_reason)}"</small>` : '';
+        const actions = isAdmin && r.status === 'pending'
+          ? `<button class="btn btn-sm btn-success" onclick="approveDisposal(${r.id}, this)">Approve</button>
+             <button class="btn btn-sm btn-outline-secondary" onclick="rejectDisposal(${r.id}, this)">Reject</button>`
+          : '';
+        return `<tr class="${r.status === 'pending' ? 'table-warning' : ''}">
+          <td class="fw-bold">${escapeHtml(r.item_name)} <span class="badge bg-light text-dark border">${kind}</span></td>
+          <td class="fw-bold">${fmtQty(r.quantity)}${unit}</td>
+          <td>${escapeHtml(r.reason)}</td>
+          <td>${escapeHtml(r.requested_by_name || '-')}<small class="d-block text-muted">${escapeHtml(formatDateTime(r.requested_at))}</small></td>
+          <td>${badge}${decided}${why}</td>
+          <td>${actions}</td>
+        </tr>`;
+      }).join('');
+    }
+
+    function showDisposalRequest(kind, id) {
+      const item = kind === 'product' ? trackedProducts.find(p => p.id === id) : stockItems.find(i => i.id === id);
+      if (!item) return;
+      const unit = kind === 'product' ? 'pcs' : (item.unit || '');
+      document.getElementById('dsp-kind').value = kind;
+      document.getElementById('dsp-id').value = id;
+      document.getElementById('dsp-name').textContent = item.name;
+      document.getElementById('dsp-onhand').textContent = `${fmtQty(kind === 'product' ? item.stock_quantity || 0 : item.quantity || 0)} ${unit}`;
+      document.getElementById('dsp-unit').textContent = unit;
+      // Products go out in whole units; ingredients may be 2.5 kg.
+      document.getElementById('dsp-qty').step = kind === 'product' ? '1' : 'any';
+      document.getElementById('dsp-qty').value = '';
+      document.getElementById('dsp-reason').value = '';
+      new bootstrap.Modal(document.getElementById('disposalModal')).show();
+    }
+
+    async function submitDisposal(btn) {
+      const kind = document.getElementById('dsp-kind').value;
+      const id = Number(document.getElementById('dsp-id').value);
+      const raw = document.getElementById('dsp-qty').value;
+      const reason = document.getElementById('dsp-reason').value.trim();
+      await withBusy(btn, async () => {
+        const qty = parseFloat(raw);
+        if (raw === '' || !Number.isFinite(qty) || qty <= 0) throw new Error('Enter how many were thrown away');
+        if (!reason) throw new Error('Enter a reason');
+        const r = await api('/api/disposals', { method: 'POST', body: { item_kind: kind, item_id: id, quantity: qty, reason } });
+        bootstrap.Modal.getInstance(document.getElementById('disposalModal')).hide();
+        showToast(r.request && r.request.status === 'approved'
+          ? 'Disposed of and recorded.'
+          : 'Sent for approval. The stock is set aside until an admin decides.');
+        await loadStock();
+      }, 'Sending...');
+    }
+
+    async function approveDisposal(id, btn) {
+      const r = disposalRequests.find(x => x.id === id);
+      if (!r) return;
+      const unit = r.unit && r.unit !== 'pcs' ? ` ${r.unit}` : '';
+      if (!confirm(`Approve: ${fmtQty(r.quantity)}${unit} of ${r.item_name} thrown away (${r.reason})?\n\nIt comes off the stock count and is recorded as a loss.`)) return;
+      await withBusy(btn, async () => {
+        await api(`/api/disposals/${id}/approve`, { method: 'POST', body: {} });
+        showToast('Disposal approved.');
+        await loadStock();
+      }, '...');
+    }
+
+    async function rejectDisposal(id, btn) {
+      const why = prompt('Reject this disposal? The stock goes back on sale.\n\nReason for the cashier (optional):', '');
+      if (why === null) return;
+      await withBusy(btn, async () => {
+        await api(`/api/disposals/${id}/reject`, { method: 'POST', body: { reason: why } });
+        showToast('Disposal rejected; the stock is back on sale.');
+        await loadStock();
+      }, '...');
     }
 
     // ===== Adjust stock (tracked products) =====
@@ -447,6 +599,7 @@
           <td>${i.expiry_date || '-'}</td>
           <td>
             <button class="btn btn-sm btn-outline-success" onclick="showTransaction(${i.id})">+/-</button>
+            ${currentUser.role !== 'admin' ? `<button class="btn btn-sm btn-outline-danger" onclick="showDisposalRequest('ingredient', ${i.id})">Report waste</button>` : ''}
             <button class="btn btn-sm btn-outline-primary" onclick="editItem(${i.id})">Edit</button>
             ${currentUser.role === 'admin' ? `<button class="btn btn-sm btn-outline-danger" onclick="deleteStockItem(${i.id}, this)">Delete</button>` : ''}
           </td>
@@ -965,7 +1118,9 @@
       return {
         // Anything that is not 'active' is shown as parked: the cautious
         // reading, because a parked cart is the one it would hurt to release.
-        kind: c.state === 'active' ? 'active' : 'parked',
+        // 'disposal' is a pending disposal request holding binned stock; it is
+        // decided by approving or rejecting the request, never by releasing.
+        kind: c.state === 'active' ? 'active' : c.state === 'disposal' ? 'disposal' : 'parked',
         till: c.till_label || c.till_id || 'unnamed till',
         who: c.user_name || '',
         seenText: unknown ? 'check-in time unknown' : (mins < 1 ? 'checked in just now' : `checked in ${gap} ago`),
@@ -988,6 +1143,8 @@
       const old = age.hours >= HOLD_STALE_HOURS;
       if (claim.kind === 'unsupported') return old ? 2 : 0;
       if (claim.kind === 'unclaimed') return old ? 2 : 1;
+      // Waiting on an admin's decision, not on a till: never flagged as stale.
+      if (claim.kind === 'disposal') return 0;
       return claim.seenStale ? 1 : 0;
     }
 
@@ -998,6 +1155,11 @@
       if (claim.kind === 'unclaimed') {
         return '<span class="badge bg-danger">No till reporting</span>'
           + '<small class="d-block text-muted mt-1">Check the tills before releasing &mdash; a till that is switched off still holds its parked orders.</small>';
+      }
+      if (claim.kind === 'disposal') {
+        return '<span class="badge bg-warning text-dark">Waiting for disposal approval</span>'
+          + (claim.label ? ` <span class="fw-semibold">&middot; ${escapeHtml(claim.label)}</span>` : '')
+          + (claim.who ? `<small class="d-block text-muted mt-1">reported by ${escapeHtml(claim.who)}</small>` : '');
       }
       const badge = claim.kind === 'active'
         ? '<span class="badge bg-success">Cart open</span>'
@@ -1063,7 +1225,9 @@
           <td>${escapeHtml(h.cashier_name || '-')}</td>
           <td>${claimCell(claim)}</td>
           <td class="${sev === 2 ? 'text-danger fw-bold' : ''}" title="${escapeHtml(when)}">held ${escapeHtml(age.text)}<br><small class="text-muted fw-normal">${escapeHtml(when)}</small></td>
-          <td>${isAdmin
+          <td>${claim.kind === 'disposal'
+            ? '<small class="text-muted">Approve or reject the disposal request</small>'
+            : isAdmin
             ? `<button class="btn btn-sm btn-outline-danger" onclick="releaseStockHold(${h.id}, this)">Release</button>`
             : '<small class="text-muted">Admin only</small>'}</td>
         </tr>`;
