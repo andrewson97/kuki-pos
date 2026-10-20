@@ -4,6 +4,7 @@ import { adminOnly, getUser } from "../middleware/auth";
 import { todayDate } from "../utils/helpers";
 import { heldByOtherCartsMap } from "../services/reservations";
 import { MAX_SERVINGS_PER_UNIT, productPortionStatus } from "../services/portions";
+import { PRODUCT_IN_SYNC } from "../services/closing";
 
 const products = new Hono();
 
@@ -140,7 +141,9 @@ products.get("/", (c) => {
     : includeDiscontinued
       ? ""
       : "WHERE is_discontinued = 0";
-  const all = db.query(`SELECT * FROM products ${where} ORDER BY name`).all() as any[];
+  // in_daily_sync: whether the closing stock sync counts it — its own tick or
+  // its group's (PRODUCT_IN_SYNC), for the Stock page and the product form.
+  const all = db.query(`SELECT p.*, ${PRODUCT_IN_SYNC} AS in_daily_sync FROM products p ${where} ORDER BY name`).all() as any[];
   return c.json(attachStockLinks(attachComponents(all)));
 });
 
@@ -283,7 +286,8 @@ products.post("/", adminOnly, async (c) => {
       "INSERT INTO products (name, category, cost_price, selling_price, discount_price, is_active, track_stock, stock_quantity, stock_reorder_level, stock_updated_at, daily_sync) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?)"
     ).run(cleanName, cat, cost_price || 0, selling_price, dp, is_active ?? 1, ts, opening, ts ? (stock_reorder_level || 0) : 0,
       // Counted in the closing stock sync: only a tracked product has a count.
-      ts && body.daily_sync ? 1 : 0);
+      // Ticked: always counted. Otherwise NULL — it follows its groups.
+      ts && body.daily_sync ? 1 : null);
     id = Number(result.lastInsertRowid);
     saveComponents(id, components);
     saveStockLinks(id, links);
@@ -576,7 +580,7 @@ products.put("/:id", adminOnly, async (c) => {
       "UPDATE products SET name = ?, category = ?, cost_price = ?, selling_price = ?, discount_price = ?, is_active = ?, track_stock = ?, stock_reorder_level = COALESCE(?, stock_reorder_level), " +
         // daily_sync: off with tracking (an untracked product has no count);
         // absent from the body (the mobile form) keeps what is stored.
-        "daily_sync = CASE WHEN ? = 0 THEN 0 ELSE COALESCE(?, daily_sync) END WHERE id = ?"
+        "daily_sync = CASE WHEN ? = 0 THEN NULL ELSE COALESCE(?, daily_sync) END WHERE id = ?"
     ).run(cleanName, cat, cost_price || 0, selling_price, dp, active, ts, reorder, ts,
       body.daily_sync === undefined || body.daily_sync === null ? null : (body.daily_sync ? 1 : 0), id);
     saveComponents(parseInt(id), components);

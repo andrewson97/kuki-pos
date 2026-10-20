@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { getDb } from "../db/database";
 import { adminOnly, getUser } from "../middleware/auth";
 import { PortionError, finishStockUnit, listPortionIngredients, openStockUnit, undoOpenStockUnit } from "../services/portions";
+import { ITEM_IN_SYNC } from "../services/closing";
 
 const stock = new Hono();
 
@@ -21,8 +22,10 @@ stock.post("/categories", adminOnly, async (c) => {
 // Stock Items
 stock.get("/items", (c) => {
   const db = getDb();
+  // in_daily_sync: whether the closing stock sync counts it — its own tick or
+  // its category's (ITEM_IN_SYNC).
   const items = db.query(`
-    SELECT si.*, sc.name as category_name
+    SELECT si.*, sc.name as category_name, ${ITEM_IN_SYNC} AS in_daily_sync
     FROM stock_items si
     LEFT JOIN stock_categories sc ON si.category_id = sc.id
     ORDER BY si.name
@@ -50,7 +53,10 @@ stock.post("/items", adminOnly, async (c) => {
   // daily_sync: counted in the closing stock sync. Unticked unless asked for.
   const result = db.query(
     "INSERT INTO stock_items (name, category_id, unit, quantity, reorder_level, cost_per_unit, expiry_date, daily_sync) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
-  ).run(name, category_id, unit || "pcs", quantity || 0, reorder_level || 0, cost_per_unit || 0, expiry_date || null, daily_sync ? 1 : 0);
+  ).run(name, category_id, unit || "pcs", quantity || 0, reorder_level || 0, cost_per_unit || 0, expiry_date || null,
+    // Ticked in the form: always counted. Otherwise NULL — it follows its
+    // category's group tick, so an item added to a ticked group is counted.
+    daily_sync ? 1 : null);
 
   const itemId = Number(result.lastInsertRowid);
 
@@ -382,10 +388,10 @@ stock.post("/daily-sync", adminOnly, async (c) => {
           const p = db.query("SELECT name, track_stock FROM products WHERE id = ?").get(id) as any;
           if (!p) throw new TxnError("Product not found", 404);
           if (on && !p.track_stock) throw new TxnError(`${p.name} does not track its stock, so it cannot be counted. Turn tracking on first.`);
-          n += Number(db.query("UPDATE products SET daily_sync = ? WHERE id = ? AND daily_sync != ?").run(on, id, on).changes || 0);
+          n += Number(db.query("UPDATE products SET daily_sync = ? WHERE id = ? AND daily_sync IS NOT ?").run(on, id, on).changes || 0);
         } else if (it?.kind === "ingredient") {
           if (!db.query("SELECT 1 FROM stock_items WHERE id = ?").get(id)) throw new TxnError("Stock item not found", 404);
-          n += Number(db.query("UPDATE stock_items SET daily_sync = ? WHERE id = ? AND daily_sync != ?").run(on, id, on).changes || 0);
+          n += Number(db.query("UPDATE stock_items SET daily_sync = ? WHERE id = ? AND daily_sync IS NOT ?").run(on, id, on).changes || 0);
         } else {
           throw new TxnError("kind must be product or ingredient");
         }
@@ -406,6 +412,60 @@ stock.post("/daily-sync", adminOnly, async (c) => {
     if (err instanceof TxnError) return c.json({ error: err.message }, err.status);
     throw err;
   }
+});
+
+// --- Daily stock sync: whole groups ------------------------------------------
+// A ticked group is a standing rule: everything in it now, and anything added
+// to it later, is counted in the closing stock sync. Groups: a stock category
+// ('stock_category', key = its id), a product category ('product_category',
+// key = its name, any casing) or every tracked product ('all_products').
+//
+// Ticking or unticking a group puts every item in it back on "follow the
+// group" (daily_sync NULL), so the group's tick is what the admin then sees on
+// every row; single items can be left out (or in) again afterwards.
+stock.get("/daily-sync/groups", (c) => {
+  return c.json(getDb().query("SELECT group_type, group_key FROM daily_sync_groups ORDER BY group_type, group_key").all());
+});
+
+stock.post("/daily-sync/groups", adminOnly, async (c) => {
+  const body = await c.req.json().catch(() => ({} as any));
+  const type = String(body.group_type || "");
+  const on = body.on === true || body.on === 1;
+  const db = getDb();
+  let key = "";
+  if (type === "stock_category") {
+    const id = Number(body.group_key);
+    if (!Number.isInteger(id) || !db.query("SELECT 1 FROM stock_categories WHERE id = ?").get(id)) {
+      return c.json({ error: "That stock category was not found" }, 404);
+    }
+    key = String(id);
+  } else if (type === "product_category") {
+    key = String(body.group_key ?? "").trim();
+    if (!key) return c.json({ error: "Say which product category" }, 400);
+  } else if (type !== "all_products") {
+    return c.json({ error: "group_type must be stock_category, product_category or all_products" }, 400);
+  }
+  const user = getUser(c)!;
+  const reset = db.transaction(() => {
+    if (on) {
+      db.query("INSERT OR IGNORE INTO daily_sync_groups (group_type, group_key, user_id) VALUES (?, ?, ?)").run(type, key, user.id);
+    } else {
+      // A product category is matched without regard to case, so its rows go
+      // the same way.
+      db.query("DELETE FROM daily_sync_groups WHERE group_type = ? AND LOWER(group_key) = LOWER(?)").run(type, key);
+    }
+    // Everyone in the group follows it from now on.
+    const r = type === "stock_category"
+      ? db.query("UPDATE stock_items SET daily_sync = NULL WHERE category_id = ? AND daily_sync IS NOT NULL").run(Number(key))
+      : type === "product_category"
+        ? db.query("UPDATE products SET daily_sync = NULL WHERE LOWER(category) = LOWER(?) AND daily_sync IS NOT NULL").run(key)
+        : db.query("UPDATE products SET daily_sync = NULL WHERE daily_sync IS NOT NULL").run();
+    db.query("INSERT INTO activity_log (user_id, action, details) VALUES (?, 'daily_sync_group', ?)").run(
+      user.id, JSON.stringify({ group_type: type, group_key: key, on, items_reset: Number(r.changes || 0) })
+    );
+    return Number(r.changes || 0);
+  }).immediate();
+  return c.json({ success: true, group_type: type, group_key: key, on, items_reset: reset });
 });
 
 // Alerts

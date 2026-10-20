@@ -887,13 +887,31 @@ export function runMigrations(): void {
   addColumn("cash_counts", "stock_sync_id", "INTEGER");
 
   // --- feature/daily-sync-selection ------------------------------------------
-  // Which items the closing stock sync asks to be counted: the admin ticks them
-  // on the Stock page (or in the product / stock item form). Only ticked items
-  // with stock above 0 are listed (listSyncItems). The owner chose to start
-  // with NOTHING ticked — existing rows and new ones alike default to 0 — so
-  // until something is ticked the sync is a one-tap empty count.
-  addColumn("products", "daily_sync", "INTEGER NOT NULL DEFAULT 0");
-  addColumn("stock_items", "daily_sync", "INTEGER NOT NULL DEFAULT 0");
+  // Which items the closing stock sync asks to be counted (listSyncItems):
+  // only those "in the daily sync" with stock above 0. Two levels, both set by
+  // an admin on the Stock page:
+  //   * GROUPS (daily_sync_groups): a whole stock category, a whole product
+  //     category, or every tracked product. A standing rule — an item added to
+  //     a ticked group later is counted too.
+  //   * the ITEM's own choice (daily_sync): NULL = follow its groups, 1 = always
+  //     counted, 0 = never (e.g. one item left out of a ticked group).
+  // The owner chose to start with nothing counted: every item NULL and no group
+  // ticked. See PRODUCT_IN_SYNC / ITEM_IN_SYNC in src/services/closing.ts.
+  addColumn("products", "daily_sync", "INTEGER");
+  addColumn("stock_items", "daily_sync", "INTEGER");
+  db.exec(`
+    -- A ticked group. group_type: 'stock_category' (group_key = the
+    -- stock_categories id, as text), 'product_category' (group_key = the
+    -- product category name; matched without regard to case, like the
+    -- category merge in this file), 'all_products' (group_key '').
+    CREATE TABLE IF NOT EXISTS daily_sync_groups (
+      group_type TEXT NOT NULL CHECK(group_type IN ('stock_category', 'product_category', 'all_products')),
+      group_key TEXT NOT NULL DEFAULT '',
+      user_id INTEGER REFERENCES users(id),
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (group_type, group_key)
+    );
+  `);
 }
 
 export function seedDefaults(): void {

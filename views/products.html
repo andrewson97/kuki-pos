@@ -713,7 +713,9 @@
       document.getElementById('product-active').checked = true;
       document.getElementById('product-margin').innerHTML = '';
       document.getElementById('product-track-stock').checked = false;
-      document.getElementById('product-daily-sync').checked = false; // new products start unticked
+      // New products follow their groups unless ticked here.
+      document.getElementById('product-daily-sync').checked = false;
+      document.getElementById('product-daily-sync').dataset.orig = '';
       document.getElementById('product-qty').value = 0;
       document.getElementById('product-reorder').value = 0;
       syncStockFields();
@@ -739,7 +741,9 @@
       document.getElementById('product-discount').value = p.discount_price || '';
       document.getElementById('product-active').checked = !!p.is_active;
       document.getElementById('product-track-stock').checked = !!p.track_stock;
-      document.getElementById('product-daily-sync').checked = !!p.daily_sync;
+      // What the sync does (its own tick or its group's); saved only if changed.
+      document.getElementById('product-daily-sync').checked = !!p.in_daily_sync;
+      document.getElementById('product-daily-sync').dataset.orig = p.in_daily_sync ? '1' : '0';
       document.getElementById('product-onhand').textContent = p.stock_quantity || 0;
       document.getElementById('product-reorder').value = p.stock_reorder_level || 0;
       syncStockFields();
@@ -767,7 +771,13 @@
         is_active: document.getElementById('product-active').checked ? 1 : 0,
         track_stock: document.getElementById('product-track-stock').checked ? 1 : 0,
         // Only meaningful with tracking on (the server clears it otherwise).
-        daily_sync: document.getElementById('product-track-stock').checked && document.getElementById('product-daily-sync').checked ? 1 : 0,
+        // Only a change is sent; left alone it keeps following its groups.
+        daily_sync: (() => {
+          const box = document.getElementById('product-daily-sync');
+          if (!document.getElementById('product-track-stock').checked) return undefined; // the server clears it
+          if (box.dataset.orig === '') return box.checked ? 1 : undefined;
+          return (box.checked ? '1' : '0') === box.dataset.orig ? undefined : (box.checked ? 1 : 0);
+        })(),
         stock_reorder_level: parseFloat(document.getElementById('product-reorder').value) || 0,
         components: currentComponents.filter(c => c.component_product_id && c.quantity > 0),
         // Sent whole: they replace what is stored. A row edited to 0 is sent

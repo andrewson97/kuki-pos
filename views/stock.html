@@ -55,7 +55,8 @@
 
       <div class="table-container">
         <h6 class="px-3 pt-3 fw-bold mb-0" style="color:#6b5a4a;">Stock Items <small class="text-muted fw-normal">&mdash; ingredients, packing and anything else counted separately from your products</small></h6>
-        <div class="px-3 pt-1 small text-muted" id="sync-help-items">Tick <strong>Daily sync</strong> for what has to be counted before the cash drawer closes. Only ticked items with stock above 0 are asked for.</div>
+        <div class="px-3 pt-1 small text-muted" id="sync-help-items">Tick <strong>Daily sync</strong> for what has to be counted before the cash drawer closes &mdash; a whole group below (items added to it later are included), or single items. Only items with stock above 0 are asked for.</div>
+        <div class="px-3 pt-2" id="sync-groups-items"></div>
         <table class="table table-hover mb-0">
           <thead><tr><th style="width:90px;" title="Counted in the daily stock sync at closing"><input type="checkbox" class="form-check-input me-1" id="sync-all-items" onchange="tickAllShown('ingredient', this)" title="Tick / untick every item shown"> Daily sync</th><th>Name</th><th>Category</th><th>Quantity</th><th>Unit</th><th>Cost/Unit</th><th>Reorder Level</th><th>Expiry</th><th>Actions</th></tr></thead>
           <tbody id="stock-table"></tbody>
@@ -70,6 +71,7 @@
             <option value="">All product categories</option>
           </select>
         </div>
+        <div class="px-3 pb-1" id="sync-groups-products"></div>
         <table class="table table-hover mb-0">
           <thead><tr><th style="width:90px;" title="Counted in the daily stock sync at closing"><input type="checkbox" class="form-check-input me-1" id="sync-all-products" onchange="tickAllShown('product', this)" title="Tick / untick every product shown"> Daily sync</th><th>Product</th><th>Category</th><th>On Hand</th><th>Reorder Level</th><th>Actions</th></tr></thead>
           <tbody id="tracked-products-table"></tbody>
@@ -237,14 +239,16 @@
     initApp('/stock', loadStock);
 
     async function loadStock() {
-      const [items, cats, allProducts, holds] = await Promise.all([
+      const [items, cats, allProducts, holds, groups] = await Promise.all([
         api('/api/stock/items'),
         api('/api/stock/categories'),
         api('/api/products'),
         api('/api/pos/reservations'),
+        api('/api/stock/daily-sync/groups').catch(() => []),
       ]);
       stockItems = items;
       categories = cats;
+      syncGroups = groups;
       // Inactive ones too (marked): off the menu today is still on the shelf, the
       // daily stock sync still counts it when ticked, and it can only be seen
       // and unticked here. Discontinued products never come back from /api/products.
@@ -253,6 +257,7 @@
       await loadUnreportedPreview();
       renderCategoryOptions();
       renderProductCategoryOptions();
+      renderSyncGroups();
       renderStock();
       renderTrackedProducts();
       renderHeldStock();
@@ -446,35 +451,81 @@
     }
 
     // ===== Daily stock sync selection =====
-    // The "Daily sync" ticks decide what the closing stock sync (Cash Drawer →
-    // Step 1) asks to be counted: ticked items with stock above 0. Admins
-    // change them; anyone else sees them read-only. Saved the moment a box
-    // changes, through POST /api/stock/daily-sync.
-    let shownItems = [], shownProducts = [];
+    // What the closing stock sync (Cash Drawer → Step 1) asks to be counted:
+    // items "in the daily sync" with stock above 0. Two levels:
+    //   * GROUPS (the bars above each table): a whole stock category, a product
+    //     category, or every finished product. A standing rule — an item added
+    //     to a ticked group later is counted too.
+    //   * each ROW's own box: ticks or leaves out that one item, whatever its
+    //     group says. Ticking or unticking a group puts every row in it back on
+    //     the group's choice.
+    // A row shows in_daily_sync (the server's answer: its own choice, else its
+    // groups'). Admins change them; anyone else sees them read-only.
+    let shownItems = [], shownProducts = [], syncGroups = [];
     const canEditSync = () => !!(currentUser && currentUser.role === 'admin');
 
+    const groupOn = (type, key) => syncGroups.some(g => g.group_type === type &&
+      (type === 'product_category' ? String(g.group_key).toLowerCase() === String(key || '').toLowerCase() : String(g.group_key) === String(key ?? '')));
+    // Is the row's group ticked? (Products: every product, or its category.)
+    const rowGroupOn = (kind, row) => kind === 'product'
+      ? groupOn('all_products', '') || groupOn('product_category', row.category)
+      : groupOn('stock_category', row.category_id);
+
     function syncBox(kind, row) {
-      return `<input type="checkbox" class="form-check-input" ${row.daily_sync ? 'checked' : ''} ${canEditSync() ? '' : 'disabled'}
+      const on = !!row.in_daily_sync;
+      // Why it reads the way it does, when its own choice differs from or
+      // stands in for its group's: said beside the box.
+      const viaGroup = row.daily_sync == null && on;
+      const leftOut = row.daily_sync === 0 && rowGroupOn(kind, row);
+      const note = viaGroup ? '<small class="text-muted ms-1">group</small>' : leftOut ? '<small class="text-danger ms-1">left out</small>' : '';
+      return `<input type="checkbox" class="form-check-input" ${on ? 'checked' : ''} ${canEditSync() ? '' : 'disabled'}
         onchange="setDailySync([{ kind: '${kind}', id: ${Number(row.id)}, on: this.checked }])"
-        title="${row.daily_sync ? 'Counted' : 'Not counted'} in the daily stock sync" aria-label="Daily sync: ${escapeHtml(row.name)}">`;
+        title="${on ? 'Counted' : 'Not counted'} in the daily stock sync${viaGroup ? ' (by its group)' : ''}" aria-label="Daily sync: ${escapeHtml(row.name)}">${note}`;
     }
 
     // The header box: ticked when every row shown is, half-ticked when some are.
     function syncHeaderBox(id, rows) {
       const box = document.getElementById(id);
       if (!box) return;
-      const on = rows.filter(r => r.daily_sync).length;
+      const on = rows.filter(r => r.in_daily_sync).length;
       box.checked = rows.length > 0 && on === rows.length;
       box.indeterminate = on > 0 && on < rows.length;
       box.disabled = !canEditSync() || !rows.length;
     }
 
-    // Tick or untick every row the filters show (not the hidden ones).
+    // Tick or untick every row the filters show (not the hidden ones), as each
+    // row's own choice.
     function tickAllShown(kind, box) {
       const rows = kind === 'product' ? shownProducts : shownItems;
-      const items = rows.filter(r => !!r.daily_sync !== box.checked).map(r => ({ kind, id: r.id, on: box.checked }));
+      const items = rows.filter(r => !!r.in_daily_sync !== box.checked || r.daily_sync == null).map(r => ({ kind, id: r.id, on: box.checked }));
       if (!items.length) return;
       setDailySync(items);
+    }
+
+    // The group bars. Stock categories above the stock items; every finished
+    // product and each product category above the products.
+    function renderSyncGroups() {
+      const dis = canEditSync() ? '' : 'disabled';
+      const chip = (type, key, label) => {
+        const on = groupOn(type, key);
+        return `<label class="btn btn-sm ${on ? 'btn-success' : 'btn-outline-secondary'} mb-1 me-1" style="cursor:${canEditSync() ? 'pointer' : 'default'};">
+          <input type="checkbox" class="form-check-input me-1" ${on ? 'checked' : ''} ${dis}
+            onchange="setSyncGroup('${type}', ${JSON.stringify(String(key ?? '')).replace(/"/g, '&quot;')}, this.checked)">${escapeHtml(label)}</label>`;
+      };
+      document.getElementById('sync-groups-items').innerHTML =
+        `<span class="small text-muted me-2">Count whole groups:</span>` + categories.map(c => chip('stock_category', c.id, c.name)).join('');
+      const productCats = sortCategories([...new Set(trackedProducts.map(p => p.category).filter(Boolean))]);
+      document.getElementById('sync-groups-products').innerHTML =
+        `<span class="small text-muted me-2">Count whole groups:</span>` + chip('all_products', '', 'All finished products') + productCats.map(c => chip('product_category', c, c)).join('');
+    }
+
+    async function setSyncGroup(type, key, on) {
+      try {
+        await api('/api/stock/daily-sync/groups', { method: 'POST', body: { group_type: type, group_key: key, on } });
+      } catch (err) {
+        showToast(escapeHtml((err && err.message) || 'Could not save'), 'error');
+      }
+      await refreshSyncData();
     }
 
     async function setDailySync(items) {
@@ -482,17 +533,26 @@
         await api('/api/stock/daily-sync', { method: 'POST', body: { items } });
       } catch (err) {
         showToast(escapeHtml((err && err.message) || 'Could not save'), 'error');
-        renderStock(); renderTrackedProducts(); // put the boxes back as stored
-        return;
       }
-      for (const it of items) {
-        const list = it.kind === 'product' ? trackedProducts : stockItems;
-        const row = list.find(r => r.id === it.id);
-        if (row) row.daily_sync = it.on ? 1 : 0;
-      }
+      // Re-read either way: a row's tick depends on its groups as well, so the
+      // server's answer is what the boxes show (and, after an error, the old one).
+      await refreshSyncData();
+    }
+
+    // Fresh items, products and groups — the ticks only, not the whole page.
+    async function refreshSyncData() {
+      try {
+        const [items, allProducts, groups] = await Promise.all([
+          api('/api/stock/items'), api('/api/products'), api('/api/stock/daily-sync/groups'),
+        ]);
+        stockItems = items;
+        trackedProducts = allProducts.filter(p => p.track_stock);
+        syncGroups = groups;
+      } catch {}
+      renderSyncGroups();
       renderStock();
       renderTrackedProducts();
-      const total = stockItems.filter(r => r.daily_sync).length + trackedProducts.filter(r => r.daily_sync).length;
+      const total = stockItems.filter(r => r.in_daily_sync).length + trackedProducts.filter(r => r.in_daily_sync).length;
       showToast(`Saved — ${total} item${total === 1 ? '' : 's'} in the daily stock sync`);
     }
 
@@ -531,7 +591,9 @@
       document.getElementById('stock-cost').value = '0';
       document.getElementById('stock-reorder').value = '0';
       document.getElementById('stock-expiry').value = '';
-      document.getElementById('stock-daily-sync').checked = false; // new items start unticked
+      // New items follow their category's group unless ticked here.
+      document.getElementById('stock-daily-sync').checked = false;
+      document.getElementById('stock-daily-sync').dataset.orig = '';
       document.getElementById('stock-qty').disabled = false;
       new bootstrap.Modal(document.getElementById('stockModal')).show();
     }
@@ -548,8 +610,19 @@
       document.getElementById('stock-cost').value = i.cost_per_unit;
       document.getElementById('stock-reorder').value = i.reorder_level;
       document.getElementById('stock-expiry').value = i.expiry_date || '';
-      document.getElementById('stock-daily-sync').checked = !!i.daily_sync;
+      // Shows what the sync does (its own tick or its group's); saved only if changed.
+      document.getElementById('stock-daily-sync').checked = !!i.in_daily_sync;
+      document.getElementById('stock-daily-sync').dataset.orig = i.in_daily_sync ? '1' : '0';
       new bootstrap.Modal(document.getElementById('stockModal')).show();
+    }
+
+    // The form's Daily sync box as the server should get it: only a change is
+    // sent (left alone, the item keeps following its group). On a new item an
+    // unticked box sends nothing for the same reason.
+    function formSyncValue(box) {
+      const now = box.checked ? '1' : '0';
+      if (box.dataset.orig === '') return box.checked ? 1 : undefined;
+      return now === box.dataset.orig ? undefined : Number(now);
     }
 
     async function saveStockItem(btn) {
@@ -561,7 +634,7 @@
         cost_per_unit: parseFloat(document.getElementById('stock-cost').value) || 0,
         reorder_level: parseFloat(document.getElementById('stock-reorder').value) || 0,
         expiry_date: document.getElementById('stock-expiry').value || null,
-        daily_sync: document.getElementById('stock-daily-sync').checked ? 1 : 0,
+        daily_sync: formSyncValue(document.getElementById('stock-daily-sync')),
       };
       await withBusy(btn, async () => {
         if (id) {

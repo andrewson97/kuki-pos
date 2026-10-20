@@ -125,6 +125,18 @@ export function itemToken(kind: string, id: number, qty: number): string {
 // absurd for anything (1e308 would round to Infinity and poison the stock).
 const MAX_COUNT = 1_000_000;
 
+// Is a product (alias p) / stock item (alias si) in the daily sync? Its own
+// choice when it has one (daily_sync 1 or 0); otherwise its groups — every
+// tracked product, its product category (any casing), its stock category.
+// SQL fragments, so the list, the checks and the Stock page all read ONE rule.
+export const PRODUCT_IN_SYNC = `COALESCE(p.daily_sync, CASE WHEN
+  EXISTS (SELECT 1 FROM daily_sync_groups g WHERE g.group_type = 'all_products')
+  OR EXISTS (SELECT 1 FROM daily_sync_groups g WHERE g.group_type = 'product_category' AND LOWER(g.group_key) = LOWER(p.category))
+  THEN 1 ELSE 0 END)`;
+export const ITEM_IN_SYNC = `COALESCE(si.daily_sync, CASE WHEN
+  EXISTS (SELECT 1 FROM daily_sync_groups g WHERE g.group_type = 'stock_category' AND g.group_key = CAST(si.category_id AS TEXT))
+  THEN 1 ELSE 0 END)`;
+
 /**
  * What has to be counted: tracked finished products and store-room items
  * (ingredients, packing) the system says are above 0. Opened boxes are not
@@ -132,23 +144,20 @@ const MAX_COUNT = 1_000_000;
  * Discontinued products are left out (they are off the menu for good), but
  * inactive ones stay in: off the menu today is still on the shelf.
  *
- * Only what the admin ticked for the daily sync (products.daily_sync /
- * stock_items.daily_sync, set on the Stock page). Unticking or ticking an item
- * changes this list, and so the snapshot a settled sync is checked against —
- * a sync settled before the change asks to be done again, which is right: it
- * no longer counted the list the shop now closes on.
+ * Only what is in the daily sync — PRODUCT_IN_SYNC / ITEM_IN_SYNC below: an
+ * item's own tick, or its group's (set on the Stock page).
  */
 export function listSyncItems(): SyncItem[] {
   const db = getDb();
   const products = db.query(`
-    SELECT id, name, category, stock_quantity AS qty FROM products
-    WHERE track_stock = 1 AND is_discontinued = 0 AND daily_sync = 1 AND stock_quantity > ${QTY_EPS}
-    ORDER BY category, name
+    SELECT p.id, p.name, p.category, p.stock_quantity AS qty FROM products p
+    WHERE p.track_stock = 1 AND p.is_discontinued = 0 AND ${PRODUCT_IN_SYNC} = 1 AND p.stock_quantity > ${QTY_EPS}
+    ORDER BY p.category, p.name
   `).all() as any[];
   const items = db.query(`
     SELECT si.id, si.name, si.unit, si.quantity AS qty, COALESCE(sc.name, 'Uncategorised') AS category
     FROM stock_items si LEFT JOIN stock_categories sc ON sc.id = si.category_id
-    WHERE si.daily_sync = 1 AND si.quantity > ${QTY_EPS}
+    WHERE ${ITEM_IN_SYNC} = 1 AND si.quantity > ${QTY_EPS}
     ORDER BY sc.name, si.name
   `).all() as any[];
   return [
@@ -178,8 +187,8 @@ function countedSnapshot(syncId: number): Record<string, number> {
 function stillCounted(kind: string, id: number): boolean {
   const db = getDb();
   return kind === "product"
-    ? !!db.query("SELECT 1 FROM products WHERE id = ? AND track_stock = 1 AND is_discontinued = 0 AND daily_sync = 1").get(id)
-    : !!db.query("SELECT 1 FROM stock_items WHERE id = ? AND daily_sync = 1").get(id);
+    ? !!db.query(`SELECT 1 FROM products p WHERE p.id = ? AND p.track_stock = 1 AND p.is_discontinued = 0 AND ${PRODUCT_IN_SYNC} = 1`).get(id)
+    : !!db.query(`SELECT 1 FROM stock_items si WHERE si.id = ? AND ${ITEM_IN_SYNC} = 1`).get(id);
 }
 
 /**
@@ -394,8 +403,8 @@ export function submitStockSync(params: { shiftOpenId: number; user: SessionUser
       const [kind = "", idStr = ""] = key.split(":");
       const id = Number(idStr);
       const row = kind === "product"
-        ? db.query("SELECT name, 'pcs' AS unit FROM products WHERE id = ? AND track_stock = 1 AND is_discontinued = 0 AND daily_sync = 1").get(id) as any
-        : db.query("SELECT name, unit FROM stock_items WHERE id = ? AND daily_sync = 1").get(id) as any;
+        ? db.query(`SELECT p.name, 'pcs' AS unit FROM products p WHERE p.id = ? AND p.track_stock = 1 AND p.is_discontinued = 0 AND ${PRODUCT_IN_SYNC} = 1`).get(id) as any
+        : db.query(`SELECT si.name, si.unit FROM stock_items si WHERE si.id = ? AND ${ITEM_IN_SYNC} = 1`).get(id) as any;
       if (!row) continue; // deleted, untracked or discontinued meanwhile: not counted stock
       lines.push({ kind, id, name: row.name, unit: row.unit || "", system_qty: currentSystemQty(kind, id) ?? 0, counted_qty: c.qty });
     }
