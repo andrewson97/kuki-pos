@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { getDb } from "../db/database";
 import { adminOnly, getUser } from "../middleware/auth";
-import { drawerHandlerBlockReason } from "./cash";
+import { drawerClosedBetweenShifts, drawerHandlerBlockReason } from "./cash";
 
 const expenses = new Hono();
 
@@ -58,6 +58,12 @@ expenses.post("/", async (c) => {
   if ((payment_source || "cash") === "cash") {
     const blocked = drawerHandlerBlockReason(user);
     if (blocked) return c.json({ error: blocked }, 400);
+    // Between shifts the drawer is closed: what is in it is carried to the next
+    // opening as counted (less what an admin collected), so cash paid out of
+    // it now would show up as a shortfall at the opening.
+    if (drawerClosedBetweenShifts()) {
+      return c.json({ error: "The cash drawer is closed. Open the shift first, or record this expense as paid by card or LankaQR (or from money outside the drawer)." }, 400);
+    }
   }
   // Admins' submissions are auto-approved; cashiers' need approval
   const isAdmin = user.role === "admin";

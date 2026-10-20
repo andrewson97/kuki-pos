@@ -95,7 +95,7 @@ export function chargeDecisionNeeded(amount: number, chargeTo: { id: number; nam
   };
 }
 
-export function readChargeDecision(body: any, computed: number): { charge: boolean; amount: number; note: string | null } | string {
+export function readChargeDecision(body: any, computed: number, max?: number): { charge: boolean; amount: number; note: string | null } | string {
   const charge = body?.charge !== false && body?.charge !== 0 && body?.charge !== "0";
   const note = String(body?.write_off_note ?? body?.charge_note ?? "").trim() || null;
   if (!charge) {
@@ -106,6 +106,9 @@ export function readChargeDecision(body: any, computed: number): { charge: boole
   if (body?.charge_amount !== undefined && body?.charge_amount !== null && body?.charge_amount !== "") {
     const n = Number(body.charge_amount);
     if (!Number.isFinite(n) || n < 0 || n > 10_000_000) return "The amount to charge must be 0 or more.";
+    // A CASH shortage is known to the cent: never more than it (max). A stock
+    // shortage has no max — an item with no price is set by hand.
+    if (max != null && n > max + 0.005) return `Charge at most Rs ${round2(max).toFixed(2)} — the shortage.`;
     amount = round2(n);
   }
   return { charge: true, amount, note };

@@ -185,6 +185,11 @@
       } else {
         // The STORED close: expected_amount and variance exactly as the server
         // worked them out when the shift was closed.
+        // A non-admin gets no figures for the last close (the next opener counts blind).
+        if (todayData.close.total_amount == null) {
+          el.innerHTML = `<div class="card" style="border-left:4px solid var(--green);background:var(--green-soft);"><strong>✅ Last shift closed.</strong><br><span style="font-size:0.85rem;">At ${formatTime(todayData.close.created_at)}. Count the drawer below to open a new shift.</span></div>`;
+          return;
+        }
         const v = Number(todayData.close.variance) || 0;
         const word = isNil(v) ? 'matched exactly' : v > 0 ? `over by ${fmt(Math.abs(v))}` : `short by ${fmt(Math.abs(v))}`;
         const expectedTxt = todayData.close.expected_amount == null ? '' : ` against ${fmt(todayData.close.expected_amount)} expected`;

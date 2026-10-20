@@ -72,14 +72,18 @@ function computeTotal(count: DrawerCount): number {
 function getCurrentOpenShift() {
   const db = getDb();
   const latestOpen = db.query(
-    "SELECT cc.*, u.full_name as user_name FROM cash_counts cc LEFT JOIN users u ON cc.user_id = u.id WHERE count_type = 'open' ORDER BY created_at DESC LIMIT 1"
+    "SELECT cc.*, u.full_name as user_name FROM cash_counts cc LEFT JOIN users u ON cc.user_id = u.id WHERE count_type = 'open' ORDER BY created_at DESC, cc.id DESC LIMIT 1"
   ).get() as any;
   if (!latestOpen) return null;
   const latestClose = db.query(
-    "SELECT created_at FROM cash_counts WHERE count_type = 'close' ORDER BY created_at DESC LIMIT 1"
-  ).get() as { created_at: string } | null;
-  if (latestClose && new Date(latestClose.created_at).getTime() >= new Date(latestOpen.created_at).getTime()) {
-    return null;
+    "SELECT id, created_at FROM cash_counts WHERE count_type = 'close' ORDER BY created_at DESC, id DESC LIMIT 1"
+  ).get() as { id: number; created_at: string } | null;
+  // Timestamps are to the second: in the same second, the later row (the
+  // higher id) decides — an open straight after a close is open.
+  if (latestClose) {
+    const tc = new Date(latestClose.created_at).getTime();
+    const to = new Date(latestOpen.created_at).getTime();
+    if (tc > to || (tc === to && latestClose.id > latestOpen.id)) return null;
   }
   return latestOpen;
 }
@@ -309,6 +313,11 @@ export function drawerHandlerBlockReason(user: { id: number; role: string }): st
   return null;
 }
 
+/** No shift open, but the drawer has been closed before: cash in it is carried, untouchable. */
+export function drawerClosedBetweenShifts(): boolean {
+  return !getCurrentOpenShift() && !!getLatestClose();
+}
+
 /** The latest change of hands of this shift (handover or takeover), if any. */
 function lastAcceptedHandover(shiftOpenId: number): any {
   return getDb().query(
@@ -513,7 +522,8 @@ cash.get("/today", (c) => {
   return c.json({
     date,
     open,
-    close,
+    // A non-admin may be the next opener, who counts blind: no figures.
+    close: user.role === "admin" || !close ? close : { id: close.id, count_type: close.count_type, count_date: close.count_date, created_at: close.created_at, user_id: close.user_id, user_name: close.user_name },
     shift_open,
     shift_from_prior_day,
     cash_sales: hide(cash_sales),
@@ -586,9 +596,23 @@ function carriedOver(): { close: any; collected: number; carried: number } | nul
 
 /** Who answered for the drawer at a close: its holder then, else whoever closed it. */
 function closeHolder(close: any): { id: number; name: string } {
-  const id = close.holder_user_id ?? close.user_id;
+  // Closes from before holder_user_id was recorded: the holder of the shift
+  // that close ended (an admin may have closed it for them).
+  const shiftOpen = close.holder_user_id == null
+    ? getDb().query("SELECT holder_user_id, user_id FROM cash_counts WHERE count_type = 'open' AND id < ? ORDER BY id DESC LIMIT 1").get(close.id) as any
+    : null;
+  const id = close.holder_user_id ?? shiftOpen?.holder_user_id ?? shiftOpen?.user_id ?? close.user_id;
   const row = getDb().query("SELECT full_name FROM users WHERE id = ?").get(id) as any;
   return { id, name: row?.full_name || "the last holder" };
+}
+
+/** Counts at opening that did not match, since this close (see /open). */
+const OPEN_TRIES = 3;
+function openMismatchCount(closeId: number): number {
+  const row = getDb().query(
+    "SELECT COUNT(*) AS n FROM activity_log WHERE action = 'cash_open_mismatch' AND json_extract(details, '$.close_id') = ?"
+  ).get(closeId) as any;
+  return Number(row?.n) || 0;
 }
 
 /** The latest opening request after this close that still means something. */
@@ -617,7 +641,7 @@ function openShortDecision(body: any, short: number, closer: { id: number; name:
   if (chargeUndecided(body) || (charging && body?.charge_to !== "closer" && body?.charge_to !== "opener")) {
     return { status: 409, body: { ...chargeDecisionNeeded(short, closer), error: `The drawer is short by Rs ${short.toFixed(2)} from what was left at the last close. Choose who it is charged to, or write it off.`, charge_options: options } };
   }
-  const d = readChargeDecision(body, short);
+  const d = readChargeDecision(body, short, short);
   if (typeof d === "string") return { status: 400, body: { error: d } };
   return { ...d, toUserId: d.charge ? (body.charge_to === "opener" ? opener.id : closer.id) : null };
 }
@@ -679,15 +703,24 @@ cash.post("/open", async (c) => {
   const total = computeTotal(count);
   const expected = carry ? carry.carried : null;
   const variance = expected == null ? 0 : money(total - expected);
-  const off = Math.abs(variance) > 0.005;
+  // The opener counts blind and is told only "does not match" — and only a
+  // few times: after OPEN_TRIES counts that did not match, even a matching
+  // one needs an admin, or counting again and again would find the figure.
+  const tries = carry && !requestId ? openMismatchCount(carry.close.id) : 0;
+  const off = Math.abs(variance) > 0.005 || (!approver && tries >= OPEN_TRIES);
 
   if (off && !requestId) {
     if (!approver) {
+      if (Math.abs(variance) > 0.005) {
+        db.query("INSERT INTO activity_log (user_id, action, details) VALUES (?, 'cash_open_mismatch', ?)").run(
+          user.id, JSON.stringify({ close_id: carry!.close.id, counted: total, carried: expected, variance })
+        );
+      }
       return c.json({
-        error: `The drawer has ${variance > 0 ? "more" : "less"} than was left at the last close (${variance > 0 ? "over" : "short"} by ${Math.abs(variance).toFixed(2)}). An admin has to approve this opening.`,
+        error: tries >= OPEN_TRIES
+          ? "The drawer has been counted several times without matching what was left at the last close. An admin has to approve this opening."
+          : "The count does not match what was left in the drawer at the last close. Count it again, or ask an admin to approve this opening.",
         needs_approval: true,
-        variance,
-        total_amount: total,
       }, 409);
     }
     approvedBy = approver.id;
@@ -731,6 +764,11 @@ cash.post("/open", async (c) => {
         });
         db.query("UPDATE cash_counts SET charged_amount = ?, charged_to = ? WHERE id = ?").run(charge.amount, charge.toUserId, id);
       }
+      if (writeOff) {
+        db.query("INSERT INTO activity_log (user_id, action, details) VALUES (?, 'cash_short_written_off', ?)").run(
+          by, JSON.stringify({ open_id: id, short: -variance, carried: expected, note: writeOff })
+        );
+      }
       if (off) {
         db.query("INSERT INTO activity_log (user_id, action, details) VALUES (?, 'cash_open_variance_approved', ?)").run(
           by, JSON.stringify({ open_id: id, carried: expected, counted: total, variance, open_request_id: requestId, charged_to: charge?.toUserId ?? null, written_off: writeOff })
@@ -757,7 +795,6 @@ cash.post("/open-requests", async (c) => {
   if (typeof count === "string") return c.json({ error: count }, 400);
   const total = computeTotal(count);
   const variance = money(total - carry.carried);
-  if (Math.abs(variance) <= 0.005) return c.json({ error: "The count matches what was left — no approval is needed, just open." }, 400);
   const request = db.transaction(() => {
     db.query("UPDATE cash_open_requests SET status = 'superseded' WHERE prev_close_id = ? AND status IN ('pending', 'approved')").run(carry.close.id);
     const id = Number(db.query(`
@@ -823,7 +860,7 @@ for (const action of ["approve", "reject"] as const) {
 /** An opening request as the asker may see it: no carried figure for a non-admin. */
 function openRequestForViewer(r: any, user: { role: string }) {
   if (!r || user.role === "admin") return r;
-  const { expected_amount, ...rest } = r;
+  const { expected_amount, variance, charge_amount, ...rest } = r;
   return rest;
 }
 
@@ -1082,7 +1119,7 @@ cash.post("/close", async (c) => {
       if (!requestId && approver && chargeUndecided(decisionBody)) {
         return c.json(chargeDecisionNeeded(short, holder), 409);
       }
-      const d = readChargeDecision(decisionBody, short);
+      const d = readChargeDecision(decisionBody, short, short);
       if (typeof d === "string") return c.json({ error: d }, 400);
       charge = d;
     } else if (chargeSmallShortages()) {
@@ -1251,7 +1288,7 @@ for (const action of ["approve", "reject"] as const) {
       let chargeAmount: number | null = null;
       if (action === "approve" && Number(req.variance) < -0.005) {
         if (chargeUndecided(body)) return { status: 409 as const, error: "", needs: -Number(req.variance) };
-        const d = readChargeDecision(body, -Number(req.variance));
+        const d = readChargeDecision(body, -Number(req.variance), -Number(req.variance));
         if (typeof d === "string") return { status: 400 as const, error: d };
         chargeDecision = d.charge ? "charge" : "write_off";
         chargeNote = d.note;
@@ -1564,7 +1601,7 @@ for (const action of ["approve", "reject"] as const) {
               const { error, ...extra } = chargeDecisionNeeded(short, { id: h.from_user_id, name: h.from_name });
               throw new ClosingError(error, 409, extra);
             }
-            const d = readChargeDecision(body, short);
+            const d = readChargeDecision(body, short, short);
             if (typeof d === "string") throw new ClosingError(d, 400);
             if (d.charge && d.amount > 0) chargeHandoverShort(h, d.amount, d.note, approver!.id);
             db.query("UPDATE drawer_handovers SET decision = ?, decision_note = ? WHERE id = ?").run(d.charge ? "charge" : "write_off", d.note, id);
@@ -1627,7 +1664,7 @@ cash.post("/handovers/takeover", async (c) => {
             const { error, ...extra } = chargeDecisionNeeded(short, prev);
             throw new ClosingError(error, 409, extra);
           }
-          const d = readChargeDecision(body, short);
+          const d = readChargeDecision(body, short, short);
           if (typeof d === "string") throw new ClosingError(d, 400);
           decision = d;
         } else if (chargeSmallShortages()) {
@@ -1783,8 +1820,15 @@ cash.get("/history", (c) => {
     LEFT JOIN users a ON cc.variance_approved_by = a.id
     ORDER BY count_date DESC, created_at DESC
     LIMIT ?
-  `).all(limit);
-  return c.json(rows);
+  `).all(limit) as any[];
+  // Counted figures, differences and collections are for admins: a cashier may
+  // be the next opener, who counts blind.
+  const user = getUser(c)!;
+  if (user.role === "admin") return c.json(rows);
+  return c.json(rows.map((r) => ({
+    id: r.id, count_type: r.count_type, count_date: r.count_date, created_at: r.created_at,
+    user_name: r.user_name, variance_approved_by_name: r.variance_approved_by_name,
+  })));
 });
 
 export default cash;

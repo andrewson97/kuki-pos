@@ -821,7 +821,7 @@ window.Closing = (() => {
   // ----- Step 2's gate: a variance over the limit --------------------------------
   function needsApproval(body, data) {
     gateBody = body;
-    gateInfo = data;
+    gateInfo = data || {};
     renderGate();
   }
 
@@ -867,10 +867,11 @@ window.Closing = (() => {
   // login), their password here, or (an admin) answering the charge question.
   function renderOpenGate(el) {
     const r = today.open_request;
-    const word = (v) => `${v > 0 ? 'over' : 'short'} by ${cfg.money(Math.abs(v))}`;
+    // The opener counts blind: a non-admin is never sent the difference.
+    const word = (v) => v == null ? 'does not match what was left' : `${v > 0 ? 'over' : 'short'} by ${cfg.money(Math.abs(v))}`;
     if (gateInfo && gateBody) {
-      el.innerHTML = `<div class="cc-box cc-bad"><h4>&#9888;&#65039; The drawer is ${word(gateInfo.variance)} from what was left at the last close</h4>
-        <div>An admin has to approve opening on this count. Count again first if you are not sure.</div>
+      el.innerHTML = `<div class="cc-box cc-bad"><h4>&#9888;&#65039; The count does not match what was left at the last close</h4>
+        <div>${/several times/.test(gateInfo.error || '') ? esc(gateInfo.error) : 'Count it again, or ask an admin to approve opening on this count.'}</div>
         <div class="cc-row"><button class="cc-btn cc-primary" onclick="Closing.requestApproval(this)">Request admin approval</button>
         <button class="cc-btn" onclick="Closing.adminApproveClose()">Admin: approve here</button></div></div>`;
       return;
@@ -932,7 +933,9 @@ window.Closing = (() => {
   async function adminApproveClose() {
     if (!gateBody) return;
     const opening = !shiftOpen();
-    const creds = await askAdmin('Admin approval — drawer variance', `${opening ? 'Opening' : 'Closing'} ${gateInfo.variance > 0 ? 'over' : 'short'} by ${cfg.money(Math.abs(gateInfo.variance))}. The admin's password approves it.`);
+    // An opener is not told the difference (blind count); the admin sees it in the charge question.
+    const what = gateInfo.variance == null ? 'on a count that does not match what was left' : `${gateInfo.variance > 0 ? 'over' : 'short'} by ${cfg.money(Math.abs(gateInfo.variance))}`;
+    const creds = await askAdmin('Admin approval — drawer variance', `${opening ? 'Opening' : 'Closing'} ${what}. The admin's password approves it.`);
     if (!creds) return;
     try {
       const res = await withChargeDecision((extra) => api(opening ? '/api/cash/open' : '/api/cash/close', { method: 'POST', body: { ...gateBody, ...extra, ...creds } }));
@@ -1018,7 +1021,7 @@ window.Closing = (() => {
         ${o.variance < 0 ? chargeHtml(-o.variance, [
           { key: 'closer', label: `${o.closer ? o.closer.name : 'the last holder'} (held the drawer at the last close)` },
           { key: 'opener', label: `${o.user_name || 'the opener'} (opening now)` },
-        ], true) : ''}
+        ], false) : ''}
         <input class="cc-text" data-role="note" placeholder="Note (needed to reject)" style="margin-top:6px;">
         <div class="cc-row"><button class="cc-btn cc-success" data-act="approve">Approve opening</button><button class="cc-btn cc-danger" data-act="reject">Reject &mdash; count again</button></div></div>`).join('')}
       ${handovers.map((h) => `<div style="margin-top:12px;" data-handover="${Number(h.id)}"><strong>Drawer handover</strong>
@@ -1027,7 +1030,7 @@ window.Closing = (() => {
         ${Math.abs((h.giver_total || 0) - (h.receiver_total || 0)) > 0.005 ? '<div class="cc-muted">The two counts disagree &mdash; worth counting again together before deciding.</div>' : ''}
         ${h.giver_notes ? `<div class="cc-muted">${esc(h.from_name)}: ${esc(h.giver_notes)}</div>` : ''}
         ${h.receiver_notes ? `<div class="cc-muted">${esc(h.to_name)}: ${esc(h.receiver_notes)}</div>` : ''}
-        ${h.variance < 0 ? chargeHtml(-h.variance, h.from_name, true) : ''}
+        ${h.variance < 0 ? chargeHtml(-h.variance, h.from_name, false) : ''}
         <input class="cc-text" data-role="note" placeholder="Note (needed to reject)" style="margin-top:6px;">
         <div class="cc-row"><button class="cc-btn cc-success" data-act="approve">Approve &mdash; ${esc(h.to_name)} takes the drawer</button><button class="cc-btn cc-danger" data-act="reject">Reject &mdash; ${esc(h.from_name)} keeps it</button></div></div>`).join('')}
     </div>`;
