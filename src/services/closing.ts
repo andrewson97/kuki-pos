@@ -125,24 +125,39 @@ export function itemToken(kind: string, id: number, qty: number): string {
 // absurd for anything (1e308 would round to Infinity and poison the stock).
 const MAX_COUNT = 1_000_000;
 
+// Is a product (alias p) / stock item (alias si) in the daily sync? Its own
+// choice when it has one (daily_sync 1 or 0); otherwise its groups — every
+// tracked product, its product category (any casing), its stock category.
+// SQL fragments, so the list, the checks and the Stock page all read ONE rule.
+export const PRODUCT_IN_SYNC = `COALESCE(p.daily_sync, CASE WHEN
+  EXISTS (SELECT 1 FROM daily_sync_groups g WHERE g.group_type = 'all_products')
+  OR EXISTS (SELECT 1 FROM daily_sync_groups g WHERE g.group_type = 'product_category' AND LOWER(g.group_key) = LOWER(p.category))
+  THEN 1 ELSE 0 END)`;
+export const ITEM_IN_SYNC = `COALESCE(si.daily_sync, CASE WHEN
+  EXISTS (SELECT 1 FROM daily_sync_groups g WHERE g.group_type = 'stock_category' AND g.group_key = CAST(si.category_id AS TEXT))
+  THEN 1 ELSE 0 END)`;
+
 /**
  * What has to be counted: tracked finished products and store-room items
  * (ingredients, packing) the system says are above 0. Opened boxes are not
  * counted — only what is still sealed, which is stock_items.quantity.
  * Discontinued products are left out (they are off the menu for good), but
  * inactive ones stay in: off the menu today is still on the shelf.
+ *
+ * Only what is in the daily sync — PRODUCT_IN_SYNC / ITEM_IN_SYNC below: an
+ * item's own tick, or its group's (set on the Stock page).
  */
 export function listSyncItems(): SyncItem[] {
   const db = getDb();
   const products = db.query(`
-    SELECT id, name, category, stock_quantity AS qty FROM products
-    WHERE track_stock = 1 AND is_discontinued = 0 AND stock_quantity > ${QTY_EPS}
-    ORDER BY category, name
+    SELECT p.id, p.name, p.category, p.stock_quantity AS qty FROM products p
+    WHERE p.track_stock = 1 AND p.is_discontinued = 0 AND ${PRODUCT_IN_SYNC} = 1 AND p.stock_quantity > ${QTY_EPS}
+    ORDER BY p.category, p.name
   `).all() as any[];
   const items = db.query(`
     SELECT si.id, si.name, si.unit, si.quantity AS qty, COALESCE(sc.name, 'Uncategorised') AS category
     FROM stock_items si LEFT JOIN stock_categories sc ON sc.id = si.category_id
-    WHERE si.quantity > ${QTY_EPS}
+    WHERE ${ITEM_IN_SYNC} = 1 AND si.quantity > ${QTY_EPS}
     ORDER BY sc.name, si.name
   `).all() as any[];
   return [
@@ -152,22 +167,51 @@ export function listSyncItems(): SyncItem[] {
 }
 
 /**
- * Every in-stock quantity right now, keyed "product:12" / "ingredient:3" — the
- * same set listSyncItems() counts. Stored when a sync settles; the sync stays
- * good only while the stock still equals it. Exact, unlike a timestamp: a sale
- * in the same second as the sync still shows. A movement that nets to nothing
- * (one sold, one baked) leaves the count true, so it is rightly not flagged.
+ * What a settled sync remembers: the figure of every item it COUNTED (its
+ * lines), as the stock stands at settlement, keyed "product:12" /
+ * "ingredient:3". Not "everything listed now": an item ticked, or delivered,
+ * while a count waited for the admin was never counted, and must not slip into
+ * the snapshot as though it had been.
  */
-function stockSnapshot(): Record<string, number> {
+function countedSnapshot(syncId: number): Record<string, number> {
   const snap: Record<string, number> = {};
-  for (const i of listSyncItems()) snap[`${i.kind}:${i.id}`] = i.system_qty;
+  const lines = getDb().query("SELECT item_kind, item_id FROM stock_sync_lines WHERE sync_id = ?").all(syncId) as any[];
+  for (const l of lines) {
+    const q = currentSystemQty(l.item_kind, l.item_id);
+    if (q != null) snap[`${l.item_kind}:${l.item_id}`] = q;
+  }
   return snap;
 }
 
-function sameSnapshot(a: Record<string, number>, b: Record<string, number>): boolean {
-  const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
-  for (const k of keys) if (Math.abs((a[k] ?? 0) - (b[k] ?? 0)) > QTY_EPS) return false;
-  return true;
+/** Is this item still one the sync counts (ticked, and a tracked current product)? Its figure aside. */
+function stillCounted(kind: string, id: number): boolean {
+  const db = getDb();
+  return kind === "product"
+    ? !!db.query(`SELECT 1 FROM products p WHERE p.id = ? AND p.track_stock = 1 AND p.is_discontinued = 0 AND ${PRODUCT_IN_SYNC} = 1`).get(id)
+    : !!db.query(`SELECT 1 FROM stock_items si WHERE si.id = ? AND ${ITEM_IN_SYNC} = 1`).get(id);
+}
+
+/**
+ * Why a settled sync no longer holds, or null if it does. Exact, not by time:
+ *   'moved'   — something it counted has changed since (a sale, a delivery,
+ *               an opened box), including selling down to 0. An item the
+ *               admin has since UNTICKED is no longer the shop's business at
+ *               closing, so it is not looked at: unticking forces no recount.
+ *   'listed'  — something is on the count list now that this sync never
+ *               counted: newly ticked, or come into stock from 0.
+ * A movement that nets to nothing (one sold, one baked) leaves the count true.
+ */
+function staleReason(snap: Record<string, number>): "moved" | "listed" | null {
+  for (const [key, qty] of Object.entries(snap)) {
+    const [kind = "", idStr = ""] = key.split(":");
+    const id = Number(idStr);
+    if (!stillCounted(kind, id)) continue;
+    const now = currentSystemQty(kind, id);
+    if (now == null) continue; // deleted: nothing left to count
+    if (Math.abs(now - qty) > QTY_EPS) return "moved";
+  }
+  for (const i of listSyncItems()) if (!(`${i.kind}:${i.id}` in snap)) return "listed";
+  return null;
 }
 
 function currentSystemQty(kind: string, id: number): number | null {
@@ -203,18 +247,20 @@ export function stockSyncState(shiftOpenId: number) {
   ).get(shiftOpenId) as any;
   const sync = latest ? syncWithLines(latest.id) : null;
   const settled = !!sync && (sync.status === "matched" || sync.status === "approved");
-  let stale = false;
+  let reason: "moved" | "listed" | null = null;
   if (settled) {
     const raw = (db.query("SELECT settled_snapshot FROM stock_syncs WHERE id = ?").get(sync.id) as any)?.settled_snapshot;
     let snap: Record<string, number> | null = null;
     try { snap = JSON.parse(raw || "null"); } catch {}
-    stale = !snap || !sameSnapshot(snap, stockSnapshot());
+    reason = snap ? staleReason(snap) : "moved";
   }
+  const stale = !!reason;
   return {
     sync,
     valid: settled && !stale,
-    // Settled, but stock moved after it: the cashier is told why a fresh count is needed.
+    // Settled, but no longer holds: the cashier is told why a fresh count is needed.
     stale,
+    stale_reason: reason,
   };
 }
 
@@ -266,7 +312,7 @@ function settle(syncId: number, status: "matched" | "approved", approver: Approv
     UPDATE stock_syncs SET status = ?, decided_by = ?, decided_at = CASE WHEN ? IS NULL THEN NULL ELSE datetime('now') END,
            decision_note = ?, settled_at = datetime('now'), settled_snapshot = ?
     WHERE id = ?
-  `).run(status, approver?.id ?? null, approver?.id ?? null, note, JSON.stringify(stockSnapshot()), syncId);
+  `).run(status, approver?.id ?? null, approver?.id ?? null, note, JSON.stringify(countedSnapshot(syncId)), syncId);
 }
 
 /**
@@ -333,6 +379,9 @@ export function submitStockSync(params: { shiftOpenId: number; user: SessionUser
       const id = Number(idStr);
       const sys = currentSystemQty(kind, id);
       if (sys == null) continue; // deleted meanwhile: nothing to compare
+      // Unticked (or untracked) since the list loaded: no longer counted at all,
+      // so never "count it again" — the line is simply dropped below.
+      if (!stillCounted(kind, id)) continue;
       if (c.token !== itemToken(kind, id, sys)) {
         const row = kind === "product"
           ? db.query("SELECT name FROM products WHERE id = ?").get(id) as any
@@ -354,8 +403,8 @@ export function submitStockSync(params: { shiftOpenId: number; user: SessionUser
       const [kind = "", idStr = ""] = key.split(":");
       const id = Number(idStr);
       const row = kind === "product"
-        ? db.query("SELECT name, 'pcs' AS unit FROM products WHERE id = ? AND track_stock = 1 AND is_discontinued = 0").get(id) as any
-        : db.query("SELECT name, unit FROM stock_items WHERE id = ?").get(id) as any;
+        ? db.query(`SELECT p.name, 'pcs' AS unit FROM products p WHERE p.id = ? AND p.track_stock = 1 AND p.is_discontinued = 0 AND ${PRODUCT_IN_SYNC} = 1`).get(id) as any
+        : db.query(`SELECT si.name, si.unit FROM stock_items si WHERE si.id = ? AND ${ITEM_IN_SYNC} = 1`).get(id) as any;
       if (!row) continue; // deleted, untracked or discontinued meanwhile: not counted stock
       lines.push({ kind, id, name: row.name, unit: row.unit || "", system_qty: currentSystemQty(kind, id) ?? 0, counted_qty: c.qty });
     }

@@ -133,6 +133,13 @@
               <label class="form-label">Reorder level (alert below)</label>
               <input type="number" class="form-control" id="product-reorder" step="1" min="0" value="0">
             </div>
+            <div class="col-12 mt-2">
+              <div class="form-check">
+                <input class="form-check-input" type="checkbox" id="product-daily-sync">
+                <label class="form-check-label" for="product-daily-sync">Count in the daily stock sync
+                  <span class="text-muted" style="font-size:0.8rem;">&mdash; asked for before the cash drawer closes, whenever it has stock above 0</span></label>
+              </div>
+            </div>
             <div class="col-12 text-muted" id="onhand-hint" style="font-size:0.8rem;display:none;">Saving this form never changes the count. Use <strong>Adjust stock</strong> in the product list for deliveries, waste or a recount. Turning tracking off keeps the count as it is.</div>
           </div>
           <div class="mb-3">
@@ -241,6 +248,8 @@
 
     async function loadProducts() {
       allProducts = await api('/api/products');
+      // For the Daily sync box in the form (what a group would count).
+      try { syncGroups = await api('/api/stock/daily-sync/groups'); } catch { syncGroups = []; }
       // For the ingredient / packing pickers. Not fatal: the rest of the page
       // still works without it, and the pickers say so.
       try { stockItems = await api('/api/stock/items'); } catch { stockItems = []; }
@@ -551,6 +560,28 @@
       }
     }
 
+    // ===== Daily stock sync box =====
+    // Shows what the closing stock sync will do: the product's own tick when it
+    // has one, else its groups (All finished products, or its category) — and
+    // follows a change of category. Only a box the admin CLICKED is saved, as
+    // the product's own choice; left alone it keeps following its groups.
+    let syncGroups = [];
+    const productGroupOn = (category) => syncGroups.some(g => g.group_type === 'all_products' ||
+      (g.group_type === 'product_category' && String(g.group_key).toLowerCase() === String(category || '').trim().toLowerCase()));
+    function initProductSyncBox(p) {
+      const box = document.getElementById('product-daily-sync');
+      box.dataset.touched = '';
+      box.dataset.follow = !p || p.daily_sync == null ? '1' : '';
+      box.checked = p ? !!p.in_daily_sync : productGroupOn(getCategoryValue());
+    }
+    function refreshProductSyncBox() {
+      const box = document.getElementById('product-daily-sync');
+      if (box.dataset.follow === '1' && box.dataset.touched !== '1') box.checked = productGroupOn(getCategoryValue());
+    }
+    document.getElementById('product-daily-sync').addEventListener('change', (e) => { e.target.dataset.touched = '1'; });
+    document.getElementById('product-category-select').addEventListener('change', refreshProductSyncBox);
+    document.getElementById('product-category-new').addEventListener('input', refreshProductSyncBox);
+
     function getCategoryValue() {
       const sel = document.getElementById('product-category-select');
       if (sel.value === '__new__') return document.getElementById('product-category-new').value.trim();
@@ -706,6 +737,8 @@
       document.getElementById('product-active').checked = true;
       document.getElementById('product-margin').innerHTML = '';
       document.getElementById('product-track-stock').checked = false;
+      // New products follow their groups unless ticked here.
+      initProductSyncBox(null);
       document.getElementById('product-qty').value = 0;
       document.getElementById('product-reorder').value = 0;
       syncStockFields();
@@ -731,6 +764,8 @@
       document.getElementById('product-discount').value = p.discount_price || '';
       document.getElementById('product-active').checked = !!p.is_active;
       document.getElementById('product-track-stock').checked = !!p.track_stock;
+      // What the sync does (its own tick or its group's); saved only if changed.
+      initProductSyncBox(p);
       document.getElementById('product-onhand').textContent = p.stock_quantity || 0;
       document.getElementById('product-reorder').value = p.stock_reorder_level || 0;
       syncStockFields();
@@ -757,6 +792,13 @@
         discount_price: discountInput ? parseFloat(discountInput) : null,
         is_active: document.getElementById('product-active').checked ? 1 : 0,
         track_stock: document.getElementById('product-track-stock').checked ? 1 : 0,
+        // Only meaningful with tracking on (the server clears it otherwise).
+        // Only a change is sent; left alone it keeps following its groups.
+        daily_sync: (() => {
+          const box = document.getElementById('product-daily-sync');
+          if (!document.getElementById('product-track-stock').checked) return undefined; // the server clears it
+          return box.dataset.touched === '1' ? (box.checked ? 1 : 0) : undefined;
+        })(),
         stock_reorder_level: parseFloat(document.getElementById('product-reorder').value) || 0,
         components: currentComponents.filter(c => c.component_product_id && c.quantity > 0),
         // Sent whole: they replace what is stored. A row edited to 0 is sent
