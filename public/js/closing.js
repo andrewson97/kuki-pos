@@ -173,7 +173,9 @@ window.Closing = (() => {
     let cls = 'cc-step';
     if (st.stale) {
       head = '&#128260; Step 1 &mdash; sync the stock again';
-      msg = 'Stock has changed since the last sync (a sale, a delivery or an opened box). Count again before closing.';
+      msg = st.stale_reason === 'listed'
+        ? 'The count list has changed since the last sync (an item was ticked for the daily sync, or came into stock). Count again before closing.'
+        : 'Stock has changed since the last sync (a sale, a delivery or an opened box). Count again before closing.';
       cls = 'cc-wait';
     } else if (s && s.status === 'rejected') {
       head = '&#10060; Step 1 &mdash; the count was rejected';

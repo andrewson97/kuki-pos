@@ -390,7 +390,7 @@ cash.get("/today", (c) => {
     pending_expenses,
     variance_limit: varianceLimit(),
     stock_sync: syncState
-      ? { valid: syncState.valid, stale: syncState.stale, sync: syncForViewer(syncState.sync, user.role === "admin") }
+      ? { valid: syncState.valid, stale: syncState.stale, stale_reason: syncState.stale_reason, sync: syncForViewer(syncState.sync, user.role === "admin") }
       : null,
     close_request,
   });
@@ -512,7 +512,9 @@ cash.post("/close", async (c) => {
   if (!syncState.valid) {
     const s = syncState.sync;
     const msg = syncState.stale
-      ? "Stock has changed since it was synced (a sale, a delivery or an opened box). Sync the stock again before closing."
+      ? (syncState.stale_reason === "listed"
+          ? "The count list has changed since the stock was synced (an item was ticked for the daily sync, or came into stock). Sync the stock again before closing."
+          : "Stock has changed since it was synced (a sale, a delivery or an opened box). Sync the stock again before closing.")
       : s?.status === "pending"
         ? "The stock sync is waiting for an admin to approve it. The drawer can close once it is approved."
         : s?.status === "rejected"

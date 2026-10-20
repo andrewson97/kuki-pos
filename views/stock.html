@@ -245,7 +245,10 @@
       ]);
       stockItems = items;
       categories = cats;
-      trackedProducts = allProducts.filter(p => p.is_active && p.track_stock);
+      // Inactive ones too (marked): off the menu today is still on the shelf, the
+      // daily stock sync still counts it when ticked, and it can only be seen
+      // and unticked here. Discontinued products never come back from /api/products.
+      trackedProducts = allProducts.filter(p => p.track_stock);
       stockHolds = holds;
       await loadUnreportedPreview();
       renderCategoryOptions();
@@ -295,7 +298,7 @@
           : '';
         return `<tr class="${out ? 'table-danger' : (low ? 'table-warning' : '')}">
           <td>${syncBox('product', p)}</td>
-          <td class="fw-bold">${escapeHtml(p.name)} ${status}</td>
+          <td class="fw-bold">${escapeHtml(p.name)} ${status}${p.is_active ? '' : ' <span class="badge bg-secondary" title="Off the menu, but still on the shelf">inactive</span>'}</td>
           <td>${escapeHtml(p.category || '-')}</td>
           <td class="${out ? 'text-danger' : (low ? 'text-warning' : '')} fw-bold">${p.stock_quantity}</td>
           <td>${p.stock_reorder_level}</td>

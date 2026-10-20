@@ -392,7 +392,11 @@ stock.post("/daily-sync", adminOnly, async (c) => {
       }
       if (n) {
         db.query("INSERT INTO activity_log (user_id, action, details) VALUES (?, 'daily_sync_selection', ?)").run(
-          user.id, JSON.stringify({ changed: n, items: body.items.slice(0, 200) })
+          user.id, JSON.stringify({
+            changed: n,
+            // Only the fields this route reads, whatever else the body carried.
+            items: body.items.slice(0, 200).map((it: any) => ({ kind: String(it?.kind), id: Number(it?.id), on: it?.on === true || it?.on === 1 })),
+          })
         );
       }
       return n;
