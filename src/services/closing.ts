@@ -1,6 +1,6 @@
 import { createHmac, randomBytes } from "node:crypto";
 import { getDb } from "../db/database";
-import { addLedgerEntry, readChargeDecision } from "./accounts";
+import { addLedgerEntry, chargeDecisionNeeded, chargeUndecided, readChargeDecision } from "./accounts";
 import type { SessionUser } from "../middleware/auth";
 
 // --- Closing the drawer: stock sync and admin approval ------------------------
@@ -451,11 +451,10 @@ export function submitStockSync(params: {
     } else if (params.approver) {
       applySync(syncId, params.approver, new Map());
       // An admin counting (or approving at the till as the count is sent) has
-      // no separate review step: the shortage is charged to the holder unless
-      // the body said to write it off. Reversible from the holder's account.
-      const decision = readChargeDecision(params.chargeBody, syncShortageValue(syncId));
-      if (typeof decision === "string") throw new ClosingError(decision);
-      chargeSyncShortage(syncId, decision, params.approver);
+      // no separate review step, so the count itself carries the decision on
+      // any shortage — charge the holder or write it off. Without one the
+      // whole count is refused (rolled back) and the till asks.
+      chargeSyncShortage(syncId, decideShortage(syncId, params.chargeBody), params.approver);
       settle(syncId, "approved", params.approver, params.approver.at_till ? "Approved with the admin's password at the till" : "Counted by an admin");
     }
     db.query("INSERT INTO activity_log (user_id, action, details) VALUES (?, 'stock_synced', ?)").run(
@@ -500,9 +499,7 @@ export function decideStockSync(params: {
       applySync(params.syncId, params.approver, corrections);
       // Valued on the APPROVED figures (after corrections), so a figure the
       // admin corrected upwards is not charged.
-      const decision = readChargeDecision(params.chargeBody, syncShortageValue(params.syncId));
-      if (typeof decision === "string") throw new ClosingError(decision);
-      chargeSyncShortage(params.syncId, decision, params.approver);
+      chargeSyncShortage(params.syncId, decideShortage(params.syncId, params.chargeBody), params.approver);
       settle(params.syncId, "approved", params.approver, note);
     } else {
       db.query("UPDATE stock_syncs SET status = 'rejected', decided_by = ?, decided_at = datetime('now'), decision_note = ? WHERE id = ?")
@@ -561,6 +558,25 @@ export function syncUnpricedShortLines(syncId: number): string[] {
     const stands = l.approved_qty != null ? Number(l.approved_qty) : Number(l.counted_qty);
     return Number(l.system_qty) - stands > QTY_EPS && !(Number(l.unit_value) > 0);
   }).map((l) => l.name);
+}
+
+/**
+ * The admin's decision on a sync's shortage, read from the body. A shortage
+ * with no decision sent is refused (409 needs_charge_decision): nothing is
+ * charged to anyone by default. No shortage: nothing to decide.
+ */
+function decideShortage(syncId: number, body: any): { charge: boolean; amount: number; note: string | null } {
+  const value = syncShortageValue(syncId);
+  const unpriced = syncUnpricedShortLines(syncId).length > 0;
+  if (!(value > 0) && !unpriced) return { charge: false, amount: 0, note: null };
+  if (chargeUndecided(body)) {
+    const s = getDb().query("SELECT s.holder_user_id, s.user_id, u.full_name FROM stock_syncs s LEFT JOIN users u ON u.id = COALESCE(s.holder_user_id, s.user_id) WHERE s.id = ?").get(syncId) as any;
+    const { error, ...extra } = chargeDecisionNeeded(value, { id: s?.holder_user_id ?? s?.user_id, name: s?.full_name || "the holder" });
+    throw new ClosingError(error, 409, extra);
+  }
+  const d = readChargeDecision(body, value);
+  if (typeof d === "string") throw new ClosingError(d);
+  return d;
 }
 
 /**

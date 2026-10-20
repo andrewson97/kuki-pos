@@ -1026,6 +1026,8 @@ export function runMigrations(): void {
   // A close request's approval carries the charge decision to the close.
   addColumn("cash_close_requests", "charge_decision", "TEXT");
   addColumn("cash_close_requests", "charge_note", "TEXT");
+  // The amount the admin chose to charge (null: the shortage as counted).
+  addColumn("cash_close_requests", "charge_amount", "REAL");
   db.exec(`
     -- A drawer passing from one person to another. kind 'handover': the giver
     -- (from_user_id) counted the cash and synced the stock and asked to_user_id

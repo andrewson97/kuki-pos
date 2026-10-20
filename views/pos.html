@@ -2303,7 +2303,10 @@
           // The server answered no (out of stock, closed shift, bad discount):
           // nothing was written, so this attempt is over and the cart stays.
           clearPendingSale();
-          showToast('Failed to create bill: ' + outcome.err.message, 'error');
+          // Escaped: refusals can carry people's names.
+          showToast('Failed to create bill: ' + escapeHtml(outcome.err.message), 'error');
+          // Refused for the drawer (handover, holder): the Cash button state is stale.
+          if (outcome.err.data && outcome.err.data.cash_blocked) checkShiftState();
         } else {
           // No clear answer. The sale may be on the books. Keep it written
           // down and ask before anything else can be paid.

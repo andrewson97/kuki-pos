@@ -164,7 +164,7 @@
       // Variance against the SERVER's expected figure (expected_now), never one
       // re-derived here: this page used to leave the pre-order deposits out, so
       // the screen and the stored close disagreed on any day with a deposit.
-      if (mode === 'close' && todayData) {
+      if (mode === 'close' && todayData && !todayData.figures_hidden) {
         const v = money(total - (todayData.expected_now || 0));
         const el = $('exp-variance');
         el.textContent = isNil(v) ? fmt(0) : (v > 0 ? '+' : '') + fmt(v);
@@ -208,7 +208,9 @@
         $('pending-warn').style.display = 'none';
       } else {
         $('form-title').textContent = 'Closing Count';
-        $('expected-block').style.display = 'block';
+        // Hidden from anyone but the holder and admins: whoever may be handed
+        // the drawer next counts it blind (the server sends no figures).
+        $('expected-block').style.display = todayData.figures_hidden ? 'none' : 'block';
         $('exp-opening').textContent = fmt(todayData.open?.total_amount || 0);
         $('exp-sales').textContent = fmt(todayData.cash_sales || 0);
         $('exp-refunds').textContent = fmt(todayData.cash_refunds || 0);
@@ -293,11 +295,10 @@
         DENOMS.forEach(d => body['notes_' + d] = parseInt($('n_' + d).value) || 0);
         body.coins_total = coinsValue();
         let res;
-        // An admin closing short over the limit: charge the holder or write it off.
-        const send = await Closing.chargeForClose(body, money(DENOMS.reduce((t, d) => t + (body['notes_' + d] || 0) * d, 0) + body.coins_total));
-        if (!send) return;
         try {
-          res = await api('/api/cash/close', { method: 'POST', body: send });
+          // An admin closing short over the limit is asked: charge the holder or write it off.
+          res = await Closing.withChargeDecision((extra) => api('/api/cash/close', { method: 'POST', body: { ...body, ...extra } }));
+          if (!res) return;
         } catch (err) {
           // Over the variance limit: a question for an admin, not a failure.
           if (err && err.status === 409 && err.data && err.data.needs_approval) {

@@ -76,6 +76,25 @@ export function ledgerEntries(userId: number, limit = 100) {
  * A write-off needs a reason. charge_amount lets the admin correct the figure
  * (e.g. an item with no price set); otherwise the computed shortage stands.
  */
+export function chargeUndecided(body: any): boolean {
+  const v = body?.charge;
+  return v === undefined || v === null || v === "";
+}
+
+/**
+ * The refusal sent when a shortage is being settled and the admin has not
+ * said whether to charge it or write it off: nothing is charged by default,
+ * the till asks and sends again (public/js/closing.js withChargeDecision).
+ */
+export function chargeDecisionNeeded(amount: number, chargeTo: { id: number; name: string } | null) {
+  return {
+    error: `Short by Rs ${round2(amount).toFixed(2)}. Choose whether to charge it to ${chargeTo?.name || "the holder"} or write it off.`,
+    needs_charge_decision: true,
+    amount: round2(amount),
+    charge_to: chargeTo,
+  };
+}
+
 export function readChargeDecision(body: any, computed: number): { charge: boolean; amount: number; note: string | null } | string {
   const charge = body?.charge !== false && body?.charge !== 0 && body?.charge !== "0";
   const note = String(body?.write_off_note ?? body?.charge_note ?? "").trim() || null;

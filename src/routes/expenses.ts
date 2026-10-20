@@ -100,6 +100,14 @@ expenses.post("/:id/reject", adminOnly, async (c) => {
 
 expenses.delete("/:id", adminOnly, (c) => {
   const db = getDb();
+  // Deleting a cash expense puts its money back into what the drawer should
+  // hold: not while the drawer is being handed over (both counts must
+  // describe the same drawer).
+  const row = db.query("SELECT payment_source FROM expenses WHERE id = ?").get(Number(c.req.param("id"))) as any;
+  if (row && (row.payment_source || "cash") === "cash") {
+    const blocked = drawerHandlerBlockReason(getUser(c)!);
+    if (blocked) return c.json({ error: blocked }, 400);
+  }
   db.query("DELETE FROM expenses WHERE id = ?").run(c.req.param("id"));
   return c.json({ success: true });
 });

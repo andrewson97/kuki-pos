@@ -955,6 +955,13 @@ preorders.delete("/:id/payments/:paymentId", adminOnly, (c) => {
   if (order.status === "collected") {
     return c.json({ error: "This order has been collected and billed; its payments cannot be altered." }, 400);
   }
+  // A cash payment deleted moves what the drawer should hold: not while it is
+  // being handed over.
+  const pay = db.query("SELECT payment_method FROM pre_order_payments WHERE id = ? AND pre_order_id = ?").get(paymentId, id) as any;
+  if (pay?.payment_method === "cash") {
+    const blocked = drawerHandlerBlockReason(user);
+    if (blocked) return c.json({ error: blocked }, 400);
+  }
   // A cancelled order whose deposit was settled (refunded or kept) is closed
   // the same way: deposit_settled_amount, the drawer's refund figure and any
   // income row were all written from these payments, and deleting one now

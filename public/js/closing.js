@@ -21,7 +21,7 @@
 //   Closing.closeAllowed()                // false until the stock sync is good
 //   Closing.needsApproval(body, data)     // POST /close answered 409 needs_approval
 //   Closing.closeBlockReason()            // why this user cannot close now (not the holder, a handover), or ''
-//   Closing.chargeForClose(body, counted) // an admin closing short over the limit: charge or write off? (null = cancelled)
+//   Closing.withChargeDecision(send)      // send(extra) again with the admin's charge/write-off when the server asks (undefined = cancelled)
 //
 // Every name a till or admin typed reaches the screen through esc(): product
 // and item names are admin-entered free text.
@@ -257,16 +257,22 @@ window.Closing = (() => {
   }
 
   /**
-   * An admin closing the drawer themselves, short by more than the limit: the
-   * server charges the holder unless told otherwise, so ask first. Returns the
-   * body to send (with the decision), or null when cancelled.
+   * The server never charges a shortage by default: settling one (an admin's
+   * close, stock count, approval or takeover) without saying "charge" or
+   * "write off" is refused with 409 needs_charge_decision and the amount, on
+   * the server's own figures. This sends, and on that refusal asks the admin
+   * and sends again with their answer. send(extra) does the request with
+   * `extra` merged into its body. Resolves undefined if the admin cancels.
    */
-  async function chargeForClose(body, counted) {
-    if (!cfg.isAdmin || !shiftOpen()) return body;
-    const variance = round2(counted - (today.expected_now || 0));
-    if (!(variance < 0 && -variance > (Number(today.variance_limit) || 0) + 0.005)) return body;
-    const c = await askCharge(-variance, today.holder && today.holder.name, 'Closing short');
-    return c ? { ...body, ...c } : null;
+  async function withChargeDecision(send) {
+    try {
+      return await send({});
+    } catch (err) {
+      if (!(err && err.status === 409 && err.data && err.data.needs_charge_decision)) throw err;
+      const c = await askCharge(err.data.amount, err.data.charge_to && err.data.charge_to.name, 'The shortage');
+      if (!c) return undefined;
+      return await send(c);
+    }
   }
 
   function renderDrawer() {
@@ -364,10 +370,9 @@ window.Closing = (() => {
           res = await api(`/api/cash/handovers/${Number(id)}/accept`, { method: 'POST', body: { ...body, notes: ov.querySelector('[data-role="note"]').value } });
         } catch (err) { notifyIn(ov, err.message); return; }
         closeDialog();
-        const v = Number(res.variance) || 0;
-        const off = Math.abs(v) < 0.005 ? 'it matched' : `${v > 0 ? 'over' : 'short'} by ${cfg.money(Math.abs(v))}`;
-        if (res.accepted) cfg.notify(`You now hold the drawer (${off}).`);
-        else cfg.notify(`Your count is ${off} — more than the allowance, so an admin has to approve the handover.`, 'error');
+        // The receiver is not told the variance (it would give away the expected figure).
+        if (res.accepted) cfg.notify('You now hold the drawer.');
+        else cfg.notify('Your count is off by more than the allowance, so an admin has to approve the handover.', 'error');
         await refresh();
       }, 'Saving…');
     };
@@ -433,8 +438,12 @@ window.Closing = (() => {
       const to = ov.querySelector('[data-role="to"]').value;
       await cfg.withBusy(e.currentTarget, async () => {
         try {
-          await api('/api/cash/handovers/takeover', { method: 'POST', body: { ...body, ...c, reason, ...(to ? { to_user_id: Number(to) } : {}) } });
-        } catch (err) { notifyIn(ov, err.message); return; }
+          // The dialog closes first: the charge question (if the server's
+          // figure says short) opens a dialog of its own.
+          closeDialog();
+          const done = await withChargeDecision((extra) => api('/api/cash/handovers/takeover', { method: 'POST', body: { ...body, ...c, ...extra, reason, ...(to ? { to_user_id: Number(to) } : {}) } }));
+          if (!done) return;
+        } catch (err) { cfg.notify(err.message, 'error'); await refresh(); return; }
         closeDialog();
         cfg.notify('Drawer taken over');
         await refresh();
@@ -601,7 +610,8 @@ window.Closing = (() => {
     await cfg.withBusy(btn, async () => {
       let res;
       try {
-        res = await api('/api/cash/stock-sync', { method: 'POST', body: { counts, ...(creds || {}) } });
+        res = await withChargeDecision((extra) => api('/api/cash/stock-sync', { method: 'POST', body: { counts, ...extra, ...(creds || {}) } }));
+        if (!res) return; // the admin cancelled the charge decision: nothing was saved
       } catch (err) {
         // The list moved under the count: reload it, keep every figure typed,
         // and clear (and mark) only the items that must be counted again.
@@ -730,9 +740,10 @@ window.Closing = (() => {
       const charge = approve ? readCharge(el) : {};
       if (typeof charge === 'string') { cfg.notify(charge, 'error'); return; }
       await cfg.withBusy(btn, async () => {
-        await api(`/api/cash/stock-sync/${Number(sync.id)}/${approve ? 'approve' : 'reject'}`, {
-          method: 'POST', body: { note, ...(approve ? { corrections, ...charge } : {}), ...(creds || {}) },
-        });
+        const done = await withChargeDecision((extra) => api(`/api/cash/stock-sync/${Number(sync.id)}/${approve ? 'approve' : 'reject'}`, {
+          method: 'POST', body: { note, ...(approve ? { corrections, ...charge, ...extra } : {}), ...(creds || {}) },
+        }));
+        if (!done) return;
         if (inDialog) closeDialog();
         cfg.notify(approve ? 'Stock count approved — stock updated' : 'Stock count rejected');
         await refresh();
@@ -813,10 +824,9 @@ window.Closing = (() => {
     if (!gateBody) return;
     const creds = await askAdmin('Admin approval — drawer variance', `Closing ${gateInfo.variance > 0 ? 'over' : 'short'} by ${cfg.money(Math.abs(gateInfo.variance))}. The admin's password approves it.`);
     if (!creds) return;
-    const charge = gateInfo.variance < 0 ? await askCharge(-gateInfo.variance, today.holder && today.holder.name, 'Closing short') : {};
-    if (!charge) return;
     try {
-      const res = await api('/api/cash/close', { method: 'POST', body: { ...gateBody, ...charge, ...creds } });
+      const res = await withChargeDecision((extra) => api('/api/cash/close', { method: 'POST', body: { ...gateBody, ...extra, ...creds } }));
+      if (!res) return;
       gateBody = null; gateInfo = null;
       cfg.notify(`Drawer closed with the admin's approval (${res.variance > 0 ? 'over' : 'short'} by ${cfg.money(Math.abs(res.variance))})`);
       if (cfg.onClosed) await cfg.onClosed();
@@ -830,11 +840,8 @@ window.Closing = (() => {
   async function adminApproveRequest(reqId) {
     const creds = await askAdmin('Admin approval — drawer variance', 'Approving closes the drawer on the count that was sent.');
     if (!creds) return;
-    const r = today.close_request;
-    const charge = r && Number(r.id) === Number(reqId) && r.variance < 0 ? await askCharge(-r.variance, today.holder && today.holder.name, 'Closing short') : {};
-    if (!charge) return;
     try {
-      await api(`/api/cash/close-requests/${Number(reqId)}/approve`, { method: 'POST', body: { ...charge, ...creds } });
+      if (!(await withChargeDecision((extra) => api(`/api/cash/close-requests/${Number(reqId)}/approve`, { method: 'POST', body: { ...extra, ...creds } })))) return;
       const res = await api('/api/cash/close', { method: 'POST', body: { close_request_id: reqId } });
       cfg.notify(`Drawer closed with the admin's approval (${res.variance > 0 ? 'over' : 'short'} by ${cfg.money(Math.abs(res.variance))})`);
       if (cfg.onClosed) await cfg.onClosed();
@@ -909,7 +916,7 @@ window.Closing = (() => {
         const charge = approve ? readCharge(box) : {};
         if (typeof charge === 'string') { cfg.notify(charge, 'error'); return; }
         await cfg.withBusy(btn, async () => {
-          await api(`/api/cash/handovers/${Number(h.id)}/${approve ? 'approve' : 'reject'}`, { method: 'POST', body: { note, ...charge } });
+          if (!(await withChargeDecision((extra) => api(`/api/cash/handovers/${Number(h.id)}/${approve ? 'approve' : 'reject'}`, { method: 'POST', body: { note, ...charge, ...extra } })))) return;
           cfg.notify(approve ? `Handover approved — ${h.to_name} holds the drawer` : 'Handover rejected');
           await refresh();
         }, '…');
@@ -930,7 +937,7 @@ window.Closing = (() => {
         const charge = approve ? readCharge(box) : {};
         if (typeof charge === 'string') { cfg.notify(charge, 'error'); return; }
         await cfg.withBusy(btn, async () => {
-          await api(`/api/cash/close-requests/${Number(r.id)}/${approve ? 'approve' : 'reject'}`, { method: 'POST', body: { note, ...charge } });
+          if (!(await withChargeDecision((extra) => api(`/api/cash/close-requests/${Number(r.id)}/${approve ? 'approve' : 'reject'}`, { method: 'POST', body: { note, ...charge, ...extra } })))) return;
           cfg.notify(approve ? 'Close approved — the cashier can close now' : 'Close rejected');
           await refresh();
         }, '…');
@@ -972,7 +979,7 @@ window.Closing = (() => {
 
   return {
     askAdmin, refundRequestHtml, wireRefundDecision, ledgerHtml,
-    closeBlockReason, chargeForClose, showMyAccount,
+    closeBlockReason, withChargeDecision, showMyAccount,
     startHandover, acceptHandover, declineHandover, cancelHandover, startTakeover,
     init, update, refresh, closeAllowed, needsApproval, clearGate,
     startCount, cancelCount, submitCount, adminApproveSync,

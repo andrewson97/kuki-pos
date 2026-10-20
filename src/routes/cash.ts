@@ -5,7 +5,9 @@ import {
   ClosingError, decideStockSync, getStockSync, itemToken, listSyncItems, pendingDisposalCount, resolveApprover, stockSyncState, submitStockSync,
   syncShortageValue, syncUnpricedShortLines, type Approver,
 } from "../services/closing";
-import { addLedgerEntry, allBalances, ledgerBalance, ledgerEntries, readChargeDecision, type LedgerKind } from "../services/accounts";
+import {
+  addLedgerEntry, allBalances, chargeDecisionNeeded, chargeUndecided, ledgerBalance, ledgerEntries, readChargeDecision, type LedgerKind,
+} from "../services/accounts";
 import { todayDate } from "../utils/helpers";
 
 const cash = new Hono();
@@ -435,7 +437,9 @@ function handoverForViewer(h: any, user: { id: number; role: string }) {
     decline_reason: h.decline_reason, giver_notes: h.giver_notes,
   };
   if (user.id === h.from_user_id) Object.assign(out, { giver_total: h.giver_total, giver_expected: h.giver_expected });
-  if (user.id === h.to_user_id && h.status !== "pending") Object.assign(out, { receiver_total: h.receiver_total, variance: h.variance });
+  // The receiver sees their own count, never the variance: that and their
+  // count give away the expected figure for a recount.
+  if (user.id === h.to_user_id && h.status !== "pending") Object.assign(out, { receiver_total: h.receiver_total });
   return out;
 }
 
@@ -490,6 +494,11 @@ cash.get("/today", (c) => {
   // Who answers for the drawer, and any handover in flight.
   const holder = open ? drawerHolder(open) : null;
   const handover = open ? pendingHandover(open.id) ?? null : null;
+  // While a shift is open, what the drawer should hold is for its holder and
+  // admins only. Anyone else may be handed the drawer next, and counts it
+  // blind: knowing the figure, they would just "find" it.
+  const figuresHidden = !!open && user.role !== "admin" && holder?.id !== user.id;
+  const hide = (n: number) => (figuresHidden ? null : n);
 
   // Surface whether the open shift is from a prior day (cashier must close it
   // before starting fresh today).
@@ -507,13 +516,14 @@ cash.get("/today", (c) => {
     close,
     shift_open,
     shift_from_prior_day,
-    cash_sales,
-    cash_refunds,
-    cash_expenses,
-    deposits_taken,
-    deposits_applied,
-    deposits_refunded,
-    expected_now,
+    cash_sales: hide(cash_sales),
+    cash_refunds: hide(cash_refunds),
+    cash_expenses: hide(cash_expenses),
+    deposits_taken: hide(deposits_taken),
+    deposits_applied: hide(deposits_applied),
+    deposits_refunded: hide(deposits_refunded),
+    expected_now: hide(expected_now),
+    figures_hidden: figuresHidden,
     pending_expenses,
     // Refunds waiting on an admin: they block the close like pending expenses.
     pending_refunds: open ? pendingRefundCount() : 0,
@@ -523,13 +533,13 @@ cash.get("/today", (c) => {
     stock_sync: syncState
       ? { valid: syncState.valid, stale: syncState.stale, stale_reason: syncState.stale_reason, sync: syncForViewer(syncState.sync, user.role === "admin") }
       : null,
-    close_request,
+    close_request: figuresHidden ? null : close_request,
     // --- the holder and the handover (feature/drawer-accountability) ---
     holder,
     is_holder: !!holder && holder.id === user.id,
     // The last change of hands, and what handovers counted short/over in all.
     baseline: exp?.baseline ?? null,
-    handover_adjustment: exp?.breakdown.handover_adjustment ?? 0,
+    handover_adjustment: hide(exp?.breakdown.handover_adjustment ?? 0),
     handover: handover ? handoverForViewer(handover, user) : null,
     charge_small_shortages: chargeSmallShortages(),
     // The asking user's own pending account (what they owe the shop).
@@ -578,13 +588,16 @@ cash.post("/stock-sync", async (c) => {
   const body = await c.req.json().catch(() => ({} as any));
   const open = getCurrentOpenShift();
   if (!open) return c.json({ error: "No open shift to sync stock for." }, 400);
-  // The stock is counted by whoever answers for it: a shortage this count
-  // finds is charged to the holder, so it is theirs to count (or an admin's).
-  const holder = drawerHolder(open)!;
   try {
     // An admin's password at the till also lets the count through (a takeover
     // from an absent holder starts with one).
     const approver = await resolveApprover(user, body);
+    // The stock is counted by whoever answers for it: a shortage this count
+    // finds is charged to the holder. Read AFTER the password check, which
+    // awaits — the drawer may have changed hands meanwhile.
+    const openNow = getCurrentOpenShift();
+    if (!openNow || openNow.id !== open.id) return c.json({ error: "The shift has just been closed." }, 409);
+    const holder = drawerHolder(openNow)!;
     if (user.role !== "admin" && holder.id !== user.id && !approver) {
       return c.json({ error: `${holder.name} holds the drawer, so they count the stock for it.` }, 400);
     }
@@ -730,7 +743,7 @@ cash.post("/close", async (c) => {
     notes = req.notes;
     requestId = req.id;
     varianceApprovedBy = req.decided_by;
-    decisionBody = { charge: req.charge_decision !== "write_off", write_off_note: req.charge_note };
+    decisionBody = { charge: req.charge_decision !== "write_off", write_off_note: req.charge_note, charge_amount: req.charge_amount };
   } else {
     count = parseCount(body);
   }
@@ -747,6 +760,11 @@ cash.post("/close", async (c) => {
   let charge: { charge: boolean; amount: number; note: string | null } = { charge: false, amount: 0, note: null };
   if (short > 0) {
     if (overLimit(variance, limit)) {
+      // Nothing is charged by default: an approver closing it here says which.
+      // (Without an approver the close is refused below with needs_approval.)
+      if (!requestId && approver && chargeUndecided(decisionBody)) {
+        return c.json(chargeDecisionNeeded(short, holder), 409);
+      }
       const d = readChargeDecision(decisionBody, short);
       if (typeof d === "string") return c.json({ error: d }, 400);
       charge = d;
@@ -910,20 +928,24 @@ for (const action of ["approve", "reject"] as const) {
       // off. The close that uses this approval carries it out.
       let chargeDecision: string | null = null;
       let chargeNote: string | null = null;
+      let chargeAmount: number | null = null;
       if (action === "approve" && Number(req.variance) < -0.005) {
+        if (chargeUndecided(body)) return { status: 409 as const, error: "", needs: -Number(req.variance) };
         const d = readChargeDecision(body, -Number(req.variance));
         if (typeof d === "string") return { status: 400 as const, error: d };
         chargeDecision = d.charge ? "charge" : "write_off";
         chargeNote = d.note;
+        chargeAmount = d.charge ? d.amount : null;
       }
-      db.query(`UPDATE cash_close_requests SET status = ?, decided_by = ?, decided_at = datetime('now'), decision_note = ?, charge_decision = ?, charge_note = ? WHERE id = ?`)
-        .run(action === "approve" ? "approved" : "rejected", approver!.id, note, chargeDecision, chargeNote, id);
+      db.query(`UPDATE cash_close_requests SET status = ?, decided_by = ?, decided_at = datetime('now'), decision_note = ?, charge_decision = ?, charge_note = ?, charge_amount = ? WHERE id = ?`)
+        .run(action === "approve" ? "approved" : "rejected", approver!.id, note, chargeDecision, chargeNote, chargeAmount, id);
       db.query("INSERT INTO activity_log (user_id, action, details) VALUES (?, ?, ?)").run(
         approver!.id, action === "approve" ? "cash_close_approved" : "cash_close_rejected",
         JSON.stringify({ close_request_id: id, variance: req.variance, note, at_till: approver!.at_till })
       );
       return { request: latestCloseRequest(req.shift_open_id) };
     }).immediate();
+    if ("needs" in result) return c.json(chargeDecisionNeeded(Number(result.needs), openRow ? drawerHolder(openRow) : null), 409);
     if ("error" in result) return c.json({ error: result.error }, result.status);
     return c.json({ success: true, request: result.request });
   });
@@ -954,8 +976,11 @@ for (const action of ["approve", "reject"] as const) {
  * — and the stock must have been counted for the current holder since they
  * took the drawer, or a loss on their watch would pass to the next person.
  */
-function handoverBlockReason(open: any): string | null {
-  if (open.count_date !== todayDate()) return `This shift is from ${open.count_date}. Close it instead of handing it over.`;
+function handoverBlockReason(open: any, takeover = false): string | null {
+  // An earlier day's shift is closed, not handed on — but an admin may take it
+  // over from a holder who forgot it, so someone can close it (or carry on
+  // with enforce_cash_shift off).
+  if (!takeover && open.count_date !== todayDate()) return `This shift is from ${open.count_date}. Close it instead of handing it over.`;
   if (pendingHandover(open.id)) return "A handover of this drawer is already waiting.";
   const exp = getPendingExpenseCountSince(open.created_at);
   if (exp > 0) return `${exp} expense${exp > 1 ? "s are" : " is"} waiting for an admin. Settle ${exp > 1 ? "them" : "it"} before handing over.`;
@@ -1176,7 +1201,8 @@ cash.post("/handovers/:id/accept", async (c) => {
       return { accepted: true, variance };
     }).immediate();
     const h = getHandover(id);
-    return c.json({ success: true, ...out, handover: handoverForViewer(h, user) });
+    // No variance back to the receiver (see handoverForViewer); an admin sees it.
+    return c.json({ success: true, accepted: out.accepted, ...(user.role === "admin" ? { variance: out.variance } : {}), handover: handoverForViewer(h, user) });
   } catch (err: any) {
     return closingError(c, err);
   }
@@ -1214,6 +1240,10 @@ for (const action of ["approve", "reject"] as const) {
         } else {
           const short = Number(h.variance) < -0.005 ? money(-Number(h.variance)) : 0;
           if (short > 0) {
+            if (chargeUndecided(body)) {
+              const { error, ...extra } = chargeDecisionNeeded(short, { id: h.from_user_id, name: h.from_name });
+              throw new ClosingError(error, 409, extra);
+            }
             const d = readChargeDecision(body, short);
             if (typeof d === "string") throw new ClosingError(d, 400);
             if (d.charge && d.amount > 0) chargeHandoverShort(h, d.amount, d.note, approver!.id);
@@ -1262,7 +1292,7 @@ cash.post("/handovers/takeover", async (c) => {
   const counted = computeTotal(count);
   try {
     const out = db.transaction(() => {
-      const why = handoverBlockReason(open);
+      const why = handoverBlockReason(open, true);
       if (why) throw new ClosingError(why, 400);
       if (drawerHolder(getCurrentOpenShift())!.id !== prev.id) throw new ClosingError("The drawer has just changed hands.", 409);
       const { expected } = expectedFor(open);
@@ -1272,6 +1302,11 @@ cash.post("/handovers/takeover", async (c) => {
       let decision: { charge: boolean; amount: number; note: string | null } | null = null;
       if (short > 0) {
         if (overLimit(variance, limit)) {
+          // Decided on the server's figure: the page's may be out of date.
+          if (chargeUndecided(body)) {
+            const { error, ...extra } = chargeDecisionNeeded(short, prev);
+            throw new ClosingError(error, 409, extra);
+          }
           const d = readChargeDecision(body, short);
           if (typeof d === "string") throw new ClosingError(d, 400);
           decision = d;
@@ -1334,8 +1369,18 @@ cash.post("/accounts/:userId/entries", adminOnly, async (c) => {
   if (!Number.isFinite(amount) || amount <= 0 || amount > 10_000_000) return c.json({ error: "Enter an amount above 0." }, 400);
   const note = String(body.note ?? "").trim() || null;
   if (kind !== "payment" && !note) return c.json({ error: kind === "charge" ? "Say what the charge is for." : "Say why it is written off." }, 400);
-  const entryId = getDb().transaction(() => addLedgerEntry({ userId: id, kind, amount, sourceType: "manual", note, createdBy: user.id })).immediate();
-  return c.json({ success: true, id: entryId, balance: ledgerBalance(id) });
+  // Overages are never credited, so neither is an over-payment: a payment or
+  // write-off is at most what is owed, or it would quietly soak up the next
+  // shortage.
+  const out = getDb().transaction(() => {
+    const owed = ledgerBalance(id);
+    if (kind !== "charge" && amount > owed + 0.005) {
+      return { error: owed > 0 ? `Only Rs ${owed.toFixed(2)} is owed.` : "Nothing is owed on this account." };
+    }
+    return { id: addLedgerEntry({ userId: id, kind, amount, sourceType: "manual", note, createdBy: user.id }) };
+  }).immediate();
+  if ("error" in out) return c.json({ error: out.error }, 400);
+  return c.json({ success: true, id: out.id, balance: ledgerBalance(id) });
 });
 
 // --- The admin's queue -------------------------------------------------------

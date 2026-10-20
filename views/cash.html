@@ -147,7 +147,7 @@
       // Variance against the SERVER's expected figure (expected_now), never one
       // re-derived here: the browser used to leave the pre-order deposits out,
       // so the screen and the stored close disagreed on any day with a deposit.
-      if (mode === 'close' && todayData) {
+      if (mode === 'close' && todayData && !todayData.figures_hidden) {
         const variance = money(total - (todayData.expected_now || 0));
         const vEl = document.getElementById('variance-amt');
         vEl.textContent = signedCurrency(variance);
@@ -174,7 +174,9 @@
       } else if (mode === 'close') {
         formTitle.textContent = 'Closing Count';
         submitBtn.className = 'btn btn-success w-100 mt-3';
-        expectedBlock.style.display = 'block';
+        // Hidden from anyone but the holder and admins: whoever may be handed
+        // the drawer next counts it blind (the server sends no figures).
+        expectedBlock.style.display = todayData.figures_hidden ? 'none' : 'block';
         document.getElementById('opening-amt').textContent = formatCurrency(todayData.open?.total_amount || 0);
         document.getElementById('sales-amt').textContent = formatCurrency(todayData.cash_sales || 0);
         document.getElementById('refunds-amt').textContent = formatCurrency(todayData.cash_refunds || 0);
@@ -288,11 +290,10 @@
       body.coins_total = coinsValue();
       await withBusy(btn, async () => {
         let res;
-        // An admin closing short over the limit: charge the holder or write it off.
-        const send = mode === 'close' ? await Closing.chargeForClose(body, money(DENOMS.reduce((t, d) => t + (body[`notes_${d}`] || 0) * d, 0) + body.coins_total)) : body;
-        if (!send) return;
         try {
-          res = await api(`/api/cash/${mode}`, { method: 'POST', body: send });
+          // An admin closing short over the limit is asked: charge the holder or write it off.
+          res = await Closing.withChargeDecision((extra) => api(`/api/cash/${mode}`, { method: 'POST', body: { ...body, ...extra } }));
+          if (!res) return;
         } catch (err) {
           // Over the variance limit: not a failure, a question for an admin.
           // The count stays on screen; closing.js offers "request" / "approve here".
