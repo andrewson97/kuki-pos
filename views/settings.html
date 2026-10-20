@@ -63,6 +63,13 @@
                 <input type="number" class="form-control" id="s-variance-limit" min="0" step="any">
                 <div class="text-muted" style="font-size:0.85rem;">A drawer closing more than this over <em>or</em> short needs an admin's approval.</div>
               </div>
+              <div class="col-md-6">
+                <div class="form-check form-switch mt-md-4">
+                  <input class="form-check-input" type="checkbox" id="s-charge-small">
+                  <label class="form-check-label" for="s-charge-small">Charge small shortages too</label>
+                </div>
+                <div class="text-muted" style="font-size:0.85rem;">On: a cash shortage <em>within</em> the allowance (at a close or a handover) also goes on the holder's pending account. Off: only shortages an admin approves are charged.</div>
+              </div>
             </div>
             <button class="btn btn-primary" onclick="saveSettings(this)">Save Settings</button>
           </div>
@@ -121,6 +128,7 @@
       document.getElementById('s-printer-address').value = s.printer_address || '';
       document.getElementById('s-enforce-shift').checked = (s.enforce_cash_shift ?? '1') === '1';
       document.getElementById('s-variance-limit').value = s.cash_variance_limit ?? '200';
+      document.getElementById('s-charge-small').checked = s.charge_small_shortages === '1';
 
       // Load activity log
       const log = await api('/api/settings/activity-log?limit=50');
@@ -197,6 +205,7 @@
             printer_address: document.getElementById('s-printer-address').value,
             enforce_cash_shift: document.getElementById('s-enforce-shift').checked ? '1' : '0',
             cash_variance_limit: varianceLimitInput(),
+            charge_small_shortages: document.getElementById('s-charge-small').checked ? '1' : '0',
           },
         });
         showToast('Settings saved!');

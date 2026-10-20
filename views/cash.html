@@ -16,8 +16,10 @@
     </div>
     <div class="content-area">
       <div id="today-status" class="mb-4"></div>
-      <!-- Closing gates (public/js/closing.js): the admin's approval queue, and
-           Step 1, the stock sync that has to be done before the drawer closes. -->
+      <!-- public/js/closing.js: who holds the drawer (handover / takeover /
+           my account), the admin's approval queue, and Step 1, the stock sync
+           that has to be done before the drawer closes or changes hands. -->
+      <div id="cc-drawer"></div>
       <div id="cc-approvals"></div>
       <div id="cc-sync"></div>
 
@@ -42,6 +44,7 @@
               <div class="d-flex justify-content-between"><span class="text-muted">+ Deposits taken (cash):</span><span id="deposits-taken-amt">-</span></div>
               <div class="d-flex justify-content-between"><span class="text-muted">- Deposits applied at collection:</span><span id="deposits-applied-amt">-</span></div>
               <div class="justify-content-between d-none" id="deposits-refunded-row"><span class="text-muted">- Deposits refunded (cash):</span><span id="deposits-refunded-amt">-</span></div>
+              <div class="justify-content-between d-none" id="handover-adj-row"><span class="text-muted">&plusmn; Counted at handovers:</span><span id="handover-adj-amt">-</span></div>
               <div class="d-flex justify-content-between fw-bold"><span>Expected:</span><span id="expected-amt">-</span></div>
               <div class="d-flex justify-content-between fs-5 mt-2"><span>Variance:</span><strong id="variance-amt">-</strong></div>
             </div>
@@ -82,6 +85,8 @@
         sync: document.getElementById('cc-sync'),
         gate: document.getElementById('cc-gate'),
         approvals: document.getElementById('cc-approvals'),
+        drawer: document.getElementById('cc-drawer'),
+        userId: currentUser && currentUser.id,
         // showToast() writes innerHTML, and these messages carry product names
         // and admins' notes: escaped here, so they show as typed.
         notify: (msg, kind) => showToast(escText(msg), kind === 'error' ? 'error' : 'success'),
@@ -142,7 +147,7 @@
       // Variance against the SERVER's expected figure (expected_now), never one
       // re-derived here: the browser used to leave the pre-order deposits out,
       // so the screen and the stored close disagreed on any day with a deposit.
-      if (mode === 'close' && todayData) {
+      if (mode === 'close' && todayData && !todayData.figures_hidden) {
         const variance = money(total - (todayData.expected_now || 0));
         const vEl = document.getElementById('variance-amt');
         vEl.textContent = signedCurrency(variance);
@@ -169,7 +174,9 @@
       } else if (mode === 'close') {
         formTitle.textContent = 'Closing Count';
         submitBtn.className = 'btn btn-success w-100 mt-3';
-        expectedBlock.style.display = 'block';
+        // Hidden from anyone but the holder and admins: whoever may be handed
+        // the drawer next counts it blind (the server sends no figures).
+        expectedBlock.style.display = todayData.figures_hidden ? 'none' : 'block';
         document.getElementById('opening-amt').textContent = formatCurrency(todayData.open?.total_amount || 0);
         document.getElementById('sales-amt').textContent = formatCurrency(todayData.cash_sales || 0);
         document.getElementById('refunds-amt').textContent = formatCurrency(todayData.cash_refunds || 0);
@@ -182,6 +189,12 @@
         document.getElementById('deposits-refunded-row').classList.toggle('d-none', !hasRefunded);
         document.getElementById('deposits-refunded-row').classList.toggle('d-flex', hasRefunded);
         if (hasRefunded) document.getElementById('deposits-refunded-amt').textContent = formatCurrency(todayData.deposits_refunded);
+        // What handovers counted short (-) or over (+): settled there, so the
+        // drawer carries on from what the receiver counted.
+        const adj = Number(todayData.handover_adjustment) || 0;
+        document.getElementById('handover-adj-row').classList.toggle('d-none', isNil(adj));
+        document.getElementById('handover-adj-row').classList.toggle('d-flex', !isNil(adj));
+        document.getElementById('handover-adj-amt').textContent = signedCurrency(adj);
         // The server's figure, shown as-is: the lines above explain it, they are
         // not added up again here.
         document.getElementById('expected-amt').textContent = formatCurrency(todayData.expected_now || 0);
@@ -203,7 +216,12 @@
       // A refund waiting on an admin would move the expected cash after the count.
       const refundsBlock = mode === 'close' && (todayData?.pending_refunds || 0) > 0;
       const syncBlock = mode === 'close' && !Closing.closeAllowed();
-      if (expensesBlock) {
+      // Not the holder, or a handover in flight: the server refuses the close.
+      const holderMsg = mode === 'close' ? Closing.closeBlockReason() : '';
+      if (holderMsg) {
+        pendWarn.textContent = holderMsg;
+        pendWarn.style.display = 'block';
+      } else if (expensesBlock) {
         pendWarn.textContent = `${todayData.pending_expenses} expense(s) pending admin approval. Shift cannot be closed until they are approved or rejected.`;
         pendWarn.style.display = 'block';
       } else if (refundsBlock) {
@@ -218,7 +236,7 @@
       submitBtn.textContent = mode === 'close'
         ? 'Save Closing Count'
         : (todayData?.close ? 'Open New Shift' : 'Save Opening Float');
-      submitBtn.disabled = expensesBlock || refundsBlock || syncBlock;
+      submitBtn.disabled = !!holderMsg || expensesBlock || refundsBlock || syncBlock;
     }
 
     async function loadCash() {
@@ -240,7 +258,7 @@
           <td>${h.user_name || '-'}</td>
           <td class="text-end">${formatCurrency(h.total_amount)}</td>
           <td class="text-end ${h.variance == null ? '' : varianceClass(h.variance)}">${h.variance == null ? '-' : signedCurrency(h.variance)}</td>
-          <td class="small text-muted">${escText(h.variance_approved_by_name || '')}</td>
+          <td class="small text-muted">${escText(h.variance_approved_by_name || '')}${h.charged_amount > 0 ? `<div class="text-danger">charged ${formatCurrency(h.charged_amount)}</div>` : ''}</td>
         </tr>
       `).join('') || '<tr><td colspan="6" class="text-center text-muted py-3">No records yet</td></tr>';
     }
@@ -273,7 +291,9 @@
       await withBusy(btn, async () => {
         let res;
         try {
-          res = await api(`/api/cash/${mode}`, { method: 'POST', body });
+          // An admin closing short over the limit is asked: charge the holder or write it off.
+          res = await Closing.withChargeDecision((extra) => api(`/api/cash/${mode}`, { method: 'POST', body: { ...body, ...extra } }));
+          if (!res) return;
         } catch (err) {
           // Over the variance limit: not a failure, a question for an admin.
           // The count stays on screen; closing.js offers "request" / "approve here".

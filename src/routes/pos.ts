@@ -13,7 +13,7 @@ import {
 import { adminOnly } from "../middleware/auth";
 import { returnPortionsForBill } from "../services/portions";
 import { ClosingError, resolveApprover, type Approver } from "../services/closing";
-import { cashShiftBlockReason } from "./cash";
+import { cashShiftBlockReason, drawerHandlerBlockReason } from "./cash";
 import { todayDate, formatDateTime } from "../utils/helpers";
 
 const pos = new Hono();
@@ -171,6 +171,12 @@ pos.post("/bill", async (c) => {
     if (latestOpen && latestOpen.count_date !== today) {
       return c.json({ error: `A shift from ${latestOpen.count_date} is still open. Close it on the Cash Drawer page before starting today's sales.` }, 400);
     }
+  }
+  // Cash goes into the drawer, so only its holder (or an admin) takes it, and
+  // not while the drawer is being handed over. Card and LankaQR are untouched.
+  if ((body.payment_method || "cash") === "cash" && !knownReplay) {
+    const blocked = drawerHandlerBlockReason(user);
+    if (blocked) return c.json({ error: blocked, cash_blocked: true }, 400);
   }
 
   let bill;
@@ -527,6 +533,11 @@ function performRefund(params: { billId: number; reason: string; restockRequeste
   if (bill.payment_method === "cash") {
     const blocked = cashShiftBlockReason();
     if (blocked) throw new RefundError(`This is a cash refund, so it needs an open cash shift. ${blocked}`);
+    // And it is paid out by whoever refunds it, so they must hold the drawer
+    // (or be an admin), and not while it is being handed over.
+    const payer = db.query("SELECT id, role FROM users WHERE id = ?").get(params.refundedBy) as any;
+    const notHolder = payer ? drawerHandlerBlockReason(payer) : null;
+    if (notHolder) throw new RefundError(`This is a cash refund, paid out of the drawer. ${notHolder}`);
   }
 
   const fromPreorder = String(bill.cart_id || "").startsWith("preorder-");
@@ -652,9 +663,14 @@ pos.post("/bills/:id/refund-requests", async (c) => {
   if (typeof parsed === "string") return c.json({ error: parsed }, 400);
   const db = getDb();
   const result = db.transaction(() => {
-    const bill = db.query("SELECT status, token_number, total FROM bills WHERE id = ?").get(id) as any;
+    const bill = db.query("SELECT status, token_number, total, payment_method FROM bills WHERE id = ?").get(id) as any;
     if (!bill) return { status: 404 as const, error: "Not found" };
     if (bill.status !== "completed") return { status: 400 as const, error: "Bill is already " + bill.status };
+    // A cash refund is paid out by the one asking, so they must hold the drawer.
+    if (bill.payment_method === "cash") {
+      const blocked = drawerHandlerBlockReason(user);
+      if (blocked) return { status: 400 as const, error: `This is a cash refund, paid out of the drawer. ${blocked}` };
+    }
     if (pendingRefundRequest(id)) return { status: 409 as const, error: "A refund of this bill is already waiting for an admin." };
     const rid = Number(db.query(
       "INSERT INTO refund_requests (bill_id, user_id, reason, restock, status) VALUES (?, ?, ?, ?, 'pending')"

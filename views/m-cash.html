@@ -39,8 +39,10 @@
 
   <div class="container">
     <div id="status-banner"></div>
-    <!-- Closing gates (public/js/closing.js): the admin's approval queue, and
-         Step 1, the stock sync that has to be done before the drawer closes. -->
+    <!-- public/js/closing.js: who holds the drawer (handover / takeover /
+         my account), the admin's approval queue, and Step 1, the stock sync
+         that has to be done before the drawer closes or changes hands. -->
+    <div id="cc-drawer"></div>
     <div id="cc-approvals"></div>
     <div id="cc-sync"></div>
 
@@ -64,6 +66,7 @@
         <div class="summary-row"><span style="color:var(--ink-soft);">+ Deposits taken (cash)</span><span id="exp-dep-taken">-</span></div>
         <div class="summary-row"><span style="color:var(--ink-soft);">- Deposits applied at collection</span><span id="exp-dep-applied">-</span></div>
         <div class="summary-row" id="row-dep-refunded" style="display:none;"><span style="color:var(--ink-soft);">- Deposits refunded (cash)</span><span id="exp-dep-refunded">-</span></div>
+        <div class="summary-row" id="row-handover-adj" style="display:none;"><span style="color:var(--ink-soft);">&plusmn; Counted at handovers</span><span id="exp-handover-adj">-</span></div>
         <div class="summary-row bold"><span>Expected</span><span id="exp-expected">-</span></div>
         <div class="summary-row bold" style="font-size:1.1rem;"><span>Variance</span><strong id="exp-variance">-</strong></div>
       </div>
@@ -96,6 +99,8 @@
           sync: $('cc-sync'),
           gate: $('cc-gate'),
           approvals: $('cc-approvals'),
+          drawer: $('cc-drawer'),
+          userId: currentUser && currentUser.id,
           notify: (msg, kind) => toast(msg, kind === 'error' ? 'error' : 'ok'),
           money: fmt,
           withBusy,
@@ -159,7 +164,7 @@
       // Variance against the SERVER's expected figure (expected_now), never one
       // re-derived here: this page used to leave the pre-order deposits out, so
       // the screen and the stored close disagreed on any day with a deposit.
-      if (mode === 'close' && todayData) {
+      if (mode === 'close' && todayData && !todayData.figures_hidden) {
         const v = money(total - (todayData.expected_now || 0));
         const el = $('exp-variance');
         el.textContent = isNil(v) ? fmt(0) : (v > 0 ? '+' : '') + fmt(v);
@@ -203,7 +208,9 @@
         $('pending-warn').style.display = 'none';
       } else {
         $('form-title').textContent = 'Closing Count';
-        $('expected-block').style.display = 'block';
+        // Hidden from anyone but the holder and admins: whoever may be handed
+        // the drawer next counts it blind (the server sends no figures).
+        $('expected-block').style.display = todayData.figures_hidden ? 'none' : 'block';
         $('exp-opening').textContent = fmt(todayData.open?.total_amount || 0);
         $('exp-sales').textContent = fmt(todayData.cash_sales || 0);
         $('exp-refunds').textContent = fmt(todayData.cash_refunds || 0);
@@ -215,6 +222,10 @@
         const hasRefunded = todayData.deposits_refunded !== undefined && todayData.deposits_refunded !== null;
         $('row-dep-refunded').style.display = hasRefunded ? 'flex' : 'none';
         if (hasRefunded) $('exp-dep-refunded').textContent = fmt(todayData.deposits_refunded);
+        // What handovers counted short (-) or over (+): settled there.
+        const adj = Number(todayData.handover_adjustment) || 0;
+        $('row-handover-adj').style.display = isNil(adj) ? 'none' : 'flex';
+        $('exp-handover-adj').textContent = (adj > 0 ? '+' : '') + fmt(adj);
         // The server's figure, shown as-is: the lines above explain it, they are
         // not added up again here.
         $('exp-expected').textContent = fmt(todayData.expected_now || 0);
@@ -248,9 +259,11 @@
         // synced (Step 1, public/js/closing.js).
         const syncBlock = !Closing.closeAllowed();
         const refundsBlock = (todayData.pending_refunds || 0) > 0;
-        submit.disabled = todayData.pending_expenses > 0 || refundsBlock || syncBlock;
-        if (!(todayData.pending_expenses > 0)) {
-          const msg = refundsBlock
+        // Not the holder, or a handover in flight: the server refuses the close.
+        const holderMsg = Closing.closeBlockReason();
+        submit.disabled = !!holderMsg || todayData.pending_expenses > 0 || refundsBlock || syncBlock;
+        if (holderMsg || !(todayData.pending_expenses > 0)) {
+          const msg = holderMsg ? holderMsg : refundsBlock
             ? `${todayData.pending_refunds} cash refund(s) waiting for an admin. Shift cannot close until they are approved, rejected or withdrawn.`
             : syncBlock ? 'Sync the stock first (Step 1 above). The drawer can close once the stock is synced.' : '';
           $('pending-warn').textContent = msg;
@@ -283,7 +296,9 @@
         body.coins_total = coinsValue();
         let res;
         try {
-          res = await api('/api/cash/close', { method: 'POST', body });
+          // An admin closing short over the limit is asked: charge the holder or write it off.
+          res = await Closing.withChargeDecision((extra) => api('/api/cash/close', { method: 'POST', body: { ...body, ...extra } }));
+          if (!res) return;
         } catch (err) {
           // Over the variance limit: a question for an admin, not a failure.
           if (err && err.status === 409 && err.data && err.data.needs_approval) {
