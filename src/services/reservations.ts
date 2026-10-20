@@ -1,4 +1,5 @@
 import { getDb } from "../db/database";
+import { checkPortions, computeLinkedUnits } from "./portions";
 
 // --- Cart stock reservations ("holds") ---------------------------------------
 //
@@ -178,6 +179,20 @@ export function syncCartReservations(params: {
         );
       }
       insert.run(pid, need.needed, cartId, params.user_id);
+    }
+
+    // Products made from an opened ingredient (src/services/portions.ts) are
+    // held too, so another till cannot sell the last milkshake in the box this
+    // cart has already promised. Checked against the opened units minus other
+    // carts' holds, and held as an ordinary row in units of the product — even
+    // for a product that does not track its own stock, which no stock check
+    // ever reads. A product that is BOTH tracked and linked already got its row
+    // above, with the same unit count (both explode components the same way).
+    const linked = computeLinkedUnits(items);
+    checkPortions(linked, cartId);
+    for (const [pid, l] of linked) {
+      if (needs.has(pid) || l.units <= 0) continue;
+      insert.run(pid, l.units, cartId, params.user_id);
     }
   });
 

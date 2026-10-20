@@ -2,6 +2,8 @@ import { createHash } from "node:crypto";
 import { getDb } from "../db/database";
 import { todayDate } from "../utils/helpers";
 import { computeStockNeeds, heldByOtherCarts, releaseCartReservations } from "./reservations";
+import { checkPortions, computeLinkedUnits, consumePortions } from "./portions";
+import { deductPacking, resolveOrderType } from "./packing";
 export function getNextTokenNumber(): number {
   const db = getDb();
   const today = todayDate();
@@ -72,6 +74,12 @@ export interface CreatedBill {
 //     tendered amount included, so including it costs the double-tap guard
 //     nothing — while leaving it out would let a genuinely different tender be
 //     swallowed.
+//   - order_type (dine-in / takeaway), AS SENT, and only when it was sent: it
+//     decides which packing leaves stock, so the same basket eaten in and taken
+//     away are two sales. Appended after the lines and only when present, so a
+//     body from a till page that predates the toggle hashes exactly as it did
+//     before — a pending sale written down by an older page must still be found
+//     by POST /bill/status after a deploy.
 //
 // WHAT IS DELIBERATELY OUT:
 //   - user_id. A sale is defined by what was sold, to whom, for how much and
@@ -137,6 +145,8 @@ export interface SaleFingerprintInput {
   tax_rate: number;
   payment_method: string;
   amount_given?: number | null;
+  /** As sent by the till; absent for a till page that predates the toggle. */
+  order_type?: string | null;
 }
 
 /**
@@ -171,6 +181,10 @@ export function saleFingerprint(input: SaleFingerprintInput): string {
       fpNum(it?.original_price ?? it?.unit_price)
     );
   }
+  // Normalised exactly as resolveOrderType() reads it, so "dine-in" and
+  // "dine_in" — the same stored bill — are the same sale.
+  const orderType = String(input.order_type ?? "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+  if (orderType) parts.push("ot=" + fpStr(orderType));
   // \u001f is the ASCII unit separator: not typeable into a product name, and
   // the length prefixes above make it unforgeable in any case.
   return createHash("sha256").update(parts.join("\u001f"), "utf8").digest("hex");
@@ -439,7 +453,16 @@ interface CreateBillParams {
   // released and everything else (token, lines, cost price, log) is unchanged.
   // Not part of the fingerprint: it changes what happens to the shelf, not
   // which sale this is.
+  //
+  // It also skips opened-ingredient portions (src/services/portions.ts), for
+  // the same reason. It does NOT skip packing: the box a collected order leaves
+  // in is real and really gone. Packing never refuses a sale, so a collection
+  // cannot be blocked by it.
   skip_stock?: boolean;
+  // 'dine_in' | 'takeaway', as the till sent it. Absent falls back to the
+  // shop's default (resolveOrderType); anything else is refused. Stored on the
+  // bill, printed on the slips, and it decides which packing leaves stock.
+  order_type?: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -565,7 +588,11 @@ export function createBill(params: CreateBillParams): CreatedBill {
   // it is left empty (stored as NULL) when there is no key to pair it with.
   // Hashed from the discount AS SENT, not the rounded one: POST /bill and POST
   // /bill/status hash the raw request body too, and all three must agree.
-  const fingerprint = cartId ? saleFingerprint({ items, customer_id, discount, tax_rate, payment_method, amount_given }) : "";
+  // Resolved before the token too: an unknown order type is a refused sale.
+  const orderType = resolveOrderType(params.order_type);
+  const fingerprint = cartId
+    ? saleFingerprint({ items, customer_id, discount, tax_rate, payment_method, amount_given, order_type: params.order_type })
+    : "";
 
   const token_number = getNextTokenNumber();
   const bill_date = todayDate();
@@ -574,8 +601,8 @@ export function createBill(params: CreateBillParams): CreatedBill {
   const changeGiven = amount_given != null ? round2(Math.max(0, amount_given - total)) : null;
 
   const insertBill = db.query(`
-    INSERT INTO bills (token_number, bill_date, customer_id, subtotal, discount, tax_rate, tax_amount, total, payment_method, status, user_id, amount_given, change_given, cart_id, cart_fingerprint, stock_skipped)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'completed', ?, ?, ?, ?, ?, ?)
+    INSERT INTO bills (token_number, bill_date, customer_id, subtotal, discount, tax_rate, tax_amount, total, payment_method, status, user_id, amount_given, change_given, cart_id, cart_fingerprint, stock_skipped, order_type)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'completed', ?, ?, ?, ?, ?, ?, ?)
   `);
 
   const insertItem = db.query(`
@@ -662,6 +689,12 @@ export function createBill(params: CreateBillParams): CreatedBill {
       }
     }
 
+    // Opened ingredients: a milkshake needs an opened milk box with enough
+    // left, after what other carts hold. Checked here, under the same write
+    // lock as the deduction below, whatever the till's sync said earlier.
+    const linkedUnits: ReturnType<typeof computeLinkedUnits> = params.skip_stock ? new Map() : computeLinkedUnits(items);
+    checkPortions(linkedUnits, cartId);
+
     const result = insertBill.run(
       token_number, bill_date, customer_id || null,
       // The rounded, validated figures from computeBillTotals() — the discount
@@ -681,7 +714,8 @@ export function createBill(params: CreateBillParams): CreatedBill {
       // from one that never did (a pre-order collection, see skip_stock). It
       // cannot be inferred from the cart id: collections rung up before
       // skip_stock existed DID deduct stock, and their history must stay.
-      params.skip_stock ? 1 : 0
+      params.skip_stock ? 1 : 0,
+      orderType
     );
     const billId = Number(result.lastInsertRowid);
 
@@ -702,6 +736,12 @@ export function createBill(params: CreateBillParams): CreatedBill {
     for (const [pid, need] of needs) {
       db.query("UPDATE products SET stock_quantity = stock_quantity - ?, stock_updated_at = datetime('now') WHERE id = ?").run(need.needed, pid);
     }
+
+    // Take the portions the sale used out of the opened units (finishing any
+    // that run out), and the packing it used out of stock. Both inside the sale
+    // transaction, so a sale and its stock movements commit or roll back together.
+    consumePortions(billId, linkedUnits, user_id);
+    deductPacking({ bill_id: billId, token_number, order_type: orderType, items, user_id });
 
     // The sale landed, so this cart's holds have served their purpose. Inside
     // the same transaction as the bill insert and the stock deduction, so it is

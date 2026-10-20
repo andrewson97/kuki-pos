@@ -1,6 +1,10 @@
 import { Hono } from "hono";
 import { getDb } from "../db/database";
-import { getUser } from "../middleware/auth";
+import { adminOnly, getUser } from "../middleware/auth";
+import {
+  ClosingError, decideStockSync, getStockSync, itemToken, listSyncItems, resolveApprover, stockSyncState, submitStockSync,
+  type Approver,
+} from "../services/closing";
 import { todayDate } from "../utils/helpers";
 
 const cash = new Hono();
@@ -243,104 +247,14 @@ export function cashShiftBlockReason(): string | null {
   return null;
 }
 
-cash.get("/today", (c) => {
-  const date = todayDate();
-  const open = getCurrentOpenShift();
-  const close = getLatestClose();
-  const shift_open = !!open;
-
-  // Sales/refunds/expenses since the active shift started, or since the last
-  // close if no shift is open (to show a zeroed-out summary).
-  const since = open ? open.created_at : (close?.created_at || `${date} 00:00:00`);
-  const cash_sales = getCashSalesSince(since);
-  const cash_refunds = getCashRefundsSince(since);
-  const cash_expenses = getCashExpensesSince(since);
-  // Pre-order deposits: cash in the drawer that is not a sale (+), and the part
-  // of today's cash bills that was already paid as a deposit earlier (-). See
-  // the two helpers above; the close below applies exactly these figures.
-  const deposits_taken = getDepositsTakenSince(since);
-  const deposits_applied = getDepositsAppliedSince(since);
-  // Cash deposits handed back on cancelled pre-orders (-). Not an expense.
-  const deposits_refunded = getDepositsRefundedSince(since);
-  const pending_expenses = open ? getPendingExpenseCountSince(open.created_at) : 0;
-
-  // What a close right now would expect to find in the drawer. Returned so the
-  // close screen can show the running figure and its parts without having to
-  // re-derive the formula in the browser.
-  //
-  // This is THE expected figure for the live close screen: cash.html and
-  // m-cash.html show it as-is and work the variance out from it, so the screen
-  // can never again quote a different "expected" from the one the close stores
-  // (they used to re-add the parts in the browser and leave the deposits out).
-  const expected_now = open
-    ? money((open.total_amount || 0) + cash_sales - cash_refunds - cash_expenses + deposits_taken - deposits_applied - deposits_refunded)
-    : 0;
-
-  // Surface whether the open shift is from a prior day (cashier must close it
-  // before starting fresh today).
-  const open_date = open?.count_date ?? null;
-  const shift_from_prior_day = !!open && open_date !== date;
-
-  return c.json({
-    date,
-    open,
-    close,
-    shift_open,
-    shift_from_prior_day,
-    cash_sales,
-    cash_refunds,
-    cash_expenses,
-    deposits_taken,
-    deposits_applied,
-    deposits_refunded,
-    expected_now,
-    pending_expenses,
-  });
-});
-
-cash.post("/open", async (c) => {
-  const user = getUser(c)!;
-  const body = await c.req.json();
-  const db = getDb();
-  const date = todayDate();
-
-  if (getCurrentOpenShift()) {
-    return c.json({ error: "A shift is already open (possibly from a previous day). Close it before starting a new one." }, 400);
-  }
-
-  const count = parseCount(body);
-  if (typeof count === "string") return c.json({ error: count }, 400);
-  const n = count.notes;
-  const total = computeTotal(count);
-  db.query(`
-    INSERT INTO cash_counts (count_type, count_date, user_id, notes_20, notes_50, notes_100, notes_500, notes_1000, notes_2000, notes_5000, coins_total, total_amount, notes)
-    VALUES ('open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(
-    date, user.id,
-    n.notes_20, n.notes_50, n.notes_100, n.notes_500, n.notes_1000, n.notes_2000, n.notes_5000,
-    count.coins_total, total, body.notes || null
-  );
-  return c.json({ success: true, total_amount: total, coins_total: count.coins_total });
-});
-
-cash.post("/close", async (c) => {
-  const user = getUser(c)!;
-  const body = await c.req.json();
-  const db = getDb();
-  const date = todayDate();
-
-  const openRow = getCurrentOpenShift();
-  if (!openRow) return c.json({ error: "No open shift to close." }, 400);
-
-  const count = parseCount(body);
-  if (typeof count === "string") return c.json({ error: count }, 400);
-
+/**
+ * What the drawer should hold right now for the open shift, and every part of
+ * it. The ONE formula: GET /today shows it, POST /close stores it, and a close
+ * request is checked against it — so the three can never quote different
+ * figures.
+ */
+function expectedFor(openRow: any) {
   const since = openRow.created_at;
-  const pending = getPendingExpenseCountSince(since);
-  if (pending > 0) {
-    return c.json({ error: `${pending} expense${pending > 1 ? "s" : ""} pending approval. Admin must approve or reject before closing.` }, 400);
-  }
-
   const opening = openRow.total_amount || 0;
   const cashSales = getCashSalesSince(since);
   const cashRefunds = getCashRefundsSince(since);
@@ -369,27 +283,8 @@ cash.post("/close", async (c) => {
   const expected = money(
     opening + cashSales - cashRefunds - cashExpenses + depositsTaken - depositsApplied - depositsRefunded
   );
-  const counted = computeTotal(count);
-  const variance = money(counted - expected);
-  const n = count.notes;
-
-  db.query(`
-    INSERT INTO cash_counts (count_type, count_date, user_id, notes_20, notes_50, notes_100, notes_500, notes_1000, notes_2000, notes_5000, coins_total, total_amount, expected_amount, variance, notes)
-    VALUES ('close', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(
-    date, user.id,
-    n.notes_20, n.notes_50, n.notes_100, n.notes_500, n.notes_1000, n.notes_2000, n.notes_5000,
-    count.coins_total, counted, expected, variance, body.notes || null
-  );
-  // The breakdown comes back so the close screen can show WHY expected is what
-  // it is. expected_amount / variance keep their existing meaning and are the
-  // only figures stored on the cash_counts row.
-  return c.json({
-    success: true,
-    total_amount: counted,
-    coins_total: count.coins_total,
-    expected_amount: expected,
-    variance,
+  return {
+    expected,
     breakdown: {
       opening,
       cash_sales: cashSales,
@@ -399,16 +294,482 @@ cash.post("/close", async (c) => {
       deposits_applied: depositsApplied,
       deposits_refunded: depositsRefunded,
     },
+  };
+}
+
+/** Rs. A close more than this over OR short needs an admin (settings.cash_variance_limit). */
+function varianceLimit(): number {
+  const row = getDb().query("SELECT value FROM settings WHERE key = 'cash_variance_limit'").get() as any;
+  // Blank is not "0 allowed" (Number("") is 0): that would send every close to
+  // the owner. Anything unreadable falls back to the default.
+  const raw = String(row?.value ?? "").trim();
+  const n = Number(raw);
+  return raw !== "" && Number.isFinite(n) && n >= 0 ? n : 200;
+}
+
+/** Over the limit either way, with half a cent of slack for the float tail. */
+const overLimit = (variance: number, limit: number) => Math.abs(variance) > limit + 0.005;
+
+/** The latest close request of this shift that still means something (not superseded). */
+function latestCloseRequest(shiftOpenId: number) {
+  return getDb().query(`
+    SELECT r.*, u.full_name AS user_name, d.full_name AS decided_by_name
+    FROM cash_close_requests r LEFT JOIN users u ON u.id = r.user_id LEFT JOIN users d ON d.id = r.decided_by
+    WHERE r.shift_open_id = ? AND r.status != 'superseded' ORDER BY r.id DESC LIMIT 1
+  `).get(shiftOpenId) as any;
+}
+
+/**
+ * A stock sync as the person asking may see it. A cashier gets how many lines
+ * did not match and nothing per line — no system figure, and not even WHICH
+ * line was off, since that is enough to home in on the system's figure. An
+ * admin sees everything.
+ */
+function syncForViewer(sync: any, isAdmin: boolean) {
+  if (!sync) return null;
+  if (isAdmin) return sync;
+  const { lines, ...rest } = sync;
+  return { ...rest, line_count: (lines || []).length };
+}
+
+function closingError(c: any, err: any) {
+  if (err instanceof ClosingError) return c.json({ error: err.message, ...err.extra }, err.status);
+  throw err;
+}
+
+cash.get("/today", (c) => {
+  const user = getUser(c)!;
+  const date = todayDate();
+  const open = getCurrentOpenShift();
+  const close = getLatestClose();
+  const shift_open = !!open;
+
+  // Sales/refunds/expenses since the active shift started, or since the last
+  // close if no shift is open (to show a zeroed-out summary).
+  const since = open ? open.created_at : (close?.created_at || `${date} 00:00:00`);
+  const cash_sales = getCashSalesSince(since);
+  const cash_refunds = getCashRefundsSince(since);
+  const cash_expenses = getCashExpensesSince(since);
+  // Pre-order deposits: cash in the drawer that is not a sale (+), and the part
+  // of today's cash bills that was already paid as a deposit earlier (-). See
+  // the two helpers above; the close below applies exactly these figures.
+  const deposits_taken = getDepositsTakenSince(since);
+  const deposits_applied = getDepositsAppliedSince(since);
+  // Cash deposits handed back on cancelled pre-orders (-). Not an expense.
+  const deposits_refunded = getDepositsRefundedSince(since);
+  const pending_expenses = open ? getPendingExpenseCountSince(open.created_at) : 0;
+
+  // What a close right now would expect to find in the drawer: expectedFor(),
+  // the same figure POST /close stores. cash.html and m-cash.html show it as-is
+  // and work the variance out from it.
+  const expected_now = open ? expectedFor(open).expected : 0;
+
+  // Surface whether the open shift is from a prior day (cashier must close it
+  // before starting fresh today).
+  const open_date = open?.count_date ?? null;
+  const shift_from_prior_day = !!open && open_date !== date;
+
+  // The two closing gates (src/services/closing.ts): where this shift's stock
+  // sync stands, and any close request waiting on (or approved by) an admin.
+  const syncState = open ? stockSyncState(open.id) : null;
+  const close_request = open ? latestCloseRequest(open.id) ?? null : null;
+
+  return c.json({
+    date,
+    open,
+    close,
+    shift_open,
+    shift_from_prior_day,
+    cash_sales,
+    cash_refunds,
+    cash_expenses,
+    deposits_taken,
+    deposits_applied,
+    deposits_refunded,
+    expected_now,
+    pending_expenses,
+    // Refunds waiting on an admin: they block the close like pending expenses.
+    pending_refunds: open ? pendingRefundCount() : 0,
+    variance_limit: varianceLimit(),
+    stock_sync: syncState
+      ? { valid: syncState.valid, stale: syncState.stale, stale_reason: syncState.stale_reason, sync: syncForViewer(syncState.sync, user.role === "admin") }
+      : null,
+    close_request,
   });
 });
+
+cash.post("/open", async (c) => {
+  const user = getUser(c)!;
+  const body = await c.req.json();
+  const db = getDb();
+  const date = todayDate();
+
+  if (getCurrentOpenShift()) {
+    return c.json({ error: "A shift is already open (possibly from a previous day). Close it before starting a new one." }, 400);
+  }
+
+  const count = parseCount(body);
+  if (typeof count === "string") return c.json({ error: count }, 400);
+  const n = count.notes;
+  const total = computeTotal(count);
+  db.query(`
+    INSERT INTO cash_counts (count_type, count_date, user_id, notes_20, notes_50, notes_100, notes_500, notes_1000, notes_2000, notes_5000, coins_total, total_amount, notes)
+    VALUES ('open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    date, user.id,
+    n.notes_20, n.notes_50, n.notes_100, n.notes_500, n.notes_1000, n.notes_2000, n.notes_5000,
+    count.coins_total, total, body.notes || null
+  );
+  return c.json({ success: true, total_amount: total, coins_total: count.coins_total });
+});
+
+// --- Stock sync (gate 1 of closing) -----------------------------------------
+
+// What to count: names and units, never the system's figures. Each item's
+// token lets the submit tell whether its figure moved while it was being
+// counted, without the till being able to read the figure (itemToken()).
+cash.get("/stock-sync/items", (c) => {
+  if (!getCurrentOpenShift()) return c.json({ error: "No open shift." }, 400);
+  return c.json(listSyncItems().map(({ system_qty, ...rest }) => ({ ...rest, token: itemToken(rest.kind, rest.id, system_qty) })));
+});
+
+// Submit a count. Body: { counts: [{ kind, id, counted }], admin_username?, admin_password? }
+cash.post("/stock-sync", async (c) => {
+  const user = getUser(c)!;
+  const body = await c.req.json().catch(() => ({} as any));
+  const open = getCurrentOpenShift();
+  if (!open) return c.json({ error: "No open shift to sync stock for." }, 400);
+  try {
+    const approver = await resolveApprover(user, body);
+    const sync = submitStockSync({ shiftOpenId: open.id, user, approver, counts: body.counts });
+    return c.json({ success: true, sync: syncForViewer(sync, user.role === "admin" || !!approver) });
+  } catch (err: any) {
+    return closingError(c, err);
+  }
+});
+
+// An admin at the till (password typed in) looks at a waiting sync with the
+// system's figures, to correct and approve it there. Body: admin credentials.
+cash.post("/stock-sync/:id/admin-view", async (c) => {
+  const user = getUser(c)!;
+  const body = await c.req.json().catch(() => ({} as any));
+  try {
+    const approver = await resolveApprover(user, body);
+    if (!approver) return c.json({ error: "An admin username and password are needed." }, 400);
+    const sync = getStockSync(Number(c.req.param("id")));
+    if (!sync) return c.json({ error: "That stock sync was not found" }, 404);
+    return c.json({ sync });
+  } catch (err: any) {
+    return closingError(c, err);
+  }
+});
+
+// Approve or reject a waiting sync: the admin's own login, or their password at
+// the till. Approve body: { corrections?: [{ line_id, approved_qty }], note? }.
+// Reject body: { note } (required).
+for (const action of ["approve", "reject"] as const) {
+  cash.post(`/stock-sync/:id/${action}`, async (c) => {
+    const user = getUser(c)!;
+    const body = await c.req.json().catch(() => ({} as any));
+    try {
+      const approver = await resolveApprover(user, body);
+      if (!approver) return c.json({ error: "Only an admin can approve or reject a stock sync." }, 403);
+      const sync = decideStockSync({
+        syncId: Number(c.req.param("id")),
+        approver,
+        approve: action === "approve",
+        note: body.note,
+        corrections: body.corrections,
+        shiftOpenId: getCurrentOpenShift()?.id ?? null,
+      });
+      return c.json({ success: true, sync });
+    } catch (err: any) {
+      return closingError(c, err);
+    }
+  });
+}
+
+// --- Close (needs gate 1, and gate 2 when the variance is over the limit) ----
+//
+// Body: the drawer count, as before. Or { close_request_id } to close on a
+// request an admin approved — that request's own count is used, so the
+// cashier never retypes it. admin_username / admin_password let an admin
+// approve an over-limit variance right at the till.
+cash.post("/close", async (c) => {
+  const user = getUser(c)!;
+  const body = await c.req.json();
+  const db = getDb();
+  const date = todayDate();
+
+  const openRow = getCurrentOpenShift();
+  if (!openRow) return c.json({ error: "No open shift to close." }, 400);
+
+  const pending = getPendingExpenseCountSince(openRow.created_at);
+  if (pending > 0) {
+    return c.json({ error: `${pending} expense${pending > 1 ? "s" : ""} pending approval. Admin must approve or reject before closing.` }, 400);
+  }
+  // A refund still waiting would move the drawer's expected cash after it was
+  // counted — decide it first, exactly as with a pending expense.
+  const refundsWaiting = pendingRefundCount();
+  if (refundsWaiting > 0) {
+    return c.json({ error: `${refundsWaiting} cash refund${refundsWaiting > 1 ? "s are" : " is"} waiting for an admin. Approve or reject ${refundsWaiting > 1 ? "them" : "it"} (or withdraw the request) before closing.` }, 400);
+  }
+
+  // Gate 1: the shift's stock has to be synced, and nothing moved since.
+  const syncState = stockSyncState(openRow.id);
+  if (!syncState.valid) {
+    const s = syncState.sync;
+    const msg = syncState.stale
+      ? (syncState.stale_reason === "listed"
+          ? "The count list has changed since the stock was synced (an item was ticked for the daily sync, or came into stock). Sync the stock again before closing."
+          : "Stock has changed since it was synced (a sale, a delivery or an opened box). Sync the stock again before closing.")
+      : s?.status === "pending"
+        ? "The stock sync is waiting for an admin to approve it. The drawer can close once it is approved."
+        : s?.status === "rejected"
+          ? `The stock sync was rejected${s.decision_note ? ` (${s.decision_note})` : ""}. Count the stock again before closing.`
+          : "Sync the stock before closing the drawer.";
+    return c.json({ error: msg, needs_stock_sync: true }, 400);
+  }
+
+  let approver: Approver | null;
+  try {
+    approver = await resolveApprover(user, body);
+  } catch (err: any) {
+    return closingError(c, err);
+  }
+
+  const { expected, breakdown } = expectedFor(openRow);
+  const limit = varianceLimit();
+
+  // Closing on an approved request: its count, and only if nothing has moved
+  // the expected figure since the admin saw it.
+  let count: ReturnType<typeof parseCount>;
+  let notes: string | null = body.notes || null;
+  let requestId: number | null = null;
+  let varianceApprovedBy: number | null = null;
+  if (body.close_request_id != null) {
+    const req = db.query("SELECT * FROM cash_close_requests WHERE id = ?").get(Number(body.close_request_id)) as any;
+    if (!req || req.shift_open_id !== openRow.id) return c.json({ error: "That close request is not for this shift." }, 400);
+    if (req.status !== "approved") return c.json({ error: `That close request is ${req.status}, not approved.` }, 400);
+    if (Math.abs(money(req.expected_amount) - expected) > 0.005) {
+      return c.json({ error: "Cash has come in or gone out since the admin approved this. Count the drawer again." }, 409);
+    }
+    count = parseCount(JSON.parse(req.count_json));
+    notes = req.notes;
+    requestId = req.id;
+    varianceApprovedBy = req.decided_by;
+  } else {
+    count = parseCount(body);
+  }
+  if (typeof count === "string") return c.json({ error: count }, 400);
+
+  const counted = computeTotal(count);
+  const variance = money(counted - expected);
+
+  // Gate 2: over the limit either way needs an admin. An admin closing it, or
+  // their password typed at the till, is that approval; otherwise the till is
+  // told to ask (POST /close-requests).
+  if (overLimit(variance, limit) && !requestId) {
+    if (!approver) {
+      return c.json({
+        error: `The drawer is ${variance > 0 ? "over" : "short"} by ${Math.abs(variance).toFixed(2)}, more than the ${limit.toFixed(2)} allowed. An admin has to approve this close.`,
+        needs_approval: true,
+        variance,
+        expected_amount: expected,
+        total_amount: counted,
+        limit,
+      }, 409);
+    }
+    varianceApprovedBy = approver.id;
+  }
+
+  const n = count.notes;
+  let closeId: number;
+  try {
+    closeId = db.transaction(() => {
+    // Everything above was read outside this lock, and the admin password check
+    // awaited in between — long enough for a second close, a sale or a change
+    // of heart to land. So the facts the close rests on are checked again here,
+    // under the write lock: still this shift open, stock still synced, money
+    // still as expected, and the request (if any) still approved and unused.
+    if (getCurrentOpenShift()?.id !== openRow.id) throw new ClosingError("This shift has just been closed.", 409);
+    // A cash refund asked for while the password above was being checked.
+    if (pendingRefundCount() > 0) throw new ClosingError("A cash refund is waiting for an admin. It must be approved or rejected before closing.", 400);
+    if (!stockSyncState(openRow.id).valid) {
+      throw new ClosingError("Stock changed while closing (a sale or a delivery). Sync the stock again.", 400, { needs_stock_sync: true });
+    }
+    if (Math.abs(expectedFor(openRow).expected - expected) > 0.005) {
+      throw new ClosingError("Cash came in or went out while closing. Count the drawer again.", 409);
+    }
+    if (requestId) {
+      const used = db.query("UPDATE cash_close_requests SET status = 'used' WHERE id = ? AND status = 'approved'").run(requestId);
+      if (Number(used.changes || 0) !== 1) throw new ClosingError("That approval has already been used.", 409);
+    }
+    const id = Number(db.query(`
+      INSERT INTO cash_counts (count_type, count_date, user_id, notes_20, notes_50, notes_100, notes_500, notes_1000, notes_2000, notes_5000, coins_total, total_amount, expected_amount, variance, notes, variance_approved_by, stock_sync_id)
+      VALUES ('close', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      date, user.id,
+      n.notes_20, n.notes_50, n.notes_100, n.notes_500, n.notes_1000, n.notes_2000, n.notes_5000,
+      count.coins_total, counted, expected, variance, notes, varianceApprovedBy, syncState.sync?.id ?? null
+    ).lastInsertRowid);
+    if (requestId) db.query("UPDATE cash_close_requests SET used_close_id = ? WHERE id = ?").run(id, requestId);
+    // Anything still waiting on this shift is moot now.
+    db.query("UPDATE cash_close_requests SET status = 'superseded' WHERE shift_open_id = ? AND status IN ('pending', 'approved')").run(openRow.id);
+    if (varianceApprovedBy && overLimit(variance, limit)) {
+      db.query("INSERT INTO activity_log (user_id, action, details) VALUES (?, 'cash_variance_approved', ?)").run(
+        varianceApprovedBy, JSON.stringify({ close_id: id, variance, limit, closed_by: user.id, close_request_id: requestId, at_till: !!approver?.at_till && !requestId })
+      );
+    }
+    return id;
+    }).immediate();
+  } catch (err: any) {
+    return closingError(c, err);
+  }
+
+  // The breakdown comes back so the close screen can show WHY expected is what
+  // it is. expected_amount / variance keep their existing meaning and are the
+  // only figures stored on the cash_counts row.
+  return c.json({
+    success: true,
+    id: closeId,
+    total_amount: counted,
+    coins_total: count.coins_total,
+    expected_amount: expected,
+    variance,
+    breakdown,
+  });
+});
+
+// --- Close requests (gate 2: variance over the limit) ------------------------
+
+// The cashier asks an admin to approve closing on this count. Body: the count.
+cash.post("/close-requests", async (c) => {
+  const user = getUser(c)!;
+  const body = await c.req.json().catch(() => ({} as any));
+  const db = getDb();
+  const openRow = getCurrentOpenShift();
+  if (!openRow) return c.json({ error: "No open shift to close." }, 400);
+  const count = parseCount(body);
+  if (typeof count === "string") return c.json({ error: count }, 400);
+  const { expected } = expectedFor(openRow);
+  const counted = computeTotal(count);
+  const variance = money(counted - expected);
+  const limit = varianceLimit();
+  if (!overLimit(variance, limit)) {
+    return c.json({ error: `The variance (${variance.toFixed(2)}) is within the ${limit.toFixed(2)} allowed — no approval is needed, just close.` }, 400);
+  }
+  const request = db.transaction(() => {
+    db.query("UPDATE cash_close_requests SET status = 'superseded' WHERE shift_open_id = ? AND status IN ('pending', 'approved')").run(openRow.id);
+    const id = Number(db.query(`
+      INSERT INTO cash_close_requests (shift_open_id, user_id, count_json, total_amount, expected_amount, variance, notes, status)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')
+    `).run(openRow.id, user.id, JSON.stringify({ ...count.notes, coins_total: count.coins_total }), counted, expected, variance, body.notes || null).lastInsertRowid);
+    db.query("INSERT INTO activity_log (user_id, action, details) VALUES (?, 'cash_close_requested', ?)").run(
+      user.id, JSON.stringify({ close_request_id: id, variance, expected, counted, limit })
+    );
+    return latestCloseRequest(openRow.id);
+  }).immediate();
+  return c.json({ success: true, request });
+});
+
+// An admin decides. Approving does not close the drawer — the cashier closes on
+// it (POST /close with close_request_id). Reject needs a reason.
+for (const action of ["approve", "reject"] as const) {
+  cash.post(`/close-requests/:id/${action}`, async (c) => {
+    const user = getUser(c)!;
+    const body = await c.req.json().catch(() => ({} as any));
+    const db = getDb();
+    let approver: Approver | null;
+    try {
+      approver = await resolveApprover(user, body);
+    } catch (err: any) {
+      return closingError(c, err);
+    }
+    if (!approver) return c.json({ error: "Only an admin can approve or reject a close." }, 403);
+    const note = String(body.note ?? "").trim() || null;
+    if (action === "reject" && !note) return c.json({ error: "Say why it is rejected, so the drawer can be counted again properly." }, 400);
+    const id = Number(c.req.param("id"));
+    const openRow = getCurrentOpenShift();
+    const result = db.transaction(() => {
+      const req = db.query("SELECT * FROM cash_close_requests WHERE id = ?").get(id) as any;
+      if (!req) return { status: 404 as const, error: "That close request was not found" };
+      if (req.status !== "pending") return { status: 400 as const, error: `That close request is already ${req.status}.` };
+      if (!openRow || req.shift_open_id !== openRow.id) return { status: 400 as const, error: "That close request belongs to a shift that is no longer open." };
+      db.query(`UPDATE cash_close_requests SET status = ?, decided_by = ?, decided_at = datetime('now'), decision_note = ? WHERE id = ?`)
+        .run(action === "approve" ? "approved" : "rejected", approver!.id, note, id);
+      db.query("INSERT INTO activity_log (user_id, action, details) VALUES (?, ?, ?)").run(
+        approver!.id, action === "approve" ? "cash_close_approved" : "cash_close_rejected",
+        JSON.stringify({ close_request_id: id, variance: req.variance, note, at_till: approver!.at_till })
+      );
+      return { request: latestCloseRequest(req.shift_open_id) };
+    }).immediate();
+    if ("error" in result) return c.json({ error: result.error }, result.status);
+    return c.json({ success: true, request: result.request });
+  });
+}
+
+// --- The admin's queue -------------------------------------------------------
+
+// Everything waiting on an admin for the open shift: a stock sync with
+// mismatches (with the system's figures, to judge it) and a close request.
+cash.get("/approvals", adminOnly, (c) => {
+  const db = getDb();
+  // Refunds wait on the admin whether or not a shift is open (a bill can be
+  // refunded any time), so they are listed either way.
+  const refund_requests = db.query(`
+    SELECT r.*, u.full_name AS user_name, b.token_number, b.total, b.payment_method, b.bill_date, b.cart_id
+    FROM refund_requests r LEFT JOIN users u ON u.id = r.user_id LEFT JOIN bills b ON b.id = r.bill_id
+    WHERE r.status = 'pending' ORDER BY r.id
+  `).all();
+  const open = getCurrentOpenShift();
+  if (!open) return c.json({ stock_syncs: [], close_requests: [], refund_requests, shift: null });
+  const syncIds = db.query("SELECT id FROM stock_syncs WHERE shift_open_id = ? AND status = 'pending' ORDER BY id").all(open.id) as any[];
+  const closeRequests = db.query(`
+    SELECT r.*, u.full_name AS user_name FROM cash_close_requests r LEFT JOIN users u ON u.id = r.user_id
+    WHERE r.shift_open_id = ? AND r.status = 'pending' ORDER BY r.id
+  `).all(open.id) as any[];
+  return c.json({
+    shift: { id: open.id, opened_at: open.created_at, opened_by: open.user_name },
+    stock_syncs: syncIds.map((r) => getStockSync(r.id)),
+    close_requests: closeRequests.map((r) => ({ ...r, expected_now: expectedFor(open).expected })),
+    refund_requests,
+  });
+});
+
+// The sidebar badge: how many things are waiting on an admin.
+cash.get("/approvals/count", adminOnly, (c) => {
+  const open = getCurrentOpenShift();
+  const db = getDb();
+  const row = db.query(`
+    SELECT (SELECT COUNT(*) FROM stock_syncs WHERE shift_open_id = ?1 AND status = 'pending')
+         + (SELECT COUNT(*) FROM cash_close_requests WHERE shift_open_id = ?1 AND status = 'pending')
+         + (SELECT COUNT(*) FROM refund_requests WHERE status = 'pending') AS count
+  `).get(open?.id ?? -1) as any;
+  return c.json({ count: row?.count || 0 });
+});
+
+/**
+ * CASH refunds waiting on an admin — they would take money out of the drawer
+ * after it was counted, so any of them blocks closing (POST /close). Card and
+ * LankaQR refunds never touch the drawer and do not hold the close up.
+ */
+function pendingRefundCount(): number {
+  const row = getDb().query(`
+    SELECT COUNT(*) AS n FROM refund_requests r JOIN bills b ON b.id = r.bill_id
+    WHERE r.status = 'pending' AND b.payment_method = 'cash'
+  `).get() as any;
+  return row?.n ?? 0;
+}
 
 cash.get("/history", (c) => {
   const db = getDb();
   const limit = parseInt(c.req.query("limit") || "30");
   const rows = db.query(`
-    SELECT cc.*, u.full_name as user_name
+    SELECT cc.*, u.full_name as user_name, a.full_name as variance_approved_by_name
     FROM cash_counts cc
     LEFT JOIN users u ON cc.user_id = u.id
+    LEFT JOIN users a ON cc.variance_approved_by = a.id
     ORDER BY count_date DESC, created_at DESC
     LIMIT ?
   `).all(limit);

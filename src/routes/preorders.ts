@@ -1347,6 +1347,9 @@ preorders.post("/:id/collect", async (c) => {
           cart_id: cartId,
           // Pre-ordered goods are never stock: see note 1 above.
           skip_stock: true,
+          // The order leaves the shop with the customer. Its packing still comes
+          // off stock (skip_stock does not cover packing — see createBill()).
+          order_type: "takeaway",
         });
       } catch (err: any) {
         throw new Refused(400, { error: err?.message || "Failed to bill this order." });
@@ -1407,6 +1410,7 @@ preorders.post("/:id/collect", async (c) => {
     taxAmount: fullBill.tax_amount,
     total: fullBill.total,
     paymentMethod: fullBill.payment_method,
+    orderType: fullBill.order_type,
     cashierName: user.full_name,
     customerName: order.customer_name as string,
     amountGiven: null,

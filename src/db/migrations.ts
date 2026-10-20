@@ -706,6 +706,262 @@ export function runMigrations(): void {
   // the option existed. Admins always see it regardless (canSeeDashboardMoney).
   addColumn("users", "show_dashboard_money", "INTEGER NOT NULL DEFAULT 0");
 
+  // --- feature/opened-ingredients-order-type --------------------------------
+  // Dine-in or takeaway. Nullable on purpose: every bill written before the
+  // choice existed gets NULL, which means "not recorded", never a guess. Every
+  // bill written from now on carries one (createBill() resolves it, falling
+  // back to settings.default_order_type). Added as a column, never by
+  // rebuilding the table.
+  addColumn("bills", "order_type", "TEXT CHECK(order_type IN ('dine_in', 'takeaway'))");
+  // The same choice on a parked bill, so a dine-in order parked and resumed is
+  // not billed as the default. NULL for bills parked before it existed; the
+  // route stores only the two values, so no CHECK is needed here.
+  addColumn("parked_carts", "order_type", "TEXT");
+
+  db.exec(`
+    -- "This product is made from an OPENED unit of that ingredient": a milk box
+    -- makes 4 milkshakes. servings_per_unit is how many of the PRODUCT one unit
+    -- of the ingredient (one box, one tub, in the stock item's own unit) makes.
+    -- Unlike recipes (costing only), these links are enforced: a linked product
+    -- can only be billed while an opened unit of every ingredient it is linked
+    -- to has enough left. See src/services/portions.ts.
+    --
+    -- product_id cascades: the link is the product's own configuration. The
+    -- stock item does not: deleting an ingredient that products are made from is
+    -- refused with their names (src/routes/stock.ts), like a recipe.
+    CREATE TABLE IF NOT EXISTS product_ingredient_links (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+      stock_item_id INTEGER NOT NULL REFERENCES stock_items(id),
+      servings_per_unit REAL NOT NULL CHECK(servings_per_unit > 0),
+      UNIQUE(product_id, stock_item_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_product_ingredient_links_item ON product_ingredient_links(stock_item_id);
+
+    -- One opened unit of an ingredient: the box on the counter. Opening takes the
+    -- unit out of stock_items.quantity (a 'usage' stock_transactions row), so
+    -- stock_items.quantity is what is still SEALED. The three states the till
+    -- shows are therefore: in stock (sealed, stock_items.quantity), 'opened' and
+    -- 'finished' (rows here).
+    --
+    -- remaining is the FRACTION of the unit left, 1 at opening. A fraction, not
+    -- a serving count, because one box can feed several products with different
+    -- yields (4 milkshakes OR 8 iced coffees per box): each sale takes
+    -- quantity / servings_per_unit of it. It is rounded to 6 places on every
+    -- write and compared with a small tolerance (PORTION_EPSILON), so three
+    -- thirds use up a box exactly.
+    --
+    -- finish_reason: 'used_up' when sales emptied it, 'manual' when someone
+    -- marked it finished early (spilled, gone off) — remaining then keeps what
+    -- was thrown away, which is what anyone later asks about.
+    CREATE TABLE IF NOT EXISTS opened_stock_units (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      stock_item_id INTEGER NOT NULL REFERENCES stock_items(id) ON DELETE CASCADE,
+      status TEXT NOT NULL DEFAULT 'opened' CHECK(status IN ('opened', 'finished')),
+      remaining REAL NOT NULL DEFAULT 1,
+      opened_by INTEGER REFERENCES users(id),
+      opened_at TEXT NOT NULL DEFAULT (datetime('now')),
+      finished_by INTEGER REFERENCES users(id),
+      finished_at TEXT,
+      finish_reason TEXT CHECK(finish_reason IN ('used_up', 'manual')),
+      finish_note TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_opened_stock_units_open ON opened_stock_units(stock_item_id, status);
+
+    -- Which sale used how much of which opened unit. History only: nothing reads
+    -- it to decide anything, it answers "why is this box finished already?".
+    -- product_id is a plain integer (no foreign key) with the name kept beside
+    -- it, so this history never stops a product from being deleted.
+    CREATE TABLE IF NOT EXISTS opened_unit_usage (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      opened_unit_id INTEGER NOT NULL REFERENCES opened_stock_units(id) ON DELETE CASCADE,
+      bill_id INTEGER REFERENCES bills(id),
+      product_id INTEGER,
+      product_name TEXT NOT NULL DEFAULT '',
+      quantity REAL NOT NULL,
+      fraction REAL NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_opened_unit_usage_unit ON opened_unit_usage(opened_unit_id);
+
+    -- Packing a product uses up: a cake box, a cup and lid, a napkin. quantity is
+    -- per unit of the product sold. applies_to says when: 'takeaway' (only on a
+    -- takeaway bill — a dine-in milkshake goes in a glass) or 'always'. Deducted
+    -- from stock_items at checkout by src/services/packing.ts. Same cascade rule
+    -- as the ingredient links above.
+    CREATE TABLE IF NOT EXISTS product_packing_links (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+      stock_item_id INTEGER NOT NULL REFERENCES stock_items(id),
+      quantity REAL NOT NULL CHECK(quantity > 0),
+      applies_to TEXT NOT NULL DEFAULT 'takeaway' CHECK(applies_to IN ('takeaway', 'always')),
+      UNIQUE(product_id, stock_item_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_product_packing_links_item ON product_packing_links(stock_item_id);
+  `);
+
+  // --- feature/stock-sync-cash-close -----------------------------------------
+  // Closing the cash drawer now has two gates (src/services/closing.ts):
+  //   1. A STOCK SYNC for the shift: everything with stock above 0 counted. A
+  //      count that differs from the system needs an admin's approval before
+  //      the stock is changed and the drawer may close. Any stock movement after
+  //      the sync settles means syncing again.
+  //   2. A drawer VARIANCE above settings.cash_variance_limit (either way) needs
+  //      an admin's approval before the close is accepted.
+  // An admin approves from their own login, or by typing their password at the
+  // till; an admin's own sync or close needs no approval.
+  db.exec(`
+    -- One count of the shop's stock during a shift. shift_open_id is the
+    -- cash_counts 'open' row, which is what "this shift" means everywhere else.
+    -- status: matched (counts agreed, nothing to approve), pending (waiting for
+    -- an admin), approved (an admin accepted the counts, possibly corrected,
+    -- and stock was changed), rejected (count again), superseded (a newer sync
+    -- replaced a pending one). settled_at is when it became matched/approved.
+    -- settled_snapshot is every in-stock quantity at that moment (JSON,
+    -- "product:12" / "ingredient:3" → qty): when the stock no longer equals it,
+    -- something moved after the sync and the shift needs a new one. A snapshot,
+    -- not a timestamp, because a sale in the same second as the sync must count.
+    CREATE TABLE IF NOT EXISTS stock_syncs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      shift_open_id INTEGER NOT NULL REFERENCES cash_counts(id),
+      user_id INTEGER REFERENCES users(id),
+      status TEXT NOT NULL CHECK(status IN ('matched', 'pending', 'approved', 'rejected', 'superseded')),
+      mismatch_count INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      decided_by INTEGER REFERENCES users(id),
+      decided_at TEXT,
+      decision_note TEXT,
+      settled_at TEXT,
+      settled_snapshot TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_stock_syncs_shift ON stock_syncs(shift_open_id, id);
+
+    -- One counted item. system_qty is what the system said when the count was
+    -- submitted; counted_qty what was counted; approved_qty what the admin
+    -- accepted (the count, or their correction of it); applied_delta what was
+    -- actually added to / taken off stock on approval. name/unit are copied so
+    -- the record still reads after a rename or a delete.
+    CREATE TABLE IF NOT EXISTS stock_sync_lines (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      sync_id INTEGER NOT NULL REFERENCES stock_syncs(id) ON DELETE CASCADE,
+      item_kind TEXT NOT NULL CHECK(item_kind IN ('product', 'ingredient')),
+      item_id INTEGER NOT NULL,
+      name TEXT NOT NULL,
+      unit TEXT NOT NULL DEFAULT '',
+      system_qty REAL NOT NULL,
+      counted_qty REAL NOT NULL,
+      approved_qty REAL,
+      applied_delta REAL
+    );
+    CREATE INDEX IF NOT EXISTS idx_stock_sync_lines_sync ON stock_sync_lines(sync_id);
+
+    -- A cashier's request to close a drawer whose variance is over the limit.
+    -- count_json is the count exactly as submitted (notes + coins), so the
+    -- approved close is THAT count and nobody retypes it. expected_amount and
+    -- variance are as of the request; the close refuses if the expected figure
+    -- has moved since (money came in or went out after the admin looked).
+    -- status: pending, approved, rejected, used (the close happened),
+    -- superseded (a newer request replaced a pending one).
+    CREATE TABLE IF NOT EXISTS cash_close_requests (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      shift_open_id INTEGER NOT NULL REFERENCES cash_counts(id),
+      user_id INTEGER REFERENCES users(id),
+      count_json TEXT NOT NULL,
+      total_amount REAL NOT NULL,
+      expected_amount REAL NOT NULL,
+      variance REAL NOT NULL,
+      notes TEXT,
+      status TEXT NOT NULL CHECK(status IN ('pending', 'approved', 'rejected', 'used', 'superseded')),
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      decided_by INTEGER REFERENCES users(id),
+      decided_at TEXT,
+      decision_note TEXT,
+      used_close_id INTEGER REFERENCES cash_counts(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_cash_close_requests_shift ON cash_close_requests(shift_open_id, id);
+  `);
+  // Who let a close over the variance limit through (an admin closing it
+  // themselves, an admin's password at the till, or an approved request), and
+  // the stock sync it closed on. NULL for every close before this existed.
+  addColumn("cash_counts", "variance_approved_by", "INTEGER");
+  addColumn("cash_counts", "stock_sync_id", "INTEGER");
+
+  // --- feature/daily-sync-selection ------------------------------------------
+  // Which items the closing stock sync asks to be counted (listSyncItems):
+  // only those "in the daily sync" with stock above 0. Two levels, both set by
+  // an admin on the Stock page:
+  //   * GROUPS (daily_sync_groups): a whole stock category, a whole product
+  //     category, or every tracked product. A standing rule — an item added to
+  //     a ticked group later is counted too.
+  //   * the ITEM's own choice (daily_sync): NULL = follow its groups, 1 = always
+  //     counted, 0 = never (e.g. one item left out of a ticked group).
+  // The owner chose to start with nothing counted: every item NULL and no group
+  // ticked. See PRODUCT_IN_SYNC / ITEM_IN_SYNC in src/services/closing.ts.
+  addColumn("products", "daily_sync", "INTEGER");
+  addColumn("stock_items", "daily_sync", "INTEGER");
+  // One-time repair for a database made by an early build of this feature,
+  // where daily_sync was NOT NULL DEFAULT 0. addColumn() cannot change an
+  // existing column, and NOT NULL breaks "NULL = follow the group" (inserts
+  // fail, and every 0 means "never"). Swap it for the nullable column, keeping
+  // the 1s; the 0s become NULL, which is what they meant then ("not ticked").
+  // Never touches a database where the column is already nullable — which is
+  // every database this build creates, and production.
+  for (const table of ["products", "stock_items"]) {
+    try {
+      const col = (db.query(`SELECT "notnull" AS nn FROM pragma_table_info('${table}') WHERE name = 'daily_sync'`).get() as any);
+      if (!col || !col.nn) continue;
+      db.transaction(() => {
+        db.exec(`ALTER TABLE ${table} RENAME COLUMN daily_sync TO daily_sync_old`);
+        db.exec(`ALTER TABLE ${table} ADD COLUMN daily_sync INTEGER`);
+        db.exec(`UPDATE ${table} SET daily_sync = CASE WHEN daily_sync_old = 1 THEN 1 ELSE NULL END`);
+        db.exec(`ALTER TABLE ${table} DROP COLUMN daily_sync_old`);
+      })();
+      console.log(`[migration] ${table}.daily_sync made nullable (follow-the-group)`);
+    } catch (err: any) {
+      console.error(`[migration] could not make ${table}.daily_sync nullable:`, err?.message || err);
+    }
+  }
+  db.exec(`
+    -- A ticked group. group_type: 'stock_category' (group_key = the
+    -- stock_categories id, as text), 'product_category' (group_key = the
+    -- product category name; matched without regard to case, like the
+    -- category merge in this file), 'all_products' (group_key '').
+    CREATE TABLE IF NOT EXISTS daily_sync_groups (
+      group_type TEXT NOT NULL CHECK(group_type IN ('stock_category', 'product_category', 'all_products')),
+      group_key TEXT NOT NULL DEFAULT '',
+      user_id INTEGER REFERENCES users(id),
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (group_type, group_key)
+    );
+  `);
+
+  // --- feature/refund-approval -----------------------------------------------
+  // A cashier's refund needs an admin (see POST /api/pos/bills/:id/refund): the
+  // admin's password at the till, or a request the admin approves from their
+  // own login. Approving the request IS the refund. status: pending, approved,
+  // rejected, cancelled (the bill was refunded some other way meanwhile).
+  // restock is the cashier's "put items back into stock" choice, carried to
+  // the refund as asked. Pending refunds block closing the drawer.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS refund_requests (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      bill_id INTEGER NOT NULL REFERENCES bills(id),
+      user_id INTEGER REFERENCES users(id),
+      reason TEXT NOT NULL,
+      restock INTEGER NOT NULL DEFAULT 0,
+      status TEXT NOT NULL CHECK(status IN ('pending', 'approved', 'rejected', 'cancelled')),
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      decided_by INTEGER REFERENCES users(id),
+      decided_at TEXT,
+      decision_note TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_refund_requests_bill ON refund_requests(bill_id, status);
+    CREATE INDEX IF NOT EXISTS idx_refund_requests_status ON refund_requests(status);
+  `);
+  // The admin who allowed a refund (the same admin when they did it
+  // themselves). NULL for every refund before approval existed.
+  addColumn("bills", "refund_approved_by", "INTEGER");
+
   // --- Disposal requests -----------------------------------------------------
   // A cashier reports waste ("3 fish buns dropped", "2 kg flour spoiled") and an
   // admin approves or rejects it. Nothing here IS the disposal: approval writes
@@ -778,6 +1034,10 @@ export function seedDefaults(): void {
     printer_address: "",
     enforce_cash_shift: "1",
     category_order: "[]",
+    // What the till's Takeaway / Dine-in toggle starts on for each new sale.
+    default_order_type: "takeaway",
+    // Rs: a drawer closing more than this over OR short needs an admin's approval.
+    cash_variance_limit: "200",
   };
   for (const [key, value] of Object.entries(defaults)) {
     db.query("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)").run(key, value);

@@ -16,6 +16,10 @@
     </div>
     <div class="content-area">
       <div id="today-status" class="mb-4"></div>
+      <!-- Closing gates (public/js/closing.js): the admin's approval queue, and
+           Step 1, the stock sync that has to be done before the drawer closes. -->
+      <div id="cc-approvals"></div>
+      <div id="cc-sync"></div>
 
       <div class="row g-3">
         <div class="col-md-6">
@@ -42,9 +46,12 @@
               <div class="d-flex justify-content-between fs-5 mt-2"><span>Variance:</span><strong id="variance-amt">-</strong></div>
             </div>
             <div id="pending-warning" class="alert alert-warning mt-2" style="display:none;"></div>
+            <!-- A variance over the limit: request an admin's approval, or the
+                 admin approves right here (public/js/closing.js). -->
+            <div id="cc-gate" class="mt-2"></div>
             <div class="mt-3">
               <label class="form-label">Notes <small class="text-muted">(optional)</small></label>
-              <textarea class="form-control" id="count-notes" rows="2" placeholder="e.g., found Rs.100 on floor"></textarea>
+              <textarea class="form-control" id="count-notes" rows="2" placeholder="e.g., found Rs.100 on floor" oninput="Closing.clearGate()"></textarea>
             </div>
             <button class="btn btn-primary w-100 mt-3" id="submit-btn" onclick="submitCount(this)">Save Opening Float</button>
           </div>
@@ -53,7 +60,7 @@
           <div class="table-container p-3">
             <h6 class="fw-bold mb-3">History</h6>
             <table class="table table-sm">
-              <thead><tr><th>Date</th><th>Type</th><th>By</th><th class="text-end">Counted</th><th class="text-end">Variance</th></tr></thead>
+              <thead><tr><th>Date</th><th>Type</th><th>By</th><th class="text-end">Counted</th><th class="text-end">Variance</th><th>Approved by</th></tr></thead>
               <tbody id="history-table"></tbody>
             </table>
           </div>
@@ -64,12 +71,30 @@
 
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
   <script src="/public/js/app.js"></script>
+  <script src="/public/js/closing.js"></script>
   <script>
     const DENOMS = [5000, 2000, 1000, 500, 100, 50, 20];
     let mode = 'open';
     let todayData = null;
 
-    initApp('/cash', loadCash);
+    initApp('/cash', async () => {
+      Closing.init({
+        sync: document.getElementById('cc-sync'),
+        gate: document.getElementById('cc-gate'),
+        approvals: document.getElementById('cc-approvals'),
+        // showToast() writes innerHTML, and these messages carry product names
+        // and admins' notes: escaped here, so they show as typed.
+        notify: (msg, kind) => showToast(escText(msg), kind === 'error' ? 'error' : 'success'),
+        money: formatCurrency,
+        withBusy,
+        isAdmin: currentUser && currentUser.role === 'admin',
+        // A background look at /today (something waited on an admin): take the
+        // fresh state for the Close button without touching the drawer count.
+        onState: (t) => { todayData = t; updateSubmitState(); },
+        onClosed: loadCash,
+      });
+      await loadCash();
+    });
 
     function renderDenomInputs() {
       const html = DENOMS.map(d => `
@@ -81,6 +106,10 @@
         </div>
       `).join('');
       document.getElementById('denominations').innerHTML = html;
+    }
+
+    function escText(v) {
+      return String(v == null ? '' : v).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
     }
 
     // Money is compared to the cent. Floats summed in the browser leave tails
@@ -107,6 +136,8 @@
       document.getElementById('line_coins').textContent = formatCurrency(coins);
       total = money(total + coins);
       document.getElementById('counted-total').textContent = formatCurrency(total);
+      // A refused over-limit count waiting for approval is not this count any more.
+      Closing.clearGate();
 
       // Variance against the SERVER's expected figure (expected_now), never one
       // re-derived here: the browser used to leave the pre-order deposits out,
@@ -163,12 +194,23 @@
     // blocked while any expense is still waiting for admin approval. withBusy()
     // re-enables and relabels the button unconditionally in its finally, so
     // submitCount() calls this again afterwards to re-assert the real state.
+    // Also blocked until the stock is synced (Step 1, public/js/closing.js) — the
+    // server refuses the close without it anyway; this says so before counting.
     function updateSubmitState() {
       const submitBtn = document.getElementById('submit-btn');
       const pendWarn = document.getElementById('pending-warning');
-      const blocked = mode === 'close' && (todayData?.pending_expenses || 0) > 0;
-      if (blocked) {
+      const expensesBlock = mode === 'close' && (todayData?.pending_expenses || 0) > 0;
+      // A refund waiting on an admin would move the expected cash after the count.
+      const refundsBlock = mode === 'close' && (todayData?.pending_refunds || 0) > 0;
+      const syncBlock = mode === 'close' && !Closing.closeAllowed();
+      if (expensesBlock) {
         pendWarn.textContent = `${todayData.pending_expenses} expense(s) pending admin approval. Shift cannot be closed until they are approved or rejected.`;
+        pendWarn.style.display = 'block';
+      } else if (refundsBlock) {
+        pendWarn.textContent = `${todayData.pending_refunds} cash refund(s) waiting for an admin. Shift cannot be closed until they are approved, rejected or withdrawn.`;
+        pendWarn.style.display = 'block';
+      } else if (syncBlock) {
+        pendWarn.textContent = 'Sync the stock first (Step 1 above). The drawer can close once the stock is synced.';
         pendWarn.style.display = 'block';
       } else {
         pendWarn.style.display = 'none';
@@ -176,12 +218,13 @@
       submitBtn.textContent = mode === 'close'
         ? 'Save Closing Count'
         : (todayData?.close ? 'Open New Shift' : 'Save Opening Float');
-      submitBtn.disabled = blocked;
+      submitBtn.disabled = expensesBlock || refundsBlock || syncBlock;
     }
 
     async function loadCash() {
       renderDenomInputs();
       todayData = await api('/api/cash/today');
+      Closing.update(todayData); // before setMode(): the Close button reads it
       renderTodayStatus();
 
       // shift_open: a shift is currently active and can be closed.
@@ -197,13 +240,16 @@
           <td>${h.user_name || '-'}</td>
           <td class="text-end">${formatCurrency(h.total_amount)}</td>
           <td class="text-end ${h.variance == null ? '' : varianceClass(h.variance)}">${h.variance == null ? '-' : signedCurrency(h.variance)}</td>
+          <td class="small text-muted">${escText(h.variance_approved_by_name || '')}</td>
         </tr>
-      `).join('') || '<tr><td colspan="5" class="text-center text-muted py-3">No records yet</td></tr>';
+      `).join('') || '<tr><td colspan="6" class="text-center text-muted py-3">No records yet</td></tr>';
     }
 
     function renderTodayStatus() {
       const status = document.getElementById('today-status');
-      if (!todayData.open) {
+      // `open` is only ever the shift still OPEN, so after a close it is null —
+      // the "last shift closed" branch below has to win when a close exists.
+      if (!todayData.open && !todayData.close) {
         status.innerHTML = `<div class="alert alert-info">No opening float recorded for today yet. Enter the cash count to start the day.</div>`;
       } else if (todayData.shift_from_prior_day) {
         status.innerHTML = `<div class="alert alert-danger"><strong>&#9888;&#65039; Shift from ${formatDate(todayData.open.count_date)} still open.</strong> The shift opened by ${todayData.open.user_name} on ${formatDate(todayData.open.count_date)} at ${formatTime(todayData.open.created_at)} was never closed. Count the drawer now and close it below before taking any new sales today.</div>`;
@@ -225,7 +271,23 @@
       DENOMS.forEach(d => body[`notes_${d}`] = parseInt(document.getElementById(`notes_${d}`).value) || 0);
       body.coins_total = coinsValue();
       await withBusy(btn, async () => {
-        const res = await api(`/api/cash/${mode}`, { method: 'POST', body });
+        let res;
+        try {
+          res = await api(`/api/cash/${mode}`, { method: 'POST', body });
+        } catch (err) {
+          // Over the variance limit: not a failure, a question for an admin.
+          // The count stays on screen; closing.js offers "request" / "approve here".
+          if (err && err.status === 409 && err.data && err.data.needs_approval) {
+            Closing.needsApproval(body, err.data);
+            showToast(escText(err.message), 'warning');
+            return;
+          }
+          // Refused for the stock (moved since the sync): Step 1 has to say so.
+          if (err && err.data && err.data.needs_stock_sync) await Closing.refresh();
+          // Escaped: the message can carry an admin's note.
+          showToast(escText((err && err.message) || 'Could not save'), 'error');
+          return;
+        }
         if (mode === 'open') {
           showToast('Opening float saved');
         } else {

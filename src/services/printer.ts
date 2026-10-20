@@ -13,10 +13,18 @@ interface PrintReceiptData {
   taxAmount: number;
   total: number;
   paymentMethod: string;
+  /** 'dine_in' | 'takeaway'; null for a bill from before the choice existed (nothing printed). */
+  orderType?: string | null;
   cashierName: string;
   customerName?: string;
   amountGiven?: number | null;
   changeGiven?: number | null;
+}
+
+// The slip's order-type line. Upper case on both slips: the kitchen packs by
+// it, and the customer holding a takeaway receipt can see it was rung up so.
+function orderTypeText(t: string | null | undefined): string {
+  return t === "dine_in" ? "DINE IN" : t === "takeaway" ? "TAKEAWAY" : "";
 }
 
 export function getSettings(): Record<string, string> {
@@ -58,6 +66,7 @@ export function buildReceiptText(data: PrintReceiptData): string {
   lines.push(`Token: #${String(data.tokenNumber).padStart(3, "0")}`);
   lines.push(`Date: ${data.billDate}`);
   if (data.customerName) lines.push(`Customer: ${data.customerName}`);
+  if (orderTypeText(data.orderType)) lines.push(`Order: ${orderTypeText(data.orderType)}`);
   lines.push("-".repeat(w));
 
   // Header — columns sum to w=28: name(14)+sp+qty(3)+sp+amt(9)
@@ -213,6 +222,9 @@ export function buildKitchenTicket(data: PrintReceiptData): string {
   };
 
   lines.push(center("*** KITCHEN COPY ***"));
+  // Centred and on its own line: whether it goes in a box or on a plate is
+  // the first thing the person making it needs to know.
+  if (orderTypeText(data.orderType)) lines.push(center(`** ${orderTypeText(data.orderType)} **`));
   lines.push("=".repeat(w));
   lines.push(`Token: #${String(data.tokenNumber).padStart(3, "0")}`);
   lines.push(`Date:  ${data.billDate}`);

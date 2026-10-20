@@ -133,6 +133,13 @@
               <label class="form-label">Reorder level (alert below)</label>
               <input type="number" class="form-control" id="product-reorder" step="1" min="0" value="0">
             </div>
+            <div class="col-12 mt-2">
+              <div class="form-check">
+                <input class="form-check-input" type="checkbox" id="product-daily-sync">
+                <label class="form-check-label" for="product-daily-sync">Count in the daily stock sync
+                  <span class="text-muted" style="font-size:0.8rem;">&mdash; asked for before the cash drawer closes, whenever it has stock above 0</span></label>
+              </div>
+            </div>
             <div class="col-12 text-muted" id="onhand-hint" style="font-size:0.8rem;display:none;">Saving this form never changes the count. Use <strong>Adjust stock</strong> in the product list for deliveries, waste or a recount. Turning tracking off keeps the count as it is.</div>
           </div>
           <div class="mb-3">
@@ -142,6 +149,32 @@
               <select class="form-select" id="component-picker" style="flex:1;"></select>
               <input type="number" class="form-control" id="component-qty" style="width:80px;" step="1" min="0" value="1" placeholder="Qty">
               <button type="button" class="btn btn-outline-primary" onclick="addComponent()">Add</button>
+            </div>
+          </div>
+          <!-- Opened ingredient: the till sells this product only while an
+               opened unit of the ingredient has servings left. -->
+          <div class="mb-3">
+            <label class="form-label">Made from an opened ingredient <small class="text-muted">(e.g. one Milk Box makes 4 Milkshakes &mdash; the till sells it only while a box is open)</small></label>
+            <div id="ingredient-links-list"></div>
+            <div class="d-flex gap-2 mt-2 align-items-center">
+              <select class="form-select" id="ingredient-picker" style="flex:1;"></select>
+              <span class="text-muted small">one makes</span>
+              <input type="number" class="form-control" id="ingredient-servings" style="width:80px;" step="any" min="0" value="1" placeholder="How many">
+              <button type="button" class="btn btn-outline-primary" onclick="addIngredientLink()">Add</button>
+            </div>
+          </div>
+          <!-- Packing: taken out of stock when this product is sold. -->
+          <div class="mb-3">
+            <label class="form-label">Packing used <small class="text-muted">(e.g. 1 cake box per cake, takeaway only &mdash; taken out of stock at payment)</small></label>
+            <div id="packing-links-list"></div>
+            <div class="d-flex gap-2 mt-2">
+              <select class="form-select" id="packing-picker" style="flex:1;"></select>
+              <input type="number" class="form-control" id="packing-qty" style="width:80px;" step="any" min="0" value="1" placeholder="Qty">
+              <select class="form-select" id="packing-applies" style="width:150px;">
+                <option value="takeaway">Takeaway only</option>
+                <option value="always">Every sale</option>
+              </select>
+              <button type="button" class="btn btn-outline-primary" onclick="addPackingLink()">Add</button>
             </div>
           </div>
           <div class="form-check">
@@ -215,6 +248,11 @@
 
     async function loadProducts() {
       allProducts = await api('/api/products');
+      // For the Daily sync box in the form (what a group would count).
+      try { syncGroups = await api('/api/stock/daily-sync/groups'); } catch { syncGroups = []; }
+      // For the ingredient / packing pickers. Not fatal: the rest of the page
+      // still works without it, and the pickers say so.
+      try { stockItems = await api('/api/stock/items'); } catch { stockItems = []; }
       buildCategoryFilter();  // before the render: it decides which categories can be picked
       renderProducts();
       await loadDiscontinued();
@@ -273,6 +311,77 @@
       document.getElementById('component-picker').value = '';
       document.getElementById('component-qty').value = '1';
       renderComponents();
+    }
+
+    // ===== Stock links: opened ingredient + packing =====
+    // Both are sent whole on save and replace what is stored. Stock items of
+    // any category can be picked: a shop that keeps milk boxes under "Dairy"
+    // must still be able to link them.
+    let stockItems = [];
+    let currentIngredientLinks = []; // { stock_item_id, servings_per_unit }
+    let currentPackingLinks = [];    // { stock_item_id, quantity, applies_to }
+
+    const stockItemName = (id) => {
+      const s = stockItems.find(x => x.id === id);
+      return s ? s.name : `#${id}`;
+    };
+    const stockItemUnit = (id) => (stockItems.find(x => x.id === id) || {}).unit || 'unit';
+
+    function stockPickerOptions(usedIds) {
+      const opts = stockItems
+        .filter(s => !usedIds.has(s.id))
+        .sort((a, b) => a.name.localeCompare(b.name))
+        .map(s => `<option value="${s.id}">${escapeHtml(s.name)}${s.category_name ? ' · ' + escapeHtml(s.category_name) : ''}</option>`).join('');
+      return (stockItems.length ? '<option value="">-- Pick a stock item --</option>' : '<option value="">No stock items yet — add them on the Stock page</option>') + opts;
+    }
+
+    function renderIngredientLinks() {
+      const box = document.getElementById('ingredient-links-list');
+      box.innerHTML = !currentIngredientLinks.length
+        ? '<div class="text-muted small">Not made from an opened ingredient.</div>'
+        : currentIngredientLinks.map((l, i) => `<div class="d-flex align-items-center gap-2 py-1 border-bottom">
+            <span class="flex-fill">One <strong>${escapeHtml(stockItemUnit(l.stock_item_id))}</strong> of <strong>${escapeHtml(stockItemName(l.stock_item_id))}</strong> makes</span>
+            <input type="number" class="form-control form-control-sm" style="width:80px;" value="${l.servings_per_unit}" step="any" min="0" onchange="currentIngredientLinks[${i}].servings_per_unit = parseFloat(this.value) || 0">
+            <span class="small text-muted">of this</span>
+            <button type="button" class="btn btn-sm btn-outline-danger" onclick="currentIngredientLinks.splice(${i},1); renderIngredientLinks();">×</button>
+          </div>`).join('');
+      document.getElementById('ingredient-picker').innerHTML = stockPickerOptions(new Set(currentIngredientLinks.map(l => l.stock_item_id)));
+    }
+
+    function addIngredientLink() {
+      const sid = parseInt(document.getElementById('ingredient-picker').value);
+      const n = parseFloat(document.getElementById('ingredient-servings').value);
+      if (!sid) { showToast('Pick an ingredient first', 'warning'); return; }
+      if (!n || n <= 0) { showToast('Say how many one unit makes', 'warning'); return; }
+      currentIngredientLinks.push({ stock_item_id: sid, servings_per_unit: n });
+      document.getElementById('ingredient-servings').value = '1';
+      renderIngredientLinks();
+    }
+
+    function renderPackingLinks() {
+      const box = document.getElementById('packing-links-list');
+      box.innerHTML = !currentPackingLinks.length
+        ? '<div class="text-muted small">No packing linked.</div>'
+        : currentPackingLinks.map((l, i) => `<div class="d-flex align-items-center gap-2 py-1 border-bottom">
+            <span class="flex-fill"><strong>${escapeHtml(stockItemName(l.stock_item_id))}</strong></span>
+            <input type="number" class="form-control form-control-sm" style="width:80px;" value="${l.quantity}" step="any" min="0" onchange="currentPackingLinks[${i}].quantity = parseFloat(this.value) || 0">
+            <select class="form-select form-select-sm" style="width:140px;" onchange="currentPackingLinks[${i}].applies_to = this.value">
+              <option value="takeaway"${l.applies_to !== 'always' ? ' selected' : ''}>Takeaway only</option>
+              <option value="always"${l.applies_to === 'always' ? ' selected' : ''}>Every sale</option>
+            </select>
+            <button type="button" class="btn btn-sm btn-outline-danger" onclick="currentPackingLinks.splice(${i},1); renderPackingLinks();">×</button>
+          </div>`).join('');
+      document.getElementById('packing-picker').innerHTML = stockPickerOptions(new Set(currentPackingLinks.map(l => l.stock_item_id)));
+    }
+
+    function addPackingLink() {
+      const sid = parseInt(document.getElementById('packing-picker').value);
+      const q = parseFloat(document.getElementById('packing-qty').value);
+      if (!sid) { showToast('Pick a packing item first', 'warning'); return; }
+      if (!q || q <= 0) { showToast('Enter how many one of this product uses', 'warning'); return; }
+      currentPackingLinks.push({ stock_item_id: sid, quantity: q, applies_to: document.getElementById('packing-applies').value });
+      document.getElementById('packing-qty').value = '1';
+      renderPackingLinks();
     }
 
     // New product: the count is typed here as opening stock. Existing product:
@@ -451,6 +560,28 @@
       }
     }
 
+    // ===== Daily stock sync box =====
+    // Shows what the closing stock sync will do: the product's own tick when it
+    // has one, else its groups (All finished products, or its category) — and
+    // follows a change of category. Only a box the admin CLICKED is saved, as
+    // the product's own choice; left alone it keeps following its groups.
+    let syncGroups = [];
+    const productGroupOn = (category) => syncGroups.some(g => g.group_type === 'all_products' ||
+      (g.group_type === 'product_category' && String(g.group_key).toLowerCase() === String(category || '').trim().toLowerCase()));
+    function initProductSyncBox(p) {
+      const box = document.getElementById('product-daily-sync');
+      box.dataset.touched = '';
+      box.dataset.follow = !p || p.daily_sync == null ? '1' : '';
+      box.checked = p ? !!p.in_daily_sync : productGroupOn(getCategoryValue());
+    }
+    function refreshProductSyncBox() {
+      const box = document.getElementById('product-daily-sync');
+      if (box.dataset.follow === '1' && box.dataset.touched !== '1') box.checked = productGroupOn(getCategoryValue());
+    }
+    document.getElementById('product-daily-sync').addEventListener('change', (e) => { e.target.dataset.touched = '1'; });
+    document.getElementById('product-category-select').addEventListener('change', refreshProductSyncBox);
+    document.getElementById('product-category-new').addEventListener('input', refreshProductSyncBox);
+
     function getCategoryValue() {
       const sel = document.getElementById('product-category-select');
       if (sel.value === '__new__') return document.getElementById('product-category-new').value.trim();
@@ -606,11 +737,17 @@
       document.getElementById('product-active').checked = true;
       document.getElementById('product-margin').innerHTML = '';
       document.getElementById('product-track-stock').checked = false;
+      // New products follow their groups unless ticked here.
+      initProductSyncBox(null);
       document.getElementById('product-qty').value = 0;
       document.getElementById('product-reorder').value = 0;
       syncStockFields();
       currentComponents = [];
       renderComponents();
+      currentIngredientLinks = [];
+      currentPackingLinks = [];
+      renderIngredientLinks();
+      renderPackingLinks();
       document.getElementById('product-cost').oninput = updateMarginPreview;
       document.getElementById('product-price').oninput = updateMarginPreview;
       new bootstrap.Modal(document.getElementById('productModal')).show();
@@ -627,11 +764,17 @@
       document.getElementById('product-discount').value = p.discount_price || '';
       document.getElementById('product-active').checked = !!p.is_active;
       document.getElementById('product-track-stock').checked = !!p.track_stock;
+      // What the sync does (its own tick or its group's); saved only if changed.
+      initProductSyncBox(p);
       document.getElementById('product-onhand').textContent = p.stock_quantity || 0;
       document.getElementById('product-reorder').value = p.stock_reorder_level || 0;
       syncStockFields();
       currentComponents = (p.components || []).map(c => ({ component_product_id: c.component_product_id, quantity: c.quantity }));
       renderComponents();
+      currentIngredientLinks = (p.ingredient_links || []).map(l => ({ stock_item_id: l.stock_item_id, servings_per_unit: l.servings_per_unit }));
+      currentPackingLinks = (p.packing_links || []).map(l => ({ stock_item_id: l.stock_item_id, quantity: l.quantity, applies_to: l.applies_to }));
+      renderIngredientLinks();
+      renderPackingLinks();
       document.getElementById('product-cost').oninput = updateMarginPreview;
       document.getElementById('product-price').oninput = updateMarginPreview;
       updateMarginPreview();
@@ -649,8 +792,20 @@
         discount_price: discountInput ? parseFloat(discountInput) : null,
         is_active: document.getElementById('product-active').checked ? 1 : 0,
         track_stock: document.getElementById('product-track-stock').checked ? 1 : 0,
+        // Only meaningful with tracking on (the server clears it otherwise).
+        // Only a change is sent; left alone it keeps following its groups.
+        daily_sync: (() => {
+          const box = document.getElementById('product-daily-sync');
+          if (!document.getElementById('product-track-stock').checked) return undefined; // the server clears it
+          return box.dataset.touched === '1' ? (box.checked ? 1 : 0) : undefined;
+        })(),
         stock_reorder_level: parseFloat(document.getElementById('product-reorder').value) || 0,
         components: currentComponents.filter(c => c.component_product_id && c.quantity > 0),
+        // Sent whole: they replace what is stored. A row edited to 0 is sent
+        // as is, so the server refuses it with a reason instead of quietly
+        // dropping the link.
+        ingredient_links: currentIngredientLinks,
+        packing_links: currentPackingLinks,
       };
       await withBusy(btn, async () => {
         // Blank / NaN would become JSON null and blow up on selling_price NOT NULL.

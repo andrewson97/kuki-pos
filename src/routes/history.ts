@@ -75,6 +75,8 @@ const MOVEMENT_TYPES = [
   "disposal",
   "hold_released",
   "refund",
+  "opened_finished",
+  "packing_shortfall",
 ];
 
 const DIRECTIONS = ["in", "out", "info"];
@@ -319,6 +321,70 @@ const UNIFIED_SQL = `
   FROM activity_log al
   LEFT JOIN users u ON u.id = al.user_id
   WHERE al.action = 'refunded_bill'
+
+  UNION ALL
+
+  -- 2e. An opened ingredient unit (a milk box) reaching FINISHED. Not a stock
+  --     movement — the unit left sealed stock when it was opened, which is the
+  --     'usage' row in source 1 — so it is an 'info' row. Used up by sales:
+  --     quantity NULL. Finished early (spilled, gone off): quantity is the
+  --     fraction of the unit thrown away, with the reason. See
+  --     src/services/portions.ts.
+  SELECT
+    'opened_finished',
+    o.id,
+    o.finished_at,
+    ${BIZ_DATE("o.finished_at")},
+    'ingredient',
+    o.stock_item_id,
+    COALESCE(si.name, 'Deleted item'),
+    COALESCE(si.unit, ''),
+    'opened_finished',
+    'info',
+    CASE WHEN o.finish_reason = 'manual' THEN ROUND(o.remaining, 3) END,
+    CASE WHEN o.finish_reason = 'manual'
+      THEN 'Finished early, ' || ROUND(o.remaining, 3) || ' of it left — ' || COALESCE(o.finish_note, '')
+      ELSE 'Used up by sales'
+    END,
+    'Opened ' || o.opened_at,
+    u.full_name,
+    NULL,
+    NULL
+  FROM opened_stock_units o
+  LEFT JOIN stock_items si ON si.id = o.stock_item_id
+  LEFT JOIN users u ON u.id = o.finished_by
+  WHERE o.status = 'finished' AND o.finished_at IS NOT NULL
+
+  UNION ALL
+
+  -- 2f. A sale's packing that was not on record (src/services/packing.ts): the
+  --     sale took what was recorded and went through anyway, so the shortfall
+  --     itself moved nothing — an 'info' row per packing item, so a count that
+  --     is wrong shows up where the owner looks. source_id is the log row id
+  --     scaled with the item's position, unique per row.
+  SELECT
+    'packing_shortfall',
+    al.id * 1000 + j.key,
+    al.created_at,
+    ${BIZ_DATE("al.created_at")},
+    'ingredient',
+    CAST(json_extract(j.value, '$.stock_item_id') AS INTEGER),
+    COALESCE(si.name, json_extract(j.value, '$.name'), 'Deleted item'),
+    COALESCE(si.unit, ''),
+    'packing_shortfall',
+    'info',
+    json_extract(j.value, '$.short'),
+    'Not on record: ' || json_extract(j.value, '$.needed') || ' needed, only '
+      || json_extract(j.value, '$.taken') || ' recorded. Count it.',
+    'Bill #' || COALESCE(json_extract(al.details, '$.token'), '?'),
+    u.full_name,
+    NULL,
+    NULL
+  FROM activity_log al
+  JOIN json_each(al.details, '$.items') j
+  LEFT JOIN stock_items si ON si.id = CAST(json_extract(j.value, '$.stock_item_id') AS INTEGER)
+  LEFT JOIN users u ON u.id = al.user_id
+  WHERE al.action = 'packing_shortfall'
 `;
 
 // --- Stock after each movement ---------------------------------------------

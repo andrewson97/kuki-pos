@@ -231,7 +231,8 @@ function renderLayout(activePage) {
     { path: '/stock', icon: '\u{1F4E6}', label: 'Stock', admin: true },
     { path: '/history', icon: '\u{1F553}', label: 'Stock History', admin: true },
     { divider: 'Finance' },
-    { path: '/cash', icon: '\u{1F4B5}', label: 'Cash Drawer', admin: false },
+    // badge: a stock count or an over-limit close waiting on an admin (admins only).
+    { path: '/cash', icon: '\u{1F4B5}', label: 'Cash Drawer', admin: false, badge: 'cash_approvals' },
     { path: '/expenses', icon: '\u{1F4B8}', label: 'Expenses', admin: false, badge: 'pending_expenses' },
     { path: '/income', icon: '\u{1F4B0}', label: 'Income', admin: true },
     { path: '/reports', icon: '\u{1F4C8}', label: 'Reports', admin: true },
@@ -296,6 +297,15 @@ async function refreshSidebarBadges() {
       if (res.ok) {
         const data = await res.json();
         setNavBadge('pending_expenses', data.count, '#dc3545');
+      }
+    } catch {}
+    // Closing the drawer waits on the owner: a stock count that did not match,
+    // or a variance over the limit (see public/js/closing.js).
+    try {
+      const res = await fetch('/api/cash/approvals/count');
+      if (res.ok) {
+        const data = await res.json();
+        setNavBadge('cash_approvals', data.count, '#dc3545');
       }
     } catch {}
   }
