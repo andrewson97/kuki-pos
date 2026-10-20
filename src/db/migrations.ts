@@ -899,6 +899,28 @@ export function runMigrations(): void {
   // ticked. See PRODUCT_IN_SYNC / ITEM_IN_SYNC in src/services/closing.ts.
   addColumn("products", "daily_sync", "INTEGER");
   addColumn("stock_items", "daily_sync", "INTEGER");
+  // One-time repair for a database made by an early build of this feature,
+  // where daily_sync was NOT NULL DEFAULT 0. addColumn() cannot change an
+  // existing column, and NOT NULL breaks "NULL = follow the group" (inserts
+  // fail, and every 0 means "never"). Swap it for the nullable column, keeping
+  // the 1s; the 0s become NULL, which is what they meant then ("not ticked").
+  // Never touches a database where the column is already nullable — which is
+  // every database this build creates, and production.
+  for (const table of ["products", "stock_items"]) {
+    try {
+      const col = (db.query(`SELECT "notnull" AS nn FROM pragma_table_info('${table}') WHERE name = 'daily_sync'`).get() as any);
+      if (!col || !col.nn) continue;
+      db.transaction(() => {
+        db.exec(`ALTER TABLE ${table} RENAME COLUMN daily_sync TO daily_sync_old`);
+        db.exec(`ALTER TABLE ${table} ADD COLUMN daily_sync INTEGER`);
+        db.exec(`UPDATE ${table} SET daily_sync = CASE WHEN daily_sync_old = 1 THEN 1 ELSE NULL END`);
+        db.exec(`ALTER TABLE ${table} DROP COLUMN daily_sync_old`);
+      })();
+      console.log(`[migration] ${table}.daily_sync made nullable (follow-the-group)`);
+    } catch (err: any) {
+      console.error(`[migration] could not make ${table}.daily_sync nullable:`, err?.message || err);
+    }
+  }
   db.exec(`
     -- A ticked group. group_type: 'stock_category' (group_key = the
     -- stock_categories id, as text), 'product_category' (group_key = the

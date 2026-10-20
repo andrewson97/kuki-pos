@@ -493,54 +493,69 @@
       box.disabled = !canEditSync() || !rows.length;
     }
 
-    // Tick or untick every row the filters show (not the hidden ones), as each
-    // row's own choice.
+    // Tick or untick every row the filters show (not the hidden ones). Only rows
+    // that read differently change — and they change as their own choice; a row
+    // already reading right (by its group or its own tick) is left alone.
     function tickAllShown(kind, box) {
       const rows = kind === 'product' ? shownProducts : shownItems;
-      const items = rows.filter(r => !!r.in_daily_sync !== box.checked || r.daily_sync == null).map(r => ({ kind, id: r.id, on: box.checked }));
+      const items = rows.filter(r => !!r.in_daily_sync !== box.checked).map(r => ({ kind, id: r.id, on: box.checked }));
       if (!items.length) return;
       setDailySync(items);
     }
 
     // The group bars. Stock categories above the stock items; every finished
-    // product and each product category above the products.
+    // product and each product category above the products. A ticked group
+    // always gets a chip, even with nothing left in it, so it can be unticked.
+    // While "All finished products" is ticked the product categories add
+    // nothing, so their chips are greyed out (the server leaves items alone).
     function renderSyncGroups() {
-      const dis = canEditSync() ? '' : 'disabled';
-      const chip = (type, key, label) => {
+      const allOn = groupOn('all_products', '');
+      const chip = (type, key, label, covered) => {
         const on = groupOn(type, key);
-        return `<label class="btn btn-sm ${on ? 'btn-success' : 'btn-outline-secondary'} mb-1 me-1" style="cursor:${canEditSync() ? 'pointer' : 'default'};">
-          <input type="checkbox" class="form-check-input me-1" ${on ? 'checked' : ''} ${dis}
-            onchange="setSyncGroup('${type}', ${JSON.stringify(String(key ?? '')).replace(/"/g, '&quot;')}, this.checked)">${escapeHtml(label)}</label>`;
+        const off = !canEditSync() || covered;
+        return `<label class="btn btn-sm ${on && !covered ? 'btn-success' : 'btn-outline-secondary'} mb-1 me-1" style="cursor:${off ? 'default' : 'pointer'};${covered ? 'opacity:0.55;' : ''}"
+            title="${covered ? 'Covered by All finished products' : (on ? 'Counted as a group' : 'Tick to count this whole group')}">
+          <input type="checkbox" class="form-check-input me-1" ${on || covered ? 'checked' : ''} ${off ? 'disabled' : ''}
+            onchange="setSyncGroup('${type}', ${escapeHtml(JSON.stringify(String(key ?? '')))}, this.checked)">${escapeHtml(label)}</label>`;
       };
       document.getElementById('sync-groups-items').innerHTML =
-        `<span class="small text-muted me-2">Count whole groups:</span>` + categories.map(c => chip('stock_category', c.id, c.name)).join('');
-      const productCats = sortCategories([...new Set(trackedProducts.map(p => p.category).filter(Boolean))]);
+        `<span class="small text-muted me-2">Count whole groups:</span>` + categories.map(c => chip('stock_category', c.id, c.name, false)).join('');
+      const tickedCats = syncGroups.filter(g => g.group_type === 'product_category').map(g => g.group_key);
+      const seen = new Set();
+      const productCats = sortCategories([...trackedProducts.map(p => p.category), ...tickedCats].filter(Boolean)
+        .filter(c => { const k = String(c).toLowerCase(); if (seen.has(k)) return false; seen.add(k); return true; }));
       document.getElementById('sync-groups-products').innerHTML =
-        `<span class="small text-muted me-2">Count whole groups:</span>` + chip('all_products', '', 'All finished products') + productCats.map(c => chip('product_category', c, c)).join('');
+        `<span class="small text-muted me-2">Count whole groups:</span>` + chip('all_products', '', 'All finished products', false) +
+        productCats.map(c => chip('product_category', c, c, allOn)).join('');
     }
 
     async function setSyncGroup(type, key, on) {
+      let ok = true;
       try {
         await api('/api/stock/daily-sync/groups', { method: 'POST', body: { group_type: type, group_key: key, on } });
       } catch (err) {
+        ok = false;
         showToast(escapeHtml((err && err.message) || 'Could not save'), 'error');
       }
-      await refreshSyncData();
+      await refreshSyncData(ok);
     }
 
     async function setDailySync(items) {
+      let ok = true;
       try {
         await api('/api/stock/daily-sync', { method: 'POST', body: { items } });
       } catch (err) {
+        ok = false;
         showToast(escapeHtml((err && err.message) || 'Could not save'), 'error');
       }
       // Re-read either way: a row's tick depends on its groups as well, so the
       // server's answer is what the boxes show (and, after an error, the old one).
-      await refreshSyncData();
+      await refreshSyncData(ok);
     }
 
     // Fresh items, products and groups — the ticks only, not the whole page.
-    async function refreshSyncData() {
+    // `saved`: say so only when the change went through and the re-read did too.
+    async function refreshSyncData(saved) {
       try {
         const [items, allProducts, groups] = await Promise.all([
           api('/api/stock/items'), api('/api/products'), api('/api/stock/daily-sync/groups'),
@@ -548,10 +563,14 @@
         stockItems = items;
         trackedProducts = allProducts.filter(p => p.track_stock);
         syncGroups = groups;
-      } catch {}
+      } catch (err) {
+        showToast(saved ? 'Saved, but the page could not refresh — reload it to see the ticks.' : 'Could not refresh — reload the page.', 'warning');
+        return;
+      }
       renderSyncGroups();
       renderStock();
       renderTrackedProducts();
+      if (!saved) return;
       const total = stockItems.filter(r => r.in_daily_sync).length + trackedProducts.filter(r => r.in_daily_sync).length;
       showToast(`Saved — ${total} item${total === 1 ? '' : 's'} in the daily stock sync`);
     }
@@ -591,9 +610,9 @@
       document.getElementById('stock-cost').value = '0';
       document.getElementById('stock-reorder').value = '0';
       document.getElementById('stock-expiry').value = '';
-      // New items follow their category's group unless ticked here.
-      document.getElementById('stock-daily-sync').checked = false;
-      document.getElementById('stock-daily-sync').dataset.orig = '';
+      // A new item follows its category's group: the box shows what that group
+      // says (and follows the category picked) until the admin clicks it.
+      initFormSyncBox(null);
       document.getElementById('stock-qty').disabled = false;
       new bootstrap.Modal(document.getElementById('stockModal')).show();
     }
@@ -610,19 +629,28 @@
       document.getElementById('stock-cost').value = i.cost_per_unit;
       document.getElementById('stock-reorder').value = i.reorder_level;
       document.getElementById('stock-expiry').value = i.expiry_date || '';
-      // Shows what the sync does (its own tick or its group's); saved only if changed.
-      document.getElementById('stock-daily-sync').checked = !!i.in_daily_sync;
-      document.getElementById('stock-daily-sync').dataset.orig = i.in_daily_sync ? '1' : '0';
+      initFormSyncBox(i);
       new bootstrap.Modal(document.getElementById('stockModal')).show();
     }
 
-    // The form's Daily sync box as the server should get it: only a change is
-    // sent (left alone, the item keeps following its group). On a new item an
-    // unticked box sends nothing for the same reason.
+    // The form's Daily sync box. It shows what the sync will do: the item's own
+    // tick when it has one, else its category's group (and follows a change of
+    // category). Only a box the admin CLICKED is saved, as the item's own
+    // choice; left alone, the item keeps following its group — so saving the
+    // form for a new price never takes it out of (or into) the count.
+    function initFormSyncBox(item) {
+      const box = document.getElementById('stock-daily-sync');
+      box.dataset.touched = '';
+      box.dataset.follow = !item || item.daily_sync == null ? '1' : '';
+      box.checked = item ? !!item.in_daily_sync : groupOn('stock_category', document.getElementById('stock-category').value);
+    }
+    document.getElementById('stock-daily-sync').addEventListener('change', (e) => { e.target.dataset.touched = '1'; });
+    document.getElementById('stock-category').addEventListener('change', (e) => {
+      const box = document.getElementById('stock-daily-sync');
+      if (box.dataset.follow === '1' && box.dataset.touched !== '1') box.checked = groupOn('stock_category', e.target.value);
+    });
     function formSyncValue(box) {
-      const now = box.checked ? '1' : '0';
-      if (box.dataset.orig === '') return box.checked ? 1 : undefined;
-      return now === box.dataset.orig ? undefined : Number(now);
+      return box.dataset.touched === '1' ? (box.checked ? 1 : 0) : undefined;
     }
 
     async function saveStockItem(btn) {

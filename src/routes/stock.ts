@@ -442,6 +442,12 @@ stock.post("/daily-sync/groups", adminOnly, async (c) => {
   } else if (type === "product_category") {
     key = String(body.group_key ?? "").trim();
     if (!key) return c.json({ error: "Say which product category" }, 400);
+    // Ticking needs a real category, or the rule would sit unseen and count
+    // whatever product is given that name later. Unticking always works, so a
+    // group whose products have all gone can still be cleared.
+    if (on && !db.query("SELECT 1 FROM products WHERE LOWER(TRIM(category)) = LOWER(?) LIMIT 1").get(key)) {
+      return c.json({ error: `There is no product category called "${key}".` }, 404);
+    }
   } else if (type !== "all_products") {
     return c.json({ error: "group_type must be stock_category, product_category or all_products" }, 400);
   }
@@ -453,6 +459,16 @@ stock.post("/daily-sync/groups", adminOnly, async (c) => {
       // A product category is matched without regard to case, so its rows go
       // the same way.
       db.query("DELETE FROM daily_sync_groups WHERE group_type = ? AND LOWER(group_key) = LOWER(?)").run(type, key);
+    }
+    // While "All finished products" is ticked, a product category adds and
+    // removes nothing — All already counts every product. Its own tick is kept
+    // (it applies again once All is unticked), but no item is reset: a reset
+    // would quietly put back a product the admin had left out.
+    if (type === "product_category" && db.query("SELECT 1 FROM daily_sync_groups WHERE group_type = 'all_products'").get()) {
+      db.query("INSERT INTO activity_log (user_id, action, details) VALUES (?, 'daily_sync_group', ?)").run(
+        user.id, JSON.stringify({ group_type: type, group_key: key, on, items_reset: 0, covered_by_all: true })
+      );
+      return 0;
     }
     // Everyone in the group follows it from now on.
     const r = type === "stock_category"

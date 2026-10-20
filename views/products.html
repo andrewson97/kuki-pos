@@ -248,6 +248,8 @@
 
     async function loadProducts() {
       allProducts = await api('/api/products');
+      // For the Daily sync box in the form (what a group would count).
+      try { syncGroups = await api('/api/stock/daily-sync/groups'); } catch { syncGroups = []; }
       // For the ingredient / packing pickers. Not fatal: the rest of the page
       // still works without it, and the pickers say so.
       try { stockItems = await api('/api/stock/items'); } catch { stockItems = []; }
@@ -558,6 +560,28 @@
       }
     }
 
+    // ===== Daily stock sync box =====
+    // Shows what the closing stock sync will do: the product's own tick when it
+    // has one, else its groups (All finished products, or its category) — and
+    // follows a change of category. Only a box the admin CLICKED is saved, as
+    // the product's own choice; left alone it keeps following its groups.
+    let syncGroups = [];
+    const productGroupOn = (category) => syncGroups.some(g => g.group_type === 'all_products' ||
+      (g.group_type === 'product_category' && String(g.group_key).toLowerCase() === String(category || '').trim().toLowerCase()));
+    function initProductSyncBox(p) {
+      const box = document.getElementById('product-daily-sync');
+      box.dataset.touched = '';
+      box.dataset.follow = !p || p.daily_sync == null ? '1' : '';
+      box.checked = p ? !!p.in_daily_sync : productGroupOn(getCategoryValue());
+    }
+    function refreshProductSyncBox() {
+      const box = document.getElementById('product-daily-sync');
+      if (box.dataset.follow === '1' && box.dataset.touched !== '1') box.checked = productGroupOn(getCategoryValue());
+    }
+    document.getElementById('product-daily-sync').addEventListener('change', (e) => { e.target.dataset.touched = '1'; });
+    document.getElementById('product-category-select').addEventListener('change', refreshProductSyncBox);
+    document.getElementById('product-category-new').addEventListener('input', refreshProductSyncBox);
+
     function getCategoryValue() {
       const sel = document.getElementById('product-category-select');
       if (sel.value === '__new__') return document.getElementById('product-category-new').value.trim();
@@ -714,8 +738,7 @@
       document.getElementById('product-margin').innerHTML = '';
       document.getElementById('product-track-stock').checked = false;
       // New products follow their groups unless ticked here.
-      document.getElementById('product-daily-sync').checked = false;
-      document.getElementById('product-daily-sync').dataset.orig = '';
+      initProductSyncBox(null);
       document.getElementById('product-qty').value = 0;
       document.getElementById('product-reorder').value = 0;
       syncStockFields();
@@ -742,8 +765,7 @@
       document.getElementById('product-active').checked = !!p.is_active;
       document.getElementById('product-track-stock').checked = !!p.track_stock;
       // What the sync does (its own tick or its group's); saved only if changed.
-      document.getElementById('product-daily-sync').checked = !!p.in_daily_sync;
-      document.getElementById('product-daily-sync').dataset.orig = p.in_daily_sync ? '1' : '0';
+      initProductSyncBox(p);
       document.getElementById('product-onhand').textContent = p.stock_quantity || 0;
       document.getElementById('product-reorder').value = p.stock_reorder_level || 0;
       syncStockFields();
@@ -775,8 +797,7 @@
         daily_sync: (() => {
           const box = document.getElementById('product-daily-sync');
           if (!document.getElementById('product-track-stock').checked) return undefined; // the server clears it
-          if (box.dataset.orig === '') return box.checked ? 1 : undefined;
-          return (box.checked ? '1' : '0') === box.dataset.orig ? undefined : (box.checked ? 1 : 0);
+          return box.dataset.touched === '1' ? (box.checked ? 1 : 0) : undefined;
         })(),
         stock_reorder_level: parseFloat(document.getElementById('product-reorder').value) || 0,
         components: currentComponents.filter(c => c.component_product_id && c.quantity > 0),

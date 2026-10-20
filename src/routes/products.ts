@@ -143,7 +143,8 @@ products.get("/", (c) => {
       : "WHERE is_discontinued = 0";
   // in_daily_sync: whether the closing stock sync counts it — its own tick or
   // its group's (PRODUCT_IN_SYNC), for the Stock page and the product form.
-  const all = db.query(`SELECT p.*, ${PRODUCT_IN_SYNC} AS in_daily_sync FROM products p ${where} ORDER BY name`).all() as any[];
+  // (An untracked product has no count, so it is never "in" the sync.)
+  const all = db.query(`SELECT p.*, CASE WHEN p.track_stock = 1 THEN ${PRODUCT_IN_SYNC} ELSE 0 END AS in_daily_sync FROM products p ${where} ORDER BY name`).all() as any[];
   return c.json(attachStockLinks(attachComponents(all)));
 });
 
