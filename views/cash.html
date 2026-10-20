@@ -239,6 +239,9 @@
       submitBtn.disabled = !!holderMsg || expensesBlock || refundsBlock || syncBlock;
     }
 
+    // A close's variance, or an opening's difference from what was left at the last close.
+    function vOf(h) { return h.count_type === 'open' ? h.open_variance : h.variance; }
+
     async function loadCash() {
       renderDenomInputs();
       todayData = await api('/api/cash/today');
@@ -255,10 +258,10 @@
         <tr>
           <td>${formatDate(h.count_date)}</td>
           <td><span class="badge bg-${h.count_type === 'open' ? 'primary' : 'success'}">${h.count_type}</span></td>
-          <td>${h.user_name || '-'}</td>
-          <td class="text-end">${formatCurrency(h.total_amount)}</td>
-          <td class="text-end ${h.variance == null ? '' : varianceClass(h.variance)}">${h.variance == null ? '-' : signedCurrency(h.variance)}</td>
-          <td class="small text-muted">${escText(h.variance_approved_by_name || '')}${h.charged_amount > 0 ? `<div class="text-danger">charged ${formatCurrency(h.charged_amount)}</div>` : ''}</td>
+          <td>${escText(h.user_name || '-')}</td>
+          <td class="text-end">${h.total_amount == null ? '-' : formatCurrency(h.total_amount)}</td>
+          <td class="text-end ${vOf(h) == null ? '' : varianceClass(vOf(h))}">${vOf(h) == null ? '-' : signedCurrency(vOf(h))}</td>
+          <td class="small text-muted">${escText(h.variance_approved_by_name || '')}${h.charged_amount > 0 ? `<div class="text-danger">charged ${formatCurrency(h.charged_amount)}</div>` : ''}${h.collected > 0 ? `<div>collected ${formatCurrency(h.collected)}</div>` : ''}</td>
         </tr>
       `).join('') || '<tr><td colspan="6" class="text-center text-muted py-3">No records yet</td></tr>';
     }
@@ -276,6 +279,11 @@
       } else {
         // The STORED close: expected_amount and variance exactly as the server
         // worked them out when the shift was closed.
+        // A non-admin gets no figures for the last close (the next opener counts blind).
+        if (todayData.close.total_amount == null) {
+          status.innerHTML = `<div class="alert alert-success">Last shift closed at ${formatTime(todayData.close.created_at)}. Count the drawer below to open a new shift.</div>`;
+          return;
+        }
         const v = Number(todayData.close.variance) || 0;
         const cls = isNil(v) ? 'success' : (v > 0 ? 'warning' : 'danger');
         const word = isNil(v) ? 'matched exactly' : `${v > 0 ? 'over by' : 'short by'} ${formatCurrency(Math.abs(v))}`;

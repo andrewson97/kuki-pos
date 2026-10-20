@@ -122,7 +122,11 @@ window.Closing = (() => {
     pollTimer = null;
     if (document.hidden) return;
     // Between shifts only refunds can wait on the admin; a slow look for them.
-    if (!shiftOpen()) { if (cfg.isAdmin) pollTimer = setTimeout(refresh, 60000); return; }
+    if (!shiftOpen()) {
+      if (today.open_request && today.open_request.status === 'pending') pollTimer = setTimeout(refresh, 15000);
+      else if (cfg.isAdmin) pollTimer = setTimeout(refresh, 60000);
+      return;
+    }
     const s = syncState();
     const waiting = (s && s.sync && s.sync.status === 'pending') ||
       !!today.handover || // a handover moves on when the other person answers
@@ -199,12 +203,18 @@ window.Closing = (() => {
   // (the default) or write it off with a reason. `editable` lets the admin set
   // the amount (a stock item with no price, say).
   let chargeSeq = 0;
-  function chargeHtml(amount, name, editable, hint) {
+  // `who`: one name, or a list of { key, label } when the admin chooses who
+  // is charged (an opening shortfall: the last holder or the opener).
+  function chargeHtml(amount, who, editable, hint) {
     const n = ++chargeSeq;
+    const amountBox = editable ? `&nbsp;Rs <input class="cc-input" type="number" min="0" step="any" data-role="charge-amount" value="${esc(String(round2(amount)))}">` : '';
+    const options = Array.isArray(who)
+      ? who.map((o, i) => `<label class="cc-opt"><input type="radio" name="cc-ch-${n}" value="charge:${esc(o.key)}"${i === 0 ? ' checked' : ''}> Charge to ${esc(o.label || o.name)}${i === 0 ? amountBox : ''}</label>`).join('')
+      : `<label class="cc-opt"><input type="radio" name="cc-ch-${n}" value="charge" checked> Charge to ${esc(who || 'the holder')}'s pending account
+        ${amountBox}</label>`;
     return `<div class="cc-charge" data-role="charge" data-amount="${esc(String(round2(amount)))}">
       <div>Short by <strong class="cc-diff-neg">${cfg.money(amount)}</strong>${hint ? ` <span class="cc-muted">${hint}</span>` : ''}</div>
-      <label class="cc-opt"><input type="radio" name="cc-ch-${n}" value="charge" checked> Charge to ${esc(name || 'the holder')}'s pending account
-        ${editable ? `&nbsp;Rs <input class="cc-input" type="number" min="0" step="any" data-role="charge-amount" value="${esc(String(round2(amount)))}">` : ''}</label>
+      ${options}
       <label class="cc-opt"><input type="radio" name="cc-ch-${n}" value="write_off"> Write it off</label>
       <input class="cc-text" data-role="write-off-note" placeholder="Why it is written off (needed to write off)">
     </div>`;
@@ -219,22 +229,23 @@ window.Closing = (() => {
       if (!note) return 'Say why the shortage is written off.';
       return { charge: false, write_off_note: note };
     }
+    const to = pick && pick.value.startsWith('charge:') ? { charge_to: pick.value.slice(7) } : {};
     const amt = box.querySelector('[data-role="charge-amount"]');
     // Only an amount the admin changed is sent; otherwise the server works it
     // out (on the approved figures, after any correction).
     if (amt && amt.value !== box.dataset.amount) {
       const v = Number(amt.value);
       if (amt.value === '' || !Number.isFinite(v) || v < 0) return 'The amount to charge must be 0 or more.';
-      return { charge: true, charge_amount: v };
+      return { charge: true, charge_amount: v, ...to };
     }
-    return { charge: true };
+    return { charge: true, ...to };
   }
   // The same choice as a dialog, for the flows that have no panel of their own.
-  function askCharge(amount, name, title) {
+  function askCharge(amount, who, title) {
     return new Promise((resolve) => {
       const ov = dialog(`<h4 style="margin:0 0 6px;font-weight:700;">${esc(title || 'The shortage')}</h4>
-        <div class="cc-muted">Approving a shortage either charges it to the person who held the drawer, or writes it off.</div>
-        ${chargeHtml(amount, name, false)}
+        <div class="cc-muted">Approving a shortage either charges it to someone's pending account, or writes it off.</div>
+        ${chargeHtml(amount, who, false)}
         <div class="cc-row"><button class="cc-btn cc-primary" data-act="go">Continue</button><button class="cc-btn" data-act="cancel">Cancel</button></div>`);
       ov.querySelector('[data-act="cancel"]').onclick = () => { closeDialog(); resolve(null); };
       ov.querySelector('[data-act="go"]').onclick = () => {
@@ -269,7 +280,7 @@ window.Closing = (() => {
       return await send({});
     } catch (err) {
       if (!(err && err.status === 409 && err.data && err.data.needs_charge_decision)) throw err;
-      const c = await askCharge(err.data.amount, err.data.charge_to && err.data.charge_to.name, 'The shortage');
+      const c = await askCharge(err.data.amount, err.data.charge_options || (err.data.charge_to && err.data.charge_to.name), 'The shortage');
       if (!c) return undefined;
       return await send(c);
     }
@@ -282,7 +293,20 @@ window.Closing = (() => {
     const account = owe > 0.005
       ? `<div class="cc-muted" style="margin-top:6px;">Your pending account: <strong class="cc-diff-neg">${cfg.money(owe)}</strong> owed for shortages. <a href="#" onclick="Closing.showMyAccount();return false;">See why</a></div>`
       : '';
-    if (!shiftOpen()) { el.innerHTML = account ? `<div class="cc-box">${account}</div>` : ''; return; }
+    if (!shiftOpen()) {
+      const k = today.carry;
+      if (!k) { el.innerHTML = account ? `<div class="cc-box">${account}</div>` : ''; return; }
+      // Only admins get `carry`: the opener counts blind.
+      const rows = (k.collections || []).map((x) => `<tr><td>${esc(time(x.created_at))}</td><td>${esc(x.user_name || '-')}${x.note ? ` &middot; <span class="cc-muted">${esc(x.note)}</span>` : ''}</td>
+        <td class="num">${cfg.money(x.amount)}</td><td class="num"><button class="cc-btn cc-danger" style="padding:2px 8px;" onclick="Closing.voidCollection(${Number(x.id)}, this)">Remove</button></td></tr>`).join('');
+      el.innerHTML = `<div class="cc-box cc-step"><h4>&#128176; Cash in the drawer since the last close</h4>
+        <div>Closed at ${esc(time(k.closed_at))} by ${esc(k.closed_by || '-')} with <strong>${cfg.money(k.close_total)}</strong> counted.
+          Collected: <strong>${cfg.money(k.collected)}</strong>. Left in the drawer: <strong>${cfg.money(k.carried)}</strong> &mdash; the next opening has to count exactly this.</div>
+        ${rows ? `<table class="cc-table"><tbody>${rows}</tbody></table>` : ''}
+        <div class="cc-row"><button class="cc-btn cc-primary" onclick="Closing.recordCollection(this)">Record cash collected</button></div>
+        <div class="cc-muted">Anything missing at the next opening is ${esc(k.holder ? k.holder.name : 'the last holder')}'s or the opener's, as you decide then.</div>${account}</div>`;
+      return;
+    }
     const holder = today.holder || {};
     const h = today.handover;
     const you = today.is_holder ? '<span class="cc-you">you</span>' : '';
@@ -469,6 +493,45 @@ window.Closing = (() => {
       ${ledgerHtml(a.entries || [])}
       <div class="cc-row"><button class="cc-btn" data-act="cancel">Close</button></div>`);
     ov.querySelector('[data-act="cancel"]').onclick = closeDialog;
+  }
+
+  // ----- Cash collected after a close (admin) -----------------------------------
+  async function recordCollection(btn) {
+    const k = today && today.carry;
+    if (!k) return;
+    const ov = dialog(`<h4 style="margin:0 0 6px;font-weight:700;">Record cash collected</h4>
+      <div class="cc-muted">The cash you are taking out of the drawer now (to the bank or the safe). ${cfg.money(k.carried)} is in it.</div>
+      <label>Amount (Rs)</label><input class="cc-text" type="number" min="0" step="any" inputmode="decimal" data-role="amount">
+      <div class="cc-muted" data-role="left"></div>
+      <label>Note <span class="cc-muted">(optional)</span></label><input class="cc-text" data-role="note" placeholder="e.g. banked at BOC">
+      <div class="cc-row"><button class="cc-btn cc-primary" data-act="go">Save</button><button class="cc-btn" data-act="cancel">Cancel</button></div>`);
+    const amt = ov.querySelector('[data-role="amount"]');
+    amt.addEventListener('input', () => {
+      const v = Number(amt.value) || 0;
+      ov.querySelector('[data-role="left"]').textContent = `Leaves ${cfg.money(round2(k.carried - v))} for the next opening.`;
+    });
+    setTimeout(() => amt.focus(), 50);
+    ov.querySelector('[data-act="cancel"]').onclick = closeDialog;
+    ov.querySelector('[data-act="go"]').onclick = async (e) => {
+      const v = Number(amt.value);
+      if (!(v > 0)) { notifyIn(ov, 'Enter the amount taken out.'); return; }
+      await cfg.withBusy(e.currentTarget, async () => {
+        try {
+          await api('/api/cash/collections', { method: 'POST', body: { amount: v, note: ov.querySelector('[data-role="note"]').value } });
+        } catch (err) { notifyIn(ov, err.message); return; }
+        closeDialog();
+        cfg.notify(`Recorded ${cfg.money(v)} collected`);
+        await refresh();
+      }, 'Saving…');
+    };
+  }
+  async function voidCollection(id, btn) {
+    if (!confirm('Remove this collection? (It stays on record as removed.)')) return;
+    await cfg.withBusy(btn, async () => {
+      await api(`/api/cash/collections/${Number(id)}/void`, { method: 'POST', body: {} });
+      cfg.notify('Collection removed');
+      await refresh();
+    }, '…');
   }
 
   // ----- Step 1: the stock sync -------------------------------------------------
@@ -758,14 +821,14 @@ window.Closing = (() => {
   // ----- Step 2's gate: a variance over the limit --------------------------------
   function needsApproval(body, data) {
     gateBody = body;
-    gateInfo = data;
+    gateInfo = data || {};
     renderGate();
   }
 
   function renderGate() {
     const el = cfg.gate;
     if (!el) return;
-    if (!shiftOpen()) { el.innerHTML = ''; return; }
+    if (!shiftOpen()) { renderOpenGate(el); return; }
     const r = today.close_request;
     const lim = cfg.money(today.variance_limit ?? 200);
     const word = (v) => `${v > 0 ? 'over' : 'short'} by ${cfg.money(Math.abs(v))}`;
@@ -799,6 +862,53 @@ window.Closing = (() => {
       : '';
   }
 
+  // Opening: a count that does not match what was left at the last close needs
+  // an admin. Same three ways as a close: request (approved from their own
+  // login), their password here, or (an admin) answering the charge question.
+  function renderOpenGate(el) {
+    const r = today.open_request;
+    // The opener counts blind: a non-admin is never sent the difference.
+    const word = (v) => v == null ? 'does not match what was left' : `${v > 0 ? 'over' : 'short'} by ${cfg.money(Math.abs(v))}`;
+    if (gateInfo && gateBody) {
+      el.innerHTML = `<div class="cc-box cc-bad"><h4>&#9888;&#65039; The count does not match what was left at the last close</h4>
+        <div>${/several times/.test(gateInfo.error || '') ? esc(gateInfo.error) : 'Count it again, or ask an admin to approve opening on this count.'}</div>
+        <div class="cc-row"><button class="cc-btn cc-primary" onclick="Closing.requestApproval(this)">Request admin approval</button>
+        <button class="cc-btn" onclick="Closing.adminApproveClose()">Admin: approve here</button></div></div>`;
+      return;
+    }
+    if (r && r.status === 'pending') {
+      el.innerHTML = `<div class="cc-box cc-wait"><h4>&#9203; Waiting for an admin to approve the opening</h4>
+        <div>Counted ${cfg.money(r.total_amount)} &mdash; ${word(r.variance)}. Asked by ${esc(r.user_name || '-')} at ${esc(time(r.created_at))}.</div>
+        <div class="cc-muted">Count again and save if the count was wrong; that replaces this request.</div>
+        ${cfg.isAdmin ? '' : `<div class="cc-row"><button class="cc-btn cc-primary" onclick="Closing.adminApproveRequest(${Number(r.id)})">Admin: approve here</button></div>`}</div>`;
+      return;
+    }
+    if (r && r.status === 'approved') {
+      const charged = r.charge_decision === 'charge' ? ` Charged to ${esc(r.charge_to_name || '-')}.` : r.charge_decision === 'write_off' ? ' Written off.' : '';
+      el.innerHTML = `<div class="cc-box cc-ok"><h4>&#9989; ${esc(r.decided_by_name || 'An admin')} approved the opening</h4>
+        <div>On the count of ${cfg.money(r.total_amount)} (${word(r.variance)}).${charged}${r.decision_note ? ` &ldquo;${esc(r.decision_note)}&rdquo;` : ''}</div>
+        ${isMe(r.user_id) || cfg.isAdmin ? `<div class="cc-row"><button class="cc-btn cc-success" onclick="Closing.openOnRequest(${Number(r.id)}, this)">Open the drawer now</button></div>` : `<div class="cc-muted">${esc(r.user_name)} opens on it.</div>`}</div>`;
+      return;
+    }
+    el.innerHTML = r && r.status === 'rejected'
+      ? `<div class="cc-box cc-bad"><h4>&#10060; Opening rejected</h4><div>${esc(r.decided_by_name || 'The admin')}: &ldquo;${esc(r.decision_note || '')}&rdquo;. Count the drawer again.</div></div>`
+      : '';
+  }
+
+  async function openOnRequest(reqId, btn) {
+    await cfg.withBusy(btn, async () => {
+      try {
+        await api('/api/cash/open', { method: 'POST', body: { open_request_id: reqId } });
+      } catch (err) {
+        cfg.notify((err && err.message) || 'Could not open', 'error');
+        await refresh();
+        return;
+      }
+      cfg.notify('Drawer opened (approved)');
+      if (cfg.onClosed) await cfg.onClosed();
+    }, 'Opening…');
+  }
+
   // The drawer count on screen changed: a refused count waiting for "request" /
   // "approve here" is not this count any more, so it must not be sent.
   function clearGate() {
@@ -811,7 +921,7 @@ window.Closing = (() => {
   async function requestApproval(btn) {
     if (!gateBody) return;
     await cfg.withBusy(btn, async () => {
-      await api('/api/cash/close-requests', { method: 'POST', body: gateBody });
+      await api(shiftOpen() ? '/api/cash/close-requests' : '/api/cash/open-requests', { method: 'POST', body: gateBody });
       gateBody = null; gateInfo = null;
       cfg.notify('Sent to the admin for approval');
       await refresh();
@@ -822,13 +932,16 @@ window.Closing = (() => {
   // count that was refused.
   async function adminApproveClose() {
     if (!gateBody) return;
-    const creds = await askAdmin('Admin approval — drawer variance', `Closing ${gateInfo.variance > 0 ? 'over' : 'short'} by ${cfg.money(Math.abs(gateInfo.variance))}. The admin's password approves it.`);
+    const opening = !shiftOpen();
+    // An opener is not told the difference (blind count); the admin sees it in the charge question.
+    const what = gateInfo.variance == null ? 'on a count that does not match what was left' : `${gateInfo.variance > 0 ? 'over' : 'short'} by ${cfg.money(Math.abs(gateInfo.variance))}`;
+    const creds = await askAdmin('Admin approval — drawer variance', `${opening ? 'Opening' : 'Closing'} ${what}. The admin's password approves it.`);
     if (!creds) return;
     try {
-      const res = await withChargeDecision((extra) => api('/api/cash/close', { method: 'POST', body: { ...gateBody, ...extra, ...creds } }));
+      const res = await withChargeDecision((extra) => api(opening ? '/api/cash/open' : '/api/cash/close', { method: 'POST', body: { ...gateBody, ...extra, ...creds } }));
       if (!res) return;
       gateBody = null; gateInfo = null;
-      cfg.notify(`Drawer closed with the admin's approval (${res.variance > 0 ? 'over' : 'short'} by ${cfg.money(Math.abs(res.variance))})`);
+      cfg.notify(`Drawer ${opening ? 'opened' : 'closed'} with the admin's approval (${res.variance > 0 ? 'over' : 'short'} by ${cfg.money(Math.abs(res.variance))})`);
       if (cfg.onClosed) await cfg.onClosed();
     } catch (err) {
       cfg.notify((err && err.message) || 'Could not close', 'error');
@@ -838,12 +951,14 @@ window.Closing = (() => {
 
   // A request is waiting and the admin is at the till: approve it, then close on it.
   async function adminApproveRequest(reqId) {
-    const creds = await askAdmin('Admin approval — drawer variance', 'Approving closes the drawer on the count that was sent.');
+    const opening = !shiftOpen();
+    const creds = await askAdmin('Admin approval — drawer variance', `Approving ${opening ? 'opens' : 'closes'} the drawer on the count that was sent.`);
     if (!creds) return;
     try {
-      if (!(await withChargeDecision((extra) => api(`/api/cash/close-requests/${Number(reqId)}/approve`, { method: 'POST', body: { ...extra, ...creds } })))) return;
-      const res = await api('/api/cash/close', { method: 'POST', body: { close_request_id: reqId } });
-      cfg.notify(`Drawer closed with the admin's approval (${res.variance > 0 ? 'over' : 'short'} by ${cfg.money(Math.abs(res.variance))})`);
+      const kind = opening ? 'open' : 'close';
+      if (!(await withChargeDecision((extra) => api(`/api/cash/${kind}-requests/${Number(reqId)}/approve`, { method: 'POST', body: { ...extra, ...creds } })))) return;
+      const res = await api(`/api/cash/${kind}`, { method: 'POST', body: { [`${kind}_request_id`]: reqId } });
+      cfg.notify(`Drawer ${opening ? 'opened' : 'closed'} with the admin's approval (${res.variance > 0 ? 'over' : 'short'} by ${cfg.money(Math.abs(res.variance))})`);
       if (cfg.onClosed) await cfg.onClosed();
     } catch (err) {
       cfg.notify((err && err.message) || 'Could not approve', 'error');
@@ -881,10 +996,11 @@ window.Closing = (() => {
     const refunds = q.refund_requests || [];
     // Same items still waiting: leave the panel (and any figure being corrected) as it is.
     const handovers = q.handovers || [];
-    const key = q.stock_syncs.map((s) => 's' + s.id).concat(q.close_requests.map((r) => 'r' + r.id), refunds.map((f) => 'f' + f.id), handovers.map((h) => 'h' + h.id)).join(',');
+    const openings = q.open_requests || [];
+    const key = q.stock_syncs.map((s) => 's' + s.id).concat(q.close_requests.map((r) => 'r' + r.id), refunds.map((f) => 'f' + f.id), handovers.map((h) => 'h' + h.id), openings.map((o) => 'o' + o.id)).join(',');
     if (key === approvalsKey && el.innerHTML) return;
     approvalsKey = key;
-    if (!q.stock_syncs.length && !q.close_requests.length && !refunds.length && !handovers.length) { el.innerHTML = ''; return; }
+    if (!q.stock_syncs.length && !q.close_requests.length && !refunds.length && !handovers.length && !openings.length) { el.innerHTML = ''; return; }
     el.innerHTML = `<div class="cc-box cc-wait"><h4>&#128276; Waiting for your approval</h4>
       ${refunds.map((f) => `<div style="margin-top:10px;" data-refund="${Number(f.id)}">${refundRequestHtml(f)}
         <input class="cc-text" data-role="note" placeholder="Note (needed to reject)" style="margin-top:6px;">
@@ -898,16 +1014,42 @@ window.Closing = (() => {
         ${r.variance < 0 ? chargeHtml(-r.variance, r.charge_to && r.charge_to.name, false) : ''}
         <input class="cc-text" data-role="note" placeholder="Note (needed to reject)" style="margin-top:6px;">
         <div class="cc-row"><button class="cc-btn cc-success" data-act="approve">Approve close</button><button class="cc-btn cc-danger" data-act="reject">Reject &mdash; count again</button></div></div>`).join('')}
+      ${openings.map((o) => `<div style="margin-top:12px;" data-opening="${Number(o.id)}"><strong>Open the drawer</strong>
+        <div>${esc(o.user_name || '-')} counted ${cfg.money(o.total_amount)}; ${cfg.money(o.expected_amount)} was left at the last close &mdash;
+        <strong class="${o.variance < 0 ? 'cc-diff-neg' : 'cc-diff-pos'}">${o.variance > 0 ? 'over' : 'short'} by ${cfg.money(Math.abs(o.variance))}</strong>.</div>
+        ${o.notes ? `<div class="cc-muted">Note: ${esc(o.notes)}</div>` : ''}
+        ${o.variance < 0 ? chargeHtml(-o.variance, [
+          { key: 'closer', label: `${o.closer ? o.closer.name : 'the last holder'} (held the drawer at the last close)` },
+          { key: 'opener', label: `${o.user_name || 'the opener'} (opening now)` },
+        ], false) : ''}
+        <input class="cc-text" data-role="note" placeholder="Note (needed to reject)" style="margin-top:6px;">
+        <div class="cc-row"><button class="cc-btn cc-success" data-act="approve">Approve opening</button><button class="cc-btn cc-danger" data-act="reject">Reject &mdash; count again</button></div></div>`).join('')}
       ${handovers.map((h) => `<div style="margin-top:12px;" data-handover="${Number(h.id)}"><strong>Drawer handover</strong>
         <div>${esc(h.from_name || '-')} &rarr; ${esc(h.to_name || '-')}: expected ${cfg.money(h.receiver_expected)}; ${esc(h.from_name)} counted ${cfg.money(h.giver_total)}, ${esc(h.to_name)} counted ${cfg.money(h.receiver_total)} &mdash;
         <strong class="${h.variance < 0 ? 'cc-diff-neg' : 'cc-diff-pos'}">${h.variance > 0 ? 'over' : 'short'} by ${cfg.money(Math.abs(h.variance))}</strong> (limit ${cfg.money(today.variance_limit ?? 200)}).</div>
         ${Math.abs((h.giver_total || 0) - (h.receiver_total || 0)) > 0.005 ? '<div class="cc-muted">The two counts disagree &mdash; worth counting again together before deciding.</div>' : ''}
         ${h.giver_notes ? `<div class="cc-muted">${esc(h.from_name)}: ${esc(h.giver_notes)}</div>` : ''}
         ${h.receiver_notes ? `<div class="cc-muted">${esc(h.to_name)}: ${esc(h.receiver_notes)}</div>` : ''}
-        ${h.variance < 0 ? chargeHtml(-h.variance, h.from_name, true) : ''}
+        ${h.variance < 0 ? chargeHtml(-h.variance, h.from_name, false) : ''}
         <input class="cc-text" data-role="note" placeholder="Note (needed to reject)" style="margin-top:6px;">
         <div class="cc-row"><button class="cc-btn cc-success" data-act="approve">Approve &mdash; ${esc(h.to_name)} takes the drawer</button><button class="cc-btn cc-danger" data-act="reject">Reject &mdash; ${esc(h.from_name)} keeps it</button></div></div>`).join('')}
     </div>`;
+    for (const o of openings) {
+      const box = el.querySelector(`[data-opening="${Number(o.id)}"]`);
+      const decide = async (btn, approve) => {
+        const note = box.querySelector('[data-role="note"]').value.trim();
+        if (!approve && !note) { cfg.notify('Say why it is rejected', 'error'); return; }
+        const charge = approve ? readCharge(box) : {};
+        if (typeof charge === 'string') { cfg.notify(charge, 'error'); return; }
+        await cfg.withBusy(btn, async () => {
+          if (!(await withChargeDecision((extra) => api(`/api/cash/open-requests/${Number(o.id)}/${approve ? 'approve' : 'reject'}`, { method: 'POST', body: { note, ...charge, ...extra } })))) return;
+          cfg.notify(approve ? `Opening approved — ${o.user_name} can open now` : 'Opening rejected');
+          await refresh();
+        }, '…');
+      };
+      box.querySelector('[data-act="approve"]').onclick = (e) => decide(e.currentTarget, true);
+      box.querySelector('[data-act="reject"]').onclick = (e) => decide(e.currentTarget, false);
+    }
     for (const h of handovers) {
       const box = el.querySelector(`[data-handover="${Number(h.id)}"]`);
       const decide = async (btn, approve) => {
@@ -979,7 +1121,7 @@ window.Closing = (() => {
 
   return {
     askAdmin, refundRequestHtml, wireRefundDecision, ledgerHtml,
-    closeBlockReason, withChargeDecision, showMyAccount,
+    closeBlockReason, withChargeDecision, showMyAccount, recordCollection, voidCollection, openOnRequest,
     startHandover, acceptHandover, declineHandover, cancelHandover, startTakeover,
     init, update, refresh, closeAllowed, needsApproval, clearGate,
     startCount, cancelCount, submitCount, adminApproveSync,
