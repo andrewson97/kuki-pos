@@ -934,6 +934,33 @@ export function runMigrations(): void {
       PRIMARY KEY (group_type, group_key)
     );
   `);
+
+  // --- feature/refund-approval -----------------------------------------------
+  // A cashier's refund needs an admin (see POST /api/pos/bills/:id/refund): the
+  // admin's password at the till, or a request the admin approves from their
+  // own login. Approving the request IS the refund. status: pending, approved,
+  // rejected, cancelled (the bill was refunded some other way meanwhile).
+  // restock is the cashier's "put items back into stock" choice, carried to
+  // the refund as asked. Pending refunds block closing the drawer.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS refund_requests (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      bill_id INTEGER NOT NULL REFERENCES bills(id),
+      user_id INTEGER REFERENCES users(id),
+      reason TEXT NOT NULL,
+      restock INTEGER NOT NULL DEFAULT 0,
+      status TEXT NOT NULL CHECK(status IN ('pending', 'approved', 'rejected', 'cancelled')),
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      decided_by INTEGER REFERENCES users(id),
+      decided_at TEXT,
+      decision_note TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_refund_requests_bill ON refund_requests(bill_id, status);
+    CREATE INDEX IF NOT EXISTS idx_refund_requests_status ON refund_requests(status);
+  `);
+  // The admin who allowed a refund (the same admin when they did it
+  // themselves). NULL for every refund before approval existed.
+  addColumn("bills", "refund_approved_by", "INTEGER");
 }
 
 export function seedDefaults(): void {

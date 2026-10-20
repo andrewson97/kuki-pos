@@ -12,6 +12,8 @@ import {
 } from "../services/reservations";
 import { adminOnly } from "../middleware/auth";
 import { returnPortionsForBill } from "../services/portions";
+import { ClosingError, resolveApprover, type Approver } from "../services/closing";
+import { cashShiftBlockReason } from "./cash";
 import { todayDate, formatDateTime } from "../utils/helpers";
 
 const pos = new Hono();
@@ -422,7 +424,8 @@ pos.get("/bills", (c) => {
   const offset = parseInt(c.req.query("offset") || "0");
 
   let query = `
-    SELECT b.*, u.full_name as cashier_name, c.name as customer_name
+    SELECT b.*, u.full_name as cashier_name, c.name as customer_name,
+           EXISTS (SELECT 1 FROM refund_requests rr WHERE rr.bill_id = b.id AND rr.status = 'pending') AS refund_pending
     FROM bills b
     LEFT JOIN users u ON b.user_id = u.id
     LEFT JOIN customers c ON b.customer_id = c.id
@@ -451,17 +454,21 @@ pos.get("/bills/:id", (c) => {
   const db = getDb();
   const bill = db.query(`
     SELECT b.*, u.full_name as cashier_name, c.name as customer_name, c.phone as customer_phone,
-           ru.full_name as refunded_by_name
+           ru.full_name as refunded_by_name, ra.full_name as refund_approved_by_name
     FROM bills b
     LEFT JOIN users u ON b.user_id = u.id
     LEFT JOIN users ru ON b.refunded_by_user_id = ru.id
+    LEFT JOIN users ra ON b.refund_approved_by = ra.id
     LEFT JOIN customers c ON b.customer_id = c.id
     WHERE b.id = ?
   `).get(c.req.param("id"));
   if (!bill) return c.json({ error: "Not found" }, 404);
 
   const items = db.query("SELECT * FROM bill_items WHERE bill_id = ?").all(c.req.param("id"));
-  return c.json({ ...(bill as any), items });
+  // A refund of this bill waiting for an admin, so the bill screen can say so
+  // instead of offering a second request.
+  const refund_request = pendingRefundRequest(Number(c.req.param("id"))) ?? null;
+  return c.json({ ...(bill as any), items, refund_request });
 });
 
 // Refund a bill. Putting the items back into stock is now the cashier's
@@ -486,81 +493,254 @@ pos.get("/bills/:id", (c) => {
 // A bill made by collecting a pre-order (cart_id 'preorder-…') never deducted
 // stock — collection skips it — so its refund never restores any, whatever the
 // caller asked for. The UI hides the checkbox for those; this is the backstop.
-pos.post("/bills/:id/refund", async (c) => {
-  const db = getDb();
-  const user = getUser(c)!;
-  const id = c.req.param("id");
-  const body = await c.req.json().catch(() => ({}));
-  const reason = (body.reason || "").trim();
-  if (!reason) return c.json({ error: "Refund reason is required" }, 400);
-  const restockRequested = body.restock === true;
+//
+// WHO MAY REFUND. A refund takes money back out of the shop, and a cash one
+// lowers what the drawer is expected to hold — so a cashier refunding a bill
+// at will could refund a shortage away before closing. A cashier's refund
+// therefore needs an admin: either the admin types their password at this
+// till (the refund happens at once), or the cashier sends a request
+// (POST /bills/:id/refund-requests) that an admin approves from their own
+// login — the refund happens when they approve it. An admin refunds directly.
+// Every refund records who approved it (bills.refund_approved_by).
 
+class RefundError extends Error {
+  constructor(message: string, public status: 400 | 404 | 409 = 400) { super(message); }
+}
+
+/**
+ * Refund one bill. Everything a refund does, in one IMMEDIATE transaction (or
+ * as a savepoint inside the caller's, as the approval route uses it):
+ *   refundedBy  — whose refund it is (the cashier who asked, or the admin)
+ *   approvedBy  — the admin who allowed it (the same admin when they did it)
+ */
+function performRefund(params: { billId: number; reason: string; restockRequested: boolean; refundedBy: number; approvedBy: number }) {
+  const db = getDb();
+  const id = params.billId;
   const bill = db.query("SELECT * FROM bills WHERE id = ?").get(id) as any;
-  if (!bill) return c.json({ error: "Not found" }, 404);
-  if (bill.status !== "completed") return c.json({ error: "Bill is already " + bill.status }, 400);
+  if (!bill) throw new RefundError("Not found", 404);
+
+  // A CASH refund is money out of the drawer, and the drawer only counts what
+  // moves while a shift is open (from the open count to the close). Between
+  // shifts it would land in no drawer at all, so it waits for a shift — the
+  // same rule (cashShiftBlockReason) every other cash movement follows. Card
+  // and LankaQR refunds never touch the drawer and are not held back.
+  if (bill.payment_method === "cash") {
+    const blocked = cashShiftBlockReason();
+    if (blocked) throw new RefundError(`This is a cash refund, so it needs an open cash shift. ${blocked}`);
+  }
 
   const fromPreorder = String(bill.cart_id || "").startsWith("preorder-");
-  const restock = restockRequested && !fromPreorder;
-
+  const restock = params.restockRequested && !fromPreorder;
   const items = db.query("SELECT product_id, quantity FROM bill_items WHERE bill_id = ?").all(id) as any[];
 
   let portions = { returned: 0, not_returned: 0 };
-  try {
-    // .immediate() and the status re-check inside it: two taps (or two tills)
-    // refunding the same bill must not both pass the check above and restore
-    // its stock twice.
-    db.transaction(() => {
-      const fresh = db.query("SELECT status FROM bills WHERE id = ?").get(id) as any;
-      if (fresh?.status !== "completed") throw new Error("Bill is already " + (fresh?.status || "gone"));
+  // .immediate() and the status re-check inside it: two taps (or two tills)
+  // refunding the same bill must not both pass and restore its stock twice.
+  db.transaction(() => {
+    const fresh = db.query("SELECT status FROM bills WHERE id = ?").get(id) as any;
+    if (fresh?.status !== "completed") throw new RefundError("Bill is already " + (fresh?.status || "gone"));
 
-      if (restock) {
-        for (const item of items) {
-          if (!item.product_id) continue;
-          const product = db.query("SELECT track_stock FROM products WHERE id = ?").get(item.product_id) as any;
+    if (restock) {
+      for (const item of items) {
+        if (!item.product_id) continue;
+        const product = db.query("SELECT track_stock FROM products WHERE id = ?").get(item.product_id) as any;
 
-          // Restore this product's own stock if it's tracked.
-          if (product?.track_stock) {
-            db.query("UPDATE products SET stock_quantity = stock_quantity + ?, stock_updated_at = datetime('now') WHERE id = ?").run(item.quantity, item.product_id);
-          }
+        // Restore this product's own stock if it's tracked.
+        if (product?.track_stock) {
+          db.query("UPDATE products SET stock_quantity = stock_quantity + ?, stock_updated_at = datetime('now') WHERE id = ?").run(item.quantity, item.product_id);
+        }
 
-          // Restore any tracked components (composite/BoM).
-          const components = db.query(
-            "SELECT component_product_id, quantity FROM product_components WHERE product_id = ?"
-          ).all(item.product_id) as any[];
-          for (const c of components) {
-            const comp = db.query("SELECT track_stock FROM products WHERE id = ?").get(c.component_product_id) as any;
-            if (comp?.track_stock) {
-              db.query("UPDATE products SET stock_quantity = stock_quantity + ?, stock_updated_at = datetime('now') WHERE id = ?").run(c.quantity * item.quantity, c.component_product_id);
-            }
+        // Restore any tracked components (composite/BoM).
+        const components = db.query(
+          "SELECT component_product_id, quantity FROM product_components WHERE product_id = ?"
+        ).all(item.product_id) as any[];
+        for (const c of components) {
+          const comp = db.query("SELECT track_stock FROM products WHERE id = ?").get(c.component_product_id) as any;
+          if (comp?.track_stock) {
+            db.query("UPDATE products SET stock_quantity = stock_quantity + ?, stock_updated_at = datetime('now') WHERE id = ?").run(c.quantity * item.quantity, c.component_product_id);
           }
         }
-        portions = returnPortionsForBill(Number(id));
       }
-      db.query(
-        "UPDATE bills SET status = 'refunded', refund_reason = ?, refunded_at = datetime('now'), refunded_by_user_id = ?, refund_restocked = ? WHERE id = ?"
-      ).run(reason, user.id, restock ? 1 : 0, id);
-      // `restock` is what actually happened; `restock_requested` is what was
-      // asked for — they differ only for a pre-order bill, where the request is
-      // ignored. Stock History reads `restock` (a missing key = a refund from
-      // before the choice existed, which always restored).
-      db.query("INSERT INTO activity_log (user_id, action, details) VALUES (?, 'refunded_bill', ?)").run(
-        user.id, JSON.stringify({
-          bill_id: id, token: bill.token_number, amount: bill.total, reason,
-          restock, restock_requested: restockRequested, from_preorder: fromPreorder,
-          // Fractions of a unit given back to still-open boxes, and the share
-          // that could not be because its box was already finished.
-          ...(portions.returned || portions.not_returned
-            ? { portions_returned: portions.returned, portions_not_returned: portions.not_returned }
-            : {}),
-        })
-      );
-    }).immediate();
+      portions = returnPortionsForBill(id);
+    }
+    db.query(
+      "UPDATE bills SET status = 'refunded', refund_reason = ?, refunded_at = datetime('now'), refunded_by_user_id = ?, refund_restocked = ?, refund_approved_by = ? WHERE id = ?"
+    ).run(params.reason, params.refundedBy, restock ? 1 : 0, params.approvedBy, id);
+    // Anything else still asking to refund this bill is moot now.
+    db.query(
+      "UPDATE refund_requests SET status = 'cancelled', decision_note = 'Bill refunded', decided_by = ?, decided_at = datetime('now') WHERE bill_id = ? AND status = 'pending'"
+    ).run(params.approvedBy, id);
+    // `restock` is what actually happened; `restock_requested` is what was
+    // asked for — they differ only for a pre-order bill, where the request is
+    // ignored. Stock History reads `restock` (a missing key = a refund from
+    // before the choice existed, which always restored).
+    db.query("INSERT INTO activity_log (user_id, action, details) VALUES (?, 'refunded_bill', ?)").run(
+      params.refundedBy, JSON.stringify({
+        bill_id: id, token: bill.token_number, amount: bill.total, reason: params.reason,
+        restock, restock_requested: params.restockRequested, from_preorder: fromPreorder,
+        approved_by: params.approvedBy,
+        // Fractions of a unit given back to still-open boxes, and the share
+        // that could not be because its box was already finished.
+        ...(portions.returned || portions.not_returned
+          ? { portions_returned: portions.returned, portions_not_returned: portions.not_returned }
+          : {}),
+      })
+    );
+  }).immediate();
+
+  return { restocked: restock, from_preorder: fromPreorder, portions };
+}
+
+function readRefundBody(body: any): { reason: string; restock: boolean } | string {
+  const reason = String(body?.reason ?? "").trim();
+  if (!reason) return "Refund reason is required";
+  return { reason, restock: body?.restock === true };
+}
+
+// Refund now: an admin, or a cashier with an admin's password typed in. A
+// cashier without one is told to ask (409 needs_approval), and nothing changes.
+pos.post("/bills/:id/refund", async (c) => {
+  const user = getUser(c)!;
+  const id = Number(c.req.param("id"));
+  const body = await c.req.json().catch(() => ({}));
+  const parsed = readRefundBody(body);
+  if (typeof parsed === "string") return c.json({ error: parsed }, 400);
+
+  const bill = getDb().query("SELECT status FROM bills WHERE id = ?").get(id) as any;
+  if (!bill) return c.json({ error: "Not found" }, 404);
+  if (bill.status !== "completed") return c.json({ error: "Bill is already " + bill.status }, 400);
+
+  let approver: Approver | null;
+  try {
+    approver = await resolveApprover(user, body);
   } catch (err: any) {
-    return c.json({ error: err?.message || "Refund failed" }, 400);
+    if (err instanceof ClosingError) return c.json({ error: err.message }, err.status);
+    throw err;
+  }
+  if (!approver) {
+    return c.json({ error: "A refund needs an admin's approval. Ask the admin, or have them type their password here.", needs_approval: true }, 409);
   }
 
-  return c.json({ success: true, restocked: restock, from_preorder: fromPreorder, portions });
+  try {
+    const r = performRefund({ billId: id, reason: parsed.reason, restockRequested: parsed.restock, refundedBy: user.id, approvedBy: approver.id });
+    return c.json({ success: true, ...r, approved_by: approver.full_name });
+  } catch (err: any) {
+    if (err instanceof RefundError) return c.json({ error: err.message }, err.status);
+    return c.json({ error: err?.message || "Refund failed" }, 400);
+  }
 });
+
+const SELECT_REFUND_REQUEST = `
+  SELECT r.*, u.full_name AS user_name, d.full_name AS decided_by_name,
+         b.token_number, b.total, b.payment_method, b.bill_date, b.cart_id
+  FROM refund_requests r
+  LEFT JOIN users u ON u.id = r.user_id
+  LEFT JOIN users d ON d.id = r.decided_by
+  LEFT JOIN bills b ON b.id = r.bill_id`;
+
+/** The refund request still waiting on a bill, if any. */
+function pendingRefundRequest(billId: number) {
+  return getDb().query(`${SELECT_REFUND_REQUEST} WHERE r.bill_id = ? AND r.status = 'pending' ORDER BY r.id DESC LIMIT 1`).get(billId) as any;
+}
+
+// A cashier asks an admin to refund a bill. One waiting request per bill.
+pos.post("/bills/:id/refund-requests", async (c) => {
+  const user = getUser(c)!;
+  const id = Number(c.req.param("id"));
+  const body = await c.req.json().catch(() => ({}));
+  const parsed = readRefundBody(body);
+  if (typeof parsed === "string") return c.json({ error: parsed }, 400);
+  const db = getDb();
+  const result = db.transaction(() => {
+    const bill = db.query("SELECT status, token_number, total FROM bills WHERE id = ?").get(id) as any;
+    if (!bill) return { status: 404 as const, error: "Not found" };
+    if (bill.status !== "completed") return { status: 400 as const, error: "Bill is already " + bill.status };
+    if (pendingRefundRequest(id)) return { status: 409 as const, error: "A refund of this bill is already waiting for an admin." };
+    const rid = Number(db.query(
+      "INSERT INTO refund_requests (bill_id, user_id, reason, restock, status) VALUES (?, ?, ?, ?, 'pending')"
+    ).run(id, user.id, parsed.reason, parsed.restock ? 1 : 0).lastInsertRowid);
+    db.query("INSERT INTO activity_log (user_id, action, details) VALUES (?, 'refund_requested', ?)").run(
+      user.id, JSON.stringify({ refund_request_id: rid, bill_id: id, token: bill.token_number, amount: bill.total, reason: parsed.reason })
+    );
+    return { request: db.query(`${SELECT_REFUND_REQUEST} WHERE r.id = ?`).get(rid) };
+  }).immediate();
+  if ("error" in result) return c.json({ error: result.error }, result.status);
+  return c.json({ success: true, request: result.request });
+});
+
+// The cashier who asked takes it back (the customer changed their mind, the
+// admin cannot be reached and the drawer has to close). Withdrawing refunds
+// nothing, so it needs no admin; an admin may withdraw any request too.
+pos.post("/refund-requests/:id/cancel", (c) => {
+  const user = getUser(c)!;
+  const rid = Number(c.req.param("id"));
+  const db = getDb();
+  const req = db.query("SELECT * FROM refund_requests WHERE id = ?").get(rid) as any;
+  if (!req) return c.json({ error: "That refund request was not found" }, 404);
+  if (req.user_id !== user.id && user.role !== "admin") return c.json({ error: "Only the person who asked can withdraw it." }, 403);
+  const done = db.query(
+    "UPDATE refund_requests SET status = 'cancelled', decided_by = ?, decided_at = datetime('now'), decision_note = 'Withdrawn' WHERE id = ? AND status = 'pending'"
+  ).run(user.id, rid);
+  if (Number(done.changes || 0) !== 1) return c.json({ error: `That refund request is already ${req.status}.` }, 400);
+  db.query("INSERT INTO activity_log (user_id, action, details) VALUES (?, 'refund_request_withdrawn', ?)").run(
+    user.id, JSON.stringify({ refund_request_id: rid, bill_id: req.bill_id })
+  );
+  return c.json({ success: true });
+});
+
+// An admin decides — from their own login, or with their password at the
+// till. Approving IS the refund (done in the name of the cashier who asked,
+// approved by the admin); rejecting needs a reason.
+for (const action of ["approve", "reject"] as const) {
+  pos.post(`/refund-requests/:id/${action}`, async (c) => {
+    const user = getUser(c)!;
+    const body = await c.req.json().catch(() => ({}));
+    let approver: Approver | null;
+    try {
+      approver = await resolveApprover(user, body);
+    } catch (err: any) {
+      if (err instanceof ClosingError) return c.json({ error: err.message }, err.status);
+      throw err;
+    }
+    if (!approver) return c.json({ error: "Only an admin can approve or reject a refund." }, 403);
+    const note = String(body?.note ?? "").trim() || null;
+    if (action === "reject" && !note) return c.json({ error: "Say why the refund is rejected." }, 400);
+    const rid = Number(c.req.param("id"));
+    const db = getDb();
+    try {
+      const out = db.transaction(() => {
+        const req = db.query("SELECT * FROM refund_requests WHERE id = ?").get(rid) as any;
+        if (!req) throw new RefundError("That refund request was not found", 404);
+        if (req.status !== "pending") throw new RefundError(`That refund request is already ${req.status}.`);
+        // The bill was refunded (or changed) some other way meanwhile: the
+        // request is moot. Closed off here rather than thrown — a throw would
+        // roll this back and leave it waiting in the queue for ever.
+        const billNow = db.query("SELECT status FROM bills WHERE id = ?").get(req.bill_id) as any;
+        if (billNow?.status !== "completed") {
+          db.query("UPDATE refund_requests SET status = 'cancelled', decided_by = ?, decided_at = datetime('now'), decision_note = ? WHERE id = ?")
+            .run(approver!.id, `Bill is already ${billNow?.status || "gone"}`, rid);
+          return { moot: `That bill is already ${billNow?.status || "gone"}, so the request was closed.` };
+        }
+        let refund: any = null;
+        if (action === "approve") {
+          refund = performRefund({ billId: req.bill_id, reason: req.reason, restockRequested: !!req.restock, refundedBy: req.user_id, approvedBy: approver!.id });
+        }
+        db.query("UPDATE refund_requests SET status = ?, decided_by = ?, decided_at = datetime('now'), decision_note = ? WHERE id = ?")
+          .run(action === "approve" ? "approved" : "rejected", approver!.id, note, rid);
+        db.query("INSERT INTO activity_log (user_id, action, details) VALUES (?, ?, ?)").run(
+          approver!.id, action === "approve" ? "refund_approved" : "refund_rejected",
+          JSON.stringify({ refund_request_id: rid, bill_id: req.bill_id, note, at_till: approver!.at_till })
+        );
+        return { refund, request: db.query(`${SELECT_REFUND_REQUEST} WHERE r.id = ?`).get(rid) };
+      }).immediate();
+      if ("moot" in out) return c.json({ error: out.moot }, 409);
+      return c.json({ success: true, ...out });
+    } catch (err: any) {
+      if (err instanceof RefundError) return c.json({ error: err.message }, err.status);
+      throw err;
+    }
+  });
+}
 
 // Imported here rather than in the block at the top so this route's reprint
 // addition stays self-contained (other work touches that import list).

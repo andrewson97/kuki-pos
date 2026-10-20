@@ -388,6 +388,8 @@ cash.get("/today", (c) => {
     deposits_refunded,
     expected_now,
     pending_expenses,
+    // Refunds waiting on an admin: they block the close like pending expenses.
+    pending_refunds: open ? pendingRefundCount() : 0,
     variance_limit: varianceLimit(),
     stock_sync: syncState
       ? { valid: syncState.valid, stale: syncState.stale, stale_reason: syncState.stale_reason, sync: syncForViewer(syncState.sync, user.role === "admin") }
@@ -506,6 +508,12 @@ cash.post("/close", async (c) => {
   if (pending > 0) {
     return c.json({ error: `${pending} expense${pending > 1 ? "s" : ""} pending approval. Admin must approve or reject before closing.` }, 400);
   }
+  // A refund still waiting would move the drawer's expected cash after it was
+  // counted — decide it first, exactly as with a pending expense.
+  const refundsWaiting = pendingRefundCount();
+  if (refundsWaiting > 0) {
+    return c.json({ error: `${refundsWaiting} cash refund${refundsWaiting > 1 ? "s are" : " is"} waiting for an admin. Approve or reject ${refundsWaiting > 1 ? "them" : "it"} (or withdraw the request) before closing.` }, 400);
+  }
 
   // Gate 1: the shift's stock has to be synced, and nothing moved since.
   const syncState = stockSyncState(openRow.id);
@@ -585,6 +593,8 @@ cash.post("/close", async (c) => {
     // under the write lock: still this shift open, stock still synced, money
     // still as expected, and the request (if any) still approved and unused.
     if (getCurrentOpenShift()?.id !== openRow.id) throw new ClosingError("This shift has just been closed.", 409);
+    // A cash refund asked for while the password above was being checked.
+    if (pendingRefundCount() > 0) throw new ClosingError("A cash refund is waiting for an admin. It must be approved or rejected before closing.", 400);
     if (!stockSyncState(openRow.id).valid) {
       throw new ClosingError("Stock changed while closing (a sale or a delivery). Sync the stock again.", 400, { needs_stock_sync: true });
     }
@@ -704,9 +714,16 @@ for (const action of ["approve", "reject"] as const) {
 // Everything waiting on an admin for the open shift: a stock sync with
 // mismatches (with the system's figures, to judge it) and a close request.
 cash.get("/approvals", adminOnly, (c) => {
-  const open = getCurrentOpenShift();
-  if (!open) return c.json({ stock_syncs: [], close_requests: [], shift: null });
   const db = getDb();
+  // Refunds wait on the admin whether or not a shift is open (a bill can be
+  // refunded any time), so they are listed either way.
+  const refund_requests = db.query(`
+    SELECT r.*, u.full_name AS user_name, b.token_number, b.total, b.payment_method, b.bill_date, b.cart_id
+    FROM refund_requests r LEFT JOIN users u ON u.id = r.user_id LEFT JOIN bills b ON b.id = r.bill_id
+    WHERE r.status = 'pending' ORDER BY r.id
+  `).all();
+  const open = getCurrentOpenShift();
+  if (!open) return c.json({ stock_syncs: [], close_requests: [], refund_requests, shift: null });
   const syncIds = db.query("SELECT id FROM stock_syncs WHERE shift_open_id = ? AND status = 'pending' ORDER BY id").all(open.id) as any[];
   const closeRequests = db.query(`
     SELECT r.*, u.full_name AS user_name FROM cash_close_requests r LEFT JOIN users u ON u.id = r.user_id
@@ -716,20 +733,34 @@ cash.get("/approvals", adminOnly, (c) => {
     shift: { id: open.id, opened_at: open.created_at, opened_by: open.user_name },
     stock_syncs: syncIds.map((r) => getStockSync(r.id)),
     close_requests: closeRequests.map((r) => ({ ...r, expected_now: expectedFor(open).expected })),
+    refund_requests,
   });
 });
 
 // The sidebar badge: how many things are waiting on an admin.
 cash.get("/approvals/count", adminOnly, (c) => {
   const open = getCurrentOpenShift();
-  if (!open) return c.json({ count: 0 });
   const db = getDb();
   const row = db.query(`
     SELECT (SELECT COUNT(*) FROM stock_syncs WHERE shift_open_id = ?1 AND status = 'pending')
-         + (SELECT COUNT(*) FROM cash_close_requests WHERE shift_open_id = ?1 AND status = 'pending') AS count
-  `).get(open.id) as any;
+         + (SELECT COUNT(*) FROM cash_close_requests WHERE shift_open_id = ?1 AND status = 'pending')
+         + (SELECT COUNT(*) FROM refund_requests WHERE status = 'pending') AS count
+  `).get(open?.id ?? -1) as any;
   return c.json({ count: row?.count || 0 });
 });
+
+/**
+ * CASH refunds waiting on an admin — they would take money out of the drawer
+ * after it was counted, so any of them blocks closing (POST /close). Card and
+ * LankaQR refunds never touch the drawer and do not hold the close up.
+ */
+function pendingRefundCount(): number {
+  const row = getDb().query(`
+    SELECT COUNT(*) AS n FROM refund_requests r JOIN bills b ON b.id = r.bill_id
+    WHERE r.status = 'pending' AND b.payment_method = 'cash'
+  `).get() as any;
+  return row?.n ?? 0;
+}
 
 cash.get("/history", (c) => {
   const db = getDb();
