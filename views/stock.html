@@ -23,6 +23,9 @@
           </select>
         </div>
         <div class="d-flex gap-2">
+          <!-- The Daily sync ticks are locked until an admin unlocks them here,
+               so a stray tap on a row cannot add or drop something from the count. -->
+          <button class="btn btn-outline-secondary" id="sync-lock-btn" style="display:none;" onclick="toggleSyncEdit()"></button>
           <button class="btn btn-outline-secondary" onclick="showAddCategory()">+ Category</button>
           <button class="btn btn-primary" onclick="showAddItem()">+ Stock Item</button>
           <button class="btn btn-warning" onclick="toggleUsageMode()"><span id="usage-btn-text">Mark as Used</span></button>
@@ -55,7 +58,7 @@
 
       <div class="table-container">
         <h6 class="px-3 pt-3 fw-bold mb-0" style="color:#6b5a4a;">Stock Items <small class="text-muted fw-normal">&mdash; ingredients, packing and anything else counted separately from your products</small></h6>
-        <div class="px-3 pt-1 small text-muted" id="sync-help-items">Tick <strong>Daily sync</strong> for what has to be counted before the cash drawer closes &mdash; a whole group below (items added to it later are included), or single items. Only items with stock above 0 are asked for.</div>
+        <div class="px-3 pt-1 small text-muted" id="sync-help-items">Tick <strong>Daily sync</strong> for what has to be counted before the cash drawer closes &mdash; a whole group below (items added to it later are included), or single items. Only items with stock above 0 are asked for. The ticks are locked so they cannot be changed by accident: press <strong>&#128274; Edit daily sync</strong> (top right) to change them.</div>
         <div class="px-3 pt-2" id="sync-groups-items"></div>
         <table class="table table-hover mb-0">
           <thead><tr><th style="width:90px;" title="Counted in the daily stock sync at closing"><input type="checkbox" class="form-check-input me-1" id="sync-all-items" onchange="tickAllShown('ingredient', this)" title="Tick / untick every item shown"> Daily sync</th><th>Name</th><th>Category</th><th>Quantity</th><th>Unit</th><th>Cost/Unit</th><th>Reorder Level</th><th>Expiry</th><th>Actions</th></tr></thead>
@@ -257,6 +260,7 @@
       await loadUnreportedPreview();
       renderCategoryOptions();
       renderProductCategoryOptions();
+      renderSyncLockBtn();
       renderSyncGroups();
       renderStock();
       renderTrackedProducts();
@@ -460,9 +464,34 @@
     //     group says. Ticking or unticking a group puts every row in it back on
     //     the group's choice.
     // A row shows in_daily_sync (the server's answer: its own choice, else its
-    // groups'). Admins change them; anyone else sees them read-only.
+    // groups'). Admins change them, and only after pressing "Edit daily sync":
+    // the boxes sit beside every row, so they are locked by default and lock
+    // again on "Done" (or on any reload). Anyone else sees them read-only.
     let shownItems = [], shownProducts = [], syncGroups = [];
-    const canEditSync = () => !!(currentUser && currentUser.role === 'admin');
+    let syncUnlocked = false;
+    const isSyncAdmin = () => !!(currentUser && currentUser.role === 'admin');
+    const canEditSync = () => isSyncAdmin() && syncUnlocked;
+
+    function renderSyncLockBtn() {
+      const btn = document.getElementById('sync-lock-btn');
+      if (!btn) return;
+      btn.style.display = isSyncAdmin() ? '' : 'none';
+      btn.className = `btn ${syncUnlocked ? 'btn-success' : 'btn-outline-secondary'}`;
+      btn.innerHTML = syncUnlocked ? '&#128275; Done editing sync' : '&#128274; Edit daily sync';
+      btn.title = syncUnlocked
+        ? 'Lock the Daily sync ticks again'
+        : 'The Daily sync ticks are locked so they cannot be changed by accident. Unlock them to edit.';
+    }
+
+    function toggleSyncEdit() {
+      syncUnlocked = !syncUnlocked;
+      renderSyncLockBtn();
+      // Redraw the boxes and group chips in the new state; search, filters and
+      // the rest of the page stay as they are.
+      renderSyncGroups();
+      renderStock();
+      renderTrackedProducts();
+    }
 
     const groupOn = (type, key) => syncGroups.some(g => g.group_type === type &&
       (type === 'product_category' ? String(g.group_key).toLowerCase() === String(key || '').toLowerCase() : String(g.group_key) === String(key ?? '')));
