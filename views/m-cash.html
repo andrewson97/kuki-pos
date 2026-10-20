@@ -281,7 +281,20 @@
         const body = { notes: $('notes-input').value.trim() };
         DENOMS.forEach(d => body['notes_' + d] = parseInt($('n_' + d).value) || 0);
         body.coins_total = coinsValue();
-        await api('/api/cash/open', { method: 'POST', body });
+        let res;
+        try {
+          // An admin opening short is asked who answers for it (or to write it off).
+          res = await Closing.withChargeDecision((extra) => api('/api/cash/open', { method: 'POST', body: { ...body, ...extra } }));
+          if (!res) return;
+        } catch (err) {
+          // Not what was left at the last close: a question for an admin.
+          if (err && err.status === 409 && err.data && err.data.needs_approval) {
+            Closing.needsApproval(body, err.data);
+            toast(err.message, 'error');
+            return;
+          }
+          throw err;
+        }
         toast('Opening float saved');
         await load();
       }, 'Saving…');

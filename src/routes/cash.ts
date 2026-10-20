@@ -88,7 +88,7 @@ function getCurrentOpenShift() {
 function getLatestClose() {
   const db = getDb();
   return db.query(
-    "SELECT cc.*, u.full_name as user_name FROM cash_counts cc LEFT JOIN users u ON cc.user_id = u.id WHERE count_type = 'close' ORDER BY created_at DESC LIMIT 1"
+    "SELECT cc.*, u.full_name as user_name FROM cash_counts cc LEFT JOIN users u ON cc.user_id = u.id WHERE count_type = 'close' ORDER BY created_at DESC, cc.id DESC LIMIT 1"
   ).get() as any;
 }
 
@@ -544,33 +544,350 @@ cash.get("/today", (c) => {
     charge_small_shortages: chargeSmallShortages(),
     // The asking user's own pending account (what they owe the shop).
     my_balance: ledgerBalance(user.id),
+    // Between shifts: the last close, what was collected from it and what is
+    // left (admins only — the opener counts blind), and any opening request.
+    carry: user.role === "admin" ? carriedForAdmin() : null,
+    open_request: open ? null : openRequestForViewer(latestOpenRequest(close?.id ?? null), user),
   });
 });
 
+// --- Cash collected after a close, and the opening that follows ------------------
+//
+// After a close an admin takes cash out of the drawer (to the bank or the safe)
+// and records it against that close (POST /collections). What is left is the
+// CARRIED amount — the close's count minus what was collected — and the next
+// opening has to count exactly that. If it does not, an admin approves the
+// opening (their login, their password at the till, or a request they approve
+// from their phone), and a shortfall is charged to the last holder or the
+// opener, or written off. Nothing collected means everything is carried.
+
+/** The collections still standing against a close, oldest first. */
+function collectionsFor(closeId: number): any[] {
+  return getDb().query(`
+    SELECT cl.*, u.full_name AS user_name FROM cash_collections cl LEFT JOIN users u ON u.id = cl.user_id
+    WHERE cl.close_id = ? AND cl.voided_at IS NULL ORDER BY cl.id
+  `).all(closeId) as any[];
+}
+
+/**
+ * What the next opening should count: the last close's count minus what was
+ * collected from it. null when no shift was ever closed (the first opening
+ * has nothing to match).
+ */
+function carriedOver(): { close: any; collected: number; carried: number } | null {
+  const close = getLatestClose();
+  if (!close) return null;
+  const row = getDb().query(
+    "SELECT COALESCE(SUM(amount), 0) AS s FROM cash_collections WHERE close_id = ? AND voided_at IS NULL"
+  ).get(close.id) as any;
+  const collected = money(Number(row?.s) || 0);
+  return { close, collected, carried: money((Number(close.total_amount) || 0) - collected) };
+}
+
+/** Who answered for the drawer at a close: its holder then, else whoever closed it. */
+function closeHolder(close: any): { id: number; name: string } {
+  const id = close.holder_user_id ?? close.user_id;
+  const row = getDb().query("SELECT full_name FROM users WHERE id = ?").get(id) as any;
+  return { id, name: row?.full_name || "the last holder" };
+}
+
+/** The latest opening request after this close that still means something. */
+function latestOpenRequest(prevCloseId: number | null): any {
+  if (prevCloseId == null) return null;
+  return getDb().query(`
+    SELECT r.*, u.full_name AS user_name, d.full_name AS decided_by_name, t.full_name AS charge_to_name
+    FROM cash_open_requests r LEFT JOIN users u ON u.id = r.user_id LEFT JOIN users d ON d.id = r.decided_by LEFT JOIN users t ON t.id = r.charge_to
+    WHERE r.prev_close_id = ? AND r.status != 'superseded' ORDER BY r.id DESC LIMIT 1
+  `).get(prevCloseId) as any;
+}
+
+/**
+ * The admin's decision on an opening shortfall: charge it to the last holder
+ * ("closer") or the opener, or write it off. Undecided → the 409 that makes
+ * the page ask (with both people to choose from). Returns the decision, or a
+ * Response-ready object { status, body } to send back.
+ */
+function openShortDecision(body: any, short: number, closer: { id: number; name: string }, opener: { id: number; name: string }):
+  { charge: boolean; amount: number; note: string | null; toUserId: number | null } | { status: 400 | 409; body: any } {
+  const options = [
+    { key: "closer", id: closer.id, name: closer.name, label: `${closer.name} (held the drawer at the last close)` },
+    { key: "opener", id: opener.id, name: opener.name, label: `${opener.name} (opening now)` },
+  ];
+  const charging = !(body?.charge === false || body?.charge === 0 || body?.charge === "0");
+  if (chargeUndecided(body) || (charging && body?.charge_to !== "closer" && body?.charge_to !== "opener")) {
+    return { status: 409, body: { ...chargeDecisionNeeded(short, closer), error: `The drawer is short by Rs ${short.toFixed(2)} from what was left at the last close. Choose who it is charged to, or write it off.`, charge_options: options } };
+  }
+  const d = readChargeDecision(body, short);
+  if (typeof d === "string") return { status: 400, body: { error: d } };
+  return { ...d, toUserId: d.charge ? (body.charge_to === "opener" ? opener.id : closer.id) : null };
+}
+
+// Open a shift. Body: the drawer count. Or { open_request_id } to open on a
+// request an admin approved (its count is used). An opening that does not
+// match what was carried needs an admin: their login or password here
+// (admin_username / admin_password), with { charge, charge_to, ... } for a
+// shortfall.
 cash.post("/open", async (c) => {
   const user = getUser(c)!;
-  const body = await c.req.json();
+  const body = await c.req.json().catch(() => ({} as any));
   const db = getDb();
   const date = todayDate();
 
   if (getCurrentOpenShift()) {
     return c.json({ error: "A shift is already open (possibly from a previous day). Close it before starting a new one." }, 400);
   }
+  let approver: Approver | null;
+  try {
+    approver = await resolveApprover(user, body);
+  } catch (err: any) {
+    return closingError(c, err);
+  }
 
-  const count = parseCount(body);
+  const carry = carriedOver();
+  let count: ReturnType<typeof parseCount>;
+  let notes: string | null = body.notes || null;
+  let requestId: number | null = null;
+  let approvedBy: number | null = null;
+  let opener: { id: number; name: string } = { id: user.id, name: user.full_name || "the opener" };
+  // A shortfall's outcome: charged to someone, or written off (note), or nothing.
+  let charge: { amount: number; toUserId: number; note: string | null } | null = null;
+  let writeOff: string | null = null;
+
+  if (body.open_request_id != null) {
+    const req = db.query("SELECT r.*, u.full_name AS user_name FROM cash_open_requests r LEFT JOIN users u ON u.id = r.user_id WHERE r.id = ?").get(Number(body.open_request_id)) as any;
+    if (!req || !carry || req.prev_close_id !== carry.close.id) return c.json({ error: "That opening request is not for this drawer." }, 400);
+    if (req.status !== "approved") return c.json({ error: `That opening request is ${req.status}, not approved.` }, 400);
+    if (req.user_id !== user.id && user.role !== "admin") return c.json({ error: `That opening was approved for ${req.user_name}; they open on it.` }, 400);
+    if (Math.abs(money(req.expected_amount) - carry.carried) > 0.005) {
+      return c.json({ error: "The cash collected from the drawer has changed since the admin approved this. Count the drawer again." }, 409);
+    }
+    count = parseCount(JSON.parse(req.count_json));
+    notes = req.notes;
+    requestId = req.id;
+    approvedBy = req.decided_by;
+    opener = { id: req.user_id, name: req.user_name };
+    if (req.charge_decision === "charge" && Number(req.charge_amount) > 0 && req.charge_to) {
+      charge = { amount: Number(req.charge_amount), toUserId: req.charge_to, note: req.charge_note };
+    } else if (req.charge_decision === "write_off") {
+      writeOff = req.charge_note || "Written off";
+    }
+  } else {
+    count = parseCount(body);
+  }
   if (typeof count === "string") return c.json({ error: count }, 400);
   const n = count.notes;
   const total = computeTotal(count);
-  db.query(`
-    INSERT INTO cash_counts (count_type, count_date, user_id, notes_20, notes_50, notes_100, notes_500, notes_1000, notes_2000, notes_5000, coins_total, total_amount, notes)
-    VALUES ('open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(
-    date, user.id,
-    n.notes_20, n.notes_50, n.notes_100, n.notes_500, n.notes_1000, n.notes_2000, n.notes_5000,
-    count.coins_total, total, body.notes || null
-  );
-  return c.json({ success: true, total_amount: total, coins_total: count.coins_total });
+  const expected = carry ? carry.carried : null;
+  const variance = expected == null ? 0 : money(total - expected);
+  const off = Math.abs(variance) > 0.005;
+
+  if (off && !requestId) {
+    if (!approver) {
+      return c.json({
+        error: `The drawer has ${variance > 0 ? "more" : "less"} than was left at the last close (${variance > 0 ? "over" : "short"} by ${Math.abs(variance).toFixed(2)}). An admin has to approve this opening.`,
+        needs_approval: true,
+        variance,
+        total_amount: total,
+      }, 409);
+    }
+    approvedBy = approver.id;
+    if (variance < 0) {
+      const d = openShortDecision(body, -variance, closeHolder(carry!.close), opener);
+      if ("status" in d) return c.json(d.body, d.status);
+      if (d.charge && d.amount > 0) charge = { amount: d.amount, toUserId: d.toUserId!, note: d.note };
+      else if (!d.charge) writeOff = d.note;
+    }
+  }
+
+  let openId: number;
+  try {
+    openId = db.transaction(() => {
+      // Re-checked under the write lock: the password check awaited.
+      if (getCurrentOpenShift()) throw new ClosingError("A shift has just been opened.", 409);
+      const now = carriedOver();
+      if ((now?.close.id ?? null) !== (carry?.close.id ?? null) || Math.abs((now?.carried ?? 0) - (carry?.carried ?? 0)) > 0.005) {
+        throw new ClosingError("The cash collected from the drawer changed while opening. Count the drawer again.", 409);
+      }
+      if (requestId) {
+        const used = db.query("UPDATE cash_open_requests SET status = 'used' WHERE id = ? AND status = 'approved'").run(requestId);
+        if (Number(used.changes || 0) !== 1) throw new ClosingError("That approval has already been used.", 409);
+      }
+      const id = Number(db.query(`
+        INSERT INTO cash_counts (count_type, count_date, user_id, notes_20, notes_50, notes_100, notes_500, notes_1000, notes_2000, notes_5000, coins_total, total_amount, notes, carried_amount, open_variance, variance_approved_by)
+        VALUES ('open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        date, opener.id,
+        n.notes_20, n.notes_50, n.notes_100, n.notes_500, n.notes_1000, n.notes_2000, n.notes_5000,
+        count.coins_total, total, notes, expected, expected == null ? null : variance, off ? approvedBy : null
+      ).lastInsertRowid);
+      if (requestId) db.query("UPDATE cash_open_requests SET used_open_id = ? WHERE id = ?").run(id, requestId);
+      if (carry) db.query("UPDATE cash_open_requests SET status = 'superseded' WHERE prev_close_id = ? AND status IN ('pending', 'approved')").run(carry.close.id);
+      const by = approvedBy ?? user.id;
+      if (charge) {
+        addLedgerEntry({
+          userId: charge.toUserId, kind: "cash_short", amount: charge.amount, sourceType: "open", sourceId: id,
+          note: `Drawer short at opening (${date}): ${expected!.toFixed(2)} was left at the last close, ${total.toFixed(2)} counted${charge.note ? ` — ${charge.note}` : ""}`,
+          createdBy: by,
+        });
+        db.query("UPDATE cash_counts SET charged_amount = ?, charged_to = ? WHERE id = ?").run(charge.amount, charge.toUserId, id);
+      }
+      if (off) {
+        db.query("INSERT INTO activity_log (user_id, action, details) VALUES (?, 'cash_open_variance_approved', ?)").run(
+          by, JSON.stringify({ open_id: id, carried: expected, counted: total, variance, open_request_id: requestId, charged_to: charge?.toUserId ?? null, written_off: writeOff })
+        );
+      }
+      return id;
+    }).immediate();
+  } catch (err: any) {
+    return closingError(c, err);
+  }
+  return c.json({ success: true, id: openId, total_amount: total, coins_total: count.coins_total, carried_amount: expected, variance });
 });
+
+// The opener asks an admin to approve opening on a count that does not match
+// what was carried. Body: the count. A new request replaces an older one.
+cash.post("/open-requests", async (c) => {
+  const user = getUser(c)!;
+  const body = await c.req.json().catch(() => ({} as any));
+  const db = getDb();
+  if (getCurrentOpenShift()) return c.json({ error: "A shift is already open." }, 400);
+  const carry = carriedOver();
+  if (!carry) return c.json({ error: "Nothing has been closed yet, so any opening count is fine — just open." }, 400);
+  const count = parseCount(body);
+  if (typeof count === "string") return c.json({ error: count }, 400);
+  const total = computeTotal(count);
+  const variance = money(total - carry.carried);
+  if (Math.abs(variance) <= 0.005) return c.json({ error: "The count matches what was left — no approval is needed, just open." }, 400);
+  const request = db.transaction(() => {
+    db.query("UPDATE cash_open_requests SET status = 'superseded' WHERE prev_close_id = ? AND status IN ('pending', 'approved')").run(carry.close.id);
+    const id = Number(db.query(`
+      INSERT INTO cash_open_requests (prev_close_id, user_id, count_json, total_amount, expected_amount, variance, notes, status)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')
+    `).run(carry.close.id, user.id, JSON.stringify({ ...count.notes, coins_total: count.coins_total }), total, carry.carried, variance, body.notes || null).lastInsertRowid);
+    db.query("INSERT INTO activity_log (user_id, action, details) VALUES (?, 'cash_open_requested', ?)").run(
+      user.id, JSON.stringify({ open_request_id: id, carried: carry.carried, counted: total, variance })
+    );
+    return latestOpenRequest(carry.close.id);
+  }).immediate();
+  return c.json({ success: true, request: openRequestForViewer(request, user) });
+});
+
+// An admin decides an opening request. Approve body, for a shortfall:
+// { charge, charge_to: 'closer' | 'opener', charge_amount?, write_off_note? }.
+// Reject body: { note }.
+for (const action of ["approve", "reject"] as const) {
+  cash.post(`/open-requests/:id/${action}`, async (c) => {
+    const user = getUser(c)!;
+    const body = await c.req.json().catch(() => ({} as any));
+    const db = getDb();
+    let approver: Approver | null;
+    try {
+      approver = await resolveApprover(user, body);
+    } catch (err: any) {
+      return closingError(c, err);
+    }
+    if (!approver) return c.json({ error: "Only an admin can approve or reject an opening." }, 403);
+    const note = String(body.note ?? "").trim() || null;
+    if (action === "reject" && !note) return c.json({ error: "Say why it is rejected, so the drawer can be counted again properly." }, 400);
+    const id = Number(c.req.param("id"));
+    const result = db.transaction(() => {
+      const req = db.query("SELECT r.*, u.full_name AS user_name FROM cash_open_requests r LEFT JOIN users u ON u.id = r.user_id WHERE r.id = ?").get(id) as any;
+      if (!req) return { status: 404 as const, body: { error: "That opening request was not found" } };
+      if (req.status !== "pending") return { status: 400 as const, body: { error: `That opening request is already ${req.status}.` } };
+      const carry = carriedOver();
+      if (getCurrentOpenShift() || !carry || carry.close.id !== req.prev_close_id) return { status: 400 as const, body: { error: "A shift has opened since; this request no longer applies." } };
+      let decision: string | null = null, chargeTo: number | null = null, chargeAmount: number | null = null, chargeNote: string | null = null;
+      if (action === "approve" && Number(req.variance) < -0.005) {
+        const d = openShortDecision(body, -Number(req.variance), closeHolder(carry.close), { id: req.user_id, name: req.user_name });
+        if ("status" in d) return d;
+        decision = d.charge ? "charge" : "write_off";
+        chargeTo = d.toUserId;
+        chargeAmount = d.charge ? d.amount : null;
+        chargeNote = d.note;
+      }
+      db.query(`
+        UPDATE cash_open_requests SET status = ?, decided_by = ?, decided_at = datetime('now'), decision_note = ?,
+          charge_decision = ?, charge_to = ?, charge_amount = ?, charge_note = ? WHERE id = ?
+      `).run(action === "approve" ? "approved" : "rejected", approver!.id, note, decision, chargeTo, chargeAmount, chargeNote, id);
+      db.query("INSERT INTO activity_log (user_id, action, details) VALUES (?, ?, ?)").run(
+        approver!.id, action === "approve" ? "cash_open_approved" : "cash_open_rejected",
+        JSON.stringify({ open_request_id: id, variance: req.variance, note, at_till: approver!.at_till })
+      );
+      return { request: latestOpenRequest(req.prev_close_id) };
+    }).immediate();
+    if ("status" in result) return c.json(result.body, result.status);
+    return c.json({ success: true, request: result.request });
+  });
+}
+
+/** An opening request as the asker may see it: no carried figure for a non-admin. */
+function openRequestForViewer(r: any, user: { role: string }) {
+  if (!r || user.role === "admin") return r;
+  const { expected_amount, ...rest } = r;
+  return rest;
+}
+
+// An admin records cash taken out of the drawer after the last close.
+// Body: { amount, note? }. Only while no shift is open, and never more than is
+// in the drawer.
+cash.post("/collections", adminOnly, async (c) => {
+  const user = getUser(c)!;
+  const body = await c.req.json().catch(() => ({} as any));
+  const db = getDb();
+  const amount = money(Number(body.amount));
+  if (!Number.isFinite(amount) || amount <= 0) return c.json({ error: "Enter the amount taken out of the drawer." }, 400);
+  const note = String(body.note ?? "").trim() || null;
+  const out = db.transaction(() => {
+    if (getCurrentOpenShift()) return { error: "A shift is open. Cash is collected after the drawer is closed." };
+    const carry = carriedOver();
+    if (!carry) return { error: "The drawer has never been closed." };
+    if (amount > carry.carried + 0.005) return { error: `Only Rs ${carry.carried.toFixed(2)} is left in the drawer.` };
+    const id = Number(db.query("INSERT INTO cash_collections (close_id, amount, note, user_id) VALUES (?, ?, ?, ?)").run(carry.close.id, amount, note, user.id).lastInsertRowid);
+    // A request to open on a count made before this no longer compares with what is left.
+    db.query("UPDATE cash_open_requests SET status = 'superseded' WHERE prev_close_id = ? AND status IN ('pending', 'approved')").run(carry.close.id);
+    db.query("INSERT INTO activity_log (user_id, action, details) VALUES (?, 'cash_collected', ?)").run(
+      user.id, JSON.stringify({ collection_id: id, close_id: carry.close.id, amount, note, left: money(carry.carried - amount) })
+    );
+    return { id };
+  }).immediate();
+  if ("error" in out) return c.json({ error: out.error }, 400);
+  return c.json({ success: true, id: out.id, carry: carriedForAdmin() });
+});
+
+// A collection recorded by mistake is voided (kept, marked), before the next opening.
+cash.post("/collections/:id/void", adminOnly, async (c) => {
+  const user = getUser(c)!;
+  const db = getDb();
+  const id = Number(c.req.param("id"));
+  const out = db.transaction(() => {
+    const row = db.query("SELECT * FROM cash_collections WHERE id = ?").get(id) as any;
+    if (!row) return { error: "That collection was not found" };
+    if (row.voided_at) return { error: "That collection was already removed." };
+    if (getCurrentOpenShift() || getLatestClose()?.id !== row.close_id) return { error: "The drawer has been opened since; that collection can no longer be changed." };
+    db.query("UPDATE cash_collections SET voided_by = ?, voided_at = datetime('now') WHERE id = ?").run(user.id, id);
+    db.query("UPDATE cash_open_requests SET status = 'superseded' WHERE prev_close_id = ? AND status IN ('pending', 'approved')").run(row.close_id);
+    db.query("INSERT INTO activity_log (user_id, action, details) VALUES (?, 'cash_collection_voided', ?)").run(user.id, JSON.stringify({ collection_id: id, amount: row.amount }));
+    return {};
+  }).immediate();
+  if ("error" in out) return c.json({ error: out.error }, 400);
+  return c.json({ success: true, carry: carriedForAdmin() });
+});
+
+/** The admin's view of the drawer between shifts: the close, what was collected, what is left. */
+function carriedForAdmin() {
+  const carry = carriedOver();
+  if (!carry || getCurrentOpenShift()) return null;
+  return {
+    close_id: carry.close.id,
+    close_total: Number(carry.close.total_amount) || 0,
+    closed_at: carry.close.created_at,
+    closed_by: carry.close.user_name,
+    holder: closeHolder(carry.close),
+    collected: carry.collected,
+    carried: carry.carried,
+    collections: collectionsFor(carry.close.id),
+  };
+}
 
 // --- Stock sync (gate 1 of closing) -----------------------------------------
 
@@ -816,12 +1133,15 @@ cash.post("/close", async (c) => {
       if (Number(used.changes || 0) !== 1) throw new ClosingError("That approval has already been used.", 409);
     }
     const id = Number(db.query(`
-      INSERT INTO cash_counts (count_type, count_date, user_id, notes_20, notes_50, notes_100, notes_500, notes_1000, notes_2000, notes_5000, coins_total, total_amount, expected_amount, variance, notes, variance_approved_by, stock_sync_id)
-      VALUES ('close', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO cash_counts (count_type, count_date, user_id, notes_20, notes_50, notes_100, notes_500, notes_1000, notes_2000, notes_5000, coins_total, total_amount, expected_amount, variance, notes, variance_approved_by, stock_sync_id, holder_user_id)
+      VALUES ('close', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       date, user.id,
       n.notes_20, n.notes_50, n.notes_100, n.notes_500, n.notes_1000, n.notes_2000, n.notes_5000,
-      count.coins_total, counted, expected, variance, notes, varianceApprovedBy, syncState.sync?.id ?? null
+      count.coins_total, counted, expected, variance, notes, varianceApprovedBy, syncState.sync?.id ?? null,
+      // On a close row: who held the drawer as it closed — the one answering
+      // for what is left in it until the next opening (cash collection).
+      holder.id
     ).lastInsertRowid);
     if (requestId) db.query("UPDATE cash_close_requests SET used_close_id = ? WHERE id = ?").run(id, requestId);
     // The holder's pending account: the shortage, as decided.
@@ -1397,7 +1717,15 @@ cash.get("/approvals", adminOnly, (c) => {
     WHERE r.status = 'pending' ORDER BY r.id
   `).all();
   const open = getCurrentOpenShift();
-  if (!open) return c.json({ stock_syncs: [], close_requests: [], handovers: [], refund_requests, shift: null });
+  // Opening requests wait while no shift is open.
+  const lastClose = getLatestClose();
+  const open_requests = !open && lastClose
+    ? db.query(`
+        SELECT r.*, u.full_name AS user_name FROM cash_open_requests r LEFT JOIN users u ON u.id = r.user_id
+        WHERE r.prev_close_id = ? AND r.status = 'pending' ORDER BY r.id
+      `).all(lastClose.id).map((r: any) => ({ ...r, closer: closeHolder(lastClose), expected_now: carriedOver()?.carried ?? null }))
+    : [];
+  if (!open) return c.json({ stock_syncs: [], close_requests: [], handovers: [], open_requests, refund_requests, shift: null });
   const syncIds = db.query("SELECT id FROM stock_syncs WHERE shift_open_id = ? AND status = 'pending' ORDER BY id").all(open.id) as any[];
   const closeRequests = db.query(`
     SELECT r.*, u.full_name AS user_name FROM cash_close_requests r LEFT JOIN users u ON u.id = r.user_id
@@ -1424,6 +1752,8 @@ cash.get("/approvals/count", adminOnly, (c) => {
     SELECT (SELECT COUNT(*) FROM stock_syncs WHERE shift_open_id = ?1 AND status = 'pending')
          + (SELECT COUNT(*) FROM cash_close_requests WHERE shift_open_id = ?1 AND status = 'pending')
          + (SELECT COUNT(*) FROM drawer_handovers WHERE shift_open_id = ?1 AND status = 'awaiting_admin')
+         + (CASE WHEN ?1 = -1 THEN (SELECT COUNT(*) FROM cash_open_requests WHERE status = 'pending'
+              AND prev_close_id = (SELECT id FROM cash_counts WHERE count_type = 'close' ORDER BY created_at DESC, id DESC LIMIT 1)) ELSE 0 END)
          + (SELECT COUNT(*) FROM refund_requests WHERE status = 'pending') AS count
   `).get(open?.id ?? -1) as any;
   return c.json({ count: row?.count || 0 });
@@ -1446,7 +1776,8 @@ cash.get("/history", (c) => {
   const db = getDb();
   const limit = parseInt(c.req.query("limit") || "30");
   const rows = db.query(`
-    SELECT cc.*, u.full_name as user_name, a.full_name as variance_approved_by_name
+    SELECT cc.*, u.full_name as user_name, a.full_name as variance_approved_by_name,
+      (SELECT COALESCE(SUM(cl.amount), 0) FROM cash_collections cl WHERE cl.close_id = cc.id AND cl.voided_at IS NULL) AS collected
     FROM cash_counts cc
     LEFT JOIN users u ON cc.user_id = u.id
     LEFT JOIN users a ON cc.variance_approved_by = a.id

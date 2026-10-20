@@ -239,6 +239,9 @@
       submitBtn.disabled = !!holderMsg || expensesBlock || refundsBlock || syncBlock;
     }
 
+    // A close's variance, or an opening's difference from what was left at the last close.
+    function vOf(h) { return h.count_type === 'open' ? h.open_variance : h.variance; }
+
     async function loadCash() {
       renderDenomInputs();
       todayData = await api('/api/cash/today');
@@ -257,8 +260,8 @@
           <td><span class="badge bg-${h.count_type === 'open' ? 'primary' : 'success'}">${h.count_type}</span></td>
           <td>${h.user_name || '-'}</td>
           <td class="text-end">${formatCurrency(h.total_amount)}</td>
-          <td class="text-end ${h.variance == null ? '' : varianceClass(h.variance)}">${h.variance == null ? '-' : signedCurrency(h.variance)}</td>
-          <td class="small text-muted">${escText(h.variance_approved_by_name || '')}${h.charged_amount > 0 ? `<div class="text-danger">charged ${formatCurrency(h.charged_amount)}</div>` : ''}</td>
+          <td class="text-end ${vOf(h) == null ? '' : varianceClass(vOf(h))}">${vOf(h) == null ? '-' : signedCurrency(vOf(h))}</td>
+          <td class="small text-muted">${escText(h.variance_approved_by_name || '')}${h.charged_amount > 0 ? `<div class="text-danger">charged ${formatCurrency(h.charged_amount)}</div>` : ''}${h.collected > 0 ? `<div>collected ${formatCurrency(h.collected)}</div>` : ''}</td>
         </tr>
       `).join('') || '<tr><td colspan="6" class="text-center text-muted py-3">No records yet</td></tr>';
     }

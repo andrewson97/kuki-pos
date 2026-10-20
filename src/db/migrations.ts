@@ -1086,6 +1086,60 @@ export function runMigrations(): void {
     );
     CREATE INDEX IF NOT EXISTS idx_cashier_ledger_user ON cashier_ledger(user_id, id);
   `);
+
+  // --- feature/cash-collection -----------------------------------------------
+  // After a close, an admin takes cash out of the drawer (to the bank or the
+  // safe) and records it here against that close. The next opening should
+  // count exactly what was left: the close's count minus what was collected
+  // (the CARRIED amount). An opening that differs needs an admin, who charges
+  // a shortfall to the last holder or the opener, or writes it off.
+  db.exec(`
+    -- Cash taken out of the drawer after a close (close_id: that 'close'
+    -- cash_counts row). Only while no shift has opened since; voided (never
+    -- deleted) if recorded by mistake, before the next opening.
+    CREATE TABLE IF NOT EXISTS cash_collections (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      close_id INTEGER NOT NULL REFERENCES cash_counts(id),
+      amount REAL NOT NULL CHECK(amount > 0),
+      note TEXT,
+      user_id INTEGER REFERENCES users(id),
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      voided_by INTEGER REFERENCES users(id),
+      voided_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_cash_collections_close ON cash_collections(close_id);
+
+    -- An opening count that does not match what was carried, waiting on (or
+    -- decided by) an admin. Like cash_close_requests, for the opening.
+    -- charge_decision: 'charge' | 'write_off' (a shortfall only); charge_to: the
+    -- user charged.
+    CREATE TABLE IF NOT EXISTS cash_open_requests (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      prev_close_id INTEGER REFERENCES cash_counts(id),
+      user_id INTEGER NOT NULL REFERENCES users(id),
+      count_json TEXT NOT NULL,
+      total_amount REAL NOT NULL,
+      expected_amount REAL NOT NULL,
+      variance REAL NOT NULL,
+      notes TEXT,
+      status TEXT NOT NULL CHECK(status IN ('pending', 'approved', 'rejected', 'superseded', 'used')),
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      decided_by INTEGER REFERENCES users(id),
+      decided_at TEXT,
+      decision_note TEXT,
+      charge_decision TEXT,
+      charge_to INTEGER REFERENCES users(id),
+      charge_amount REAL,
+      charge_note TEXT,
+      used_open_id INTEGER REFERENCES cash_counts(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_cash_open_requests_close ON cash_open_requests(prev_close_id, id);
+  `);
+  // On an 'open' row: what was carried over from the last close (its count
+  // minus collections), and the opening's difference from it. NULL on shifts
+  // opened before this existed (and on the very first opening).
+  addColumn("cash_counts", "carried_amount", "REAL");
+  addColumn("cash_counts", "open_variance", "REAL");
 }
 
 export function seedDefaults(): void {
