@@ -886,6 +886,55 @@ export function runMigrations(): void {
   addColumn("cash_counts", "variance_approved_by", "INTEGER");
   addColumn("cash_counts", "stock_sync_id", "INTEGER");
 
+  // --- feature/daily-sync-selection ------------------------------------------
+  // Which items the closing stock sync asks to be counted (listSyncItems):
+  // only those "in the daily sync" with stock above 0. Two levels, both set by
+  // an admin on the Stock page:
+  //   * GROUPS (daily_sync_groups): a whole stock category, a whole product
+  //     category, or every tracked product. A standing rule — an item added to
+  //     a ticked group later is counted too.
+  //   * the ITEM's own choice (daily_sync): NULL = follow its groups, 1 = always
+  //     counted, 0 = never (e.g. one item left out of a ticked group).
+  // The owner chose to start with nothing counted: every item NULL and no group
+  // ticked. See PRODUCT_IN_SYNC / ITEM_IN_SYNC in src/services/closing.ts.
+  addColumn("products", "daily_sync", "INTEGER");
+  addColumn("stock_items", "daily_sync", "INTEGER");
+  // One-time repair for a database made by an early build of this feature,
+  // where daily_sync was NOT NULL DEFAULT 0. addColumn() cannot change an
+  // existing column, and NOT NULL breaks "NULL = follow the group" (inserts
+  // fail, and every 0 means "never"). Swap it for the nullable column, keeping
+  // the 1s; the 0s become NULL, which is what they meant then ("not ticked").
+  // Never touches a database where the column is already nullable — which is
+  // every database this build creates, and production.
+  for (const table of ["products", "stock_items"]) {
+    try {
+      const col = (db.query(`SELECT "notnull" AS nn FROM pragma_table_info('${table}') WHERE name = 'daily_sync'`).get() as any);
+      if (!col || !col.nn) continue;
+      db.transaction(() => {
+        db.exec(`ALTER TABLE ${table} RENAME COLUMN daily_sync TO daily_sync_old`);
+        db.exec(`ALTER TABLE ${table} ADD COLUMN daily_sync INTEGER`);
+        db.exec(`UPDATE ${table} SET daily_sync = CASE WHEN daily_sync_old = 1 THEN 1 ELSE NULL END`);
+        db.exec(`ALTER TABLE ${table} DROP COLUMN daily_sync_old`);
+      })();
+      console.log(`[migration] ${table}.daily_sync made nullable (follow-the-group)`);
+    } catch (err: any) {
+      console.error(`[migration] could not make ${table}.daily_sync nullable:`, err?.message || err);
+    }
+  }
+  db.exec(`
+    -- A ticked group. group_type: 'stock_category' (group_key = the
+    -- stock_categories id, as text), 'product_category' (group_key = the
+    -- product category name; matched without regard to case, like the
+    -- category merge in this file), 'all_products' (group_key '').
+    CREATE TABLE IF NOT EXISTS daily_sync_groups (
+      group_type TEXT NOT NULL CHECK(group_type IN ('stock_category', 'product_category', 'all_products')),
+      group_key TEXT NOT NULL DEFAULT '',
+      user_id INTEGER REFERENCES users(id),
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (group_type, group_key)
+    );
+  `);
+
   // --- feature/refund-approval -----------------------------------------------
   // A cashier's refund needs an admin (see POST /api/pos/bills/:id/refund): the
   // admin's password at the till, or a request the admin approves from their

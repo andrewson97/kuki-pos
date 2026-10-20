@@ -172,11 +172,13 @@ window.Closing = (() => {
       return;
     }
     let head = '&#128230; Step 1 &mdash; sync the stock';
-    let msg = 'Before closing, count everything the system shows in stock and enter the figures. Items already at 0 are not listed.';
+    let msg = 'Before closing, count the items ticked for the daily stock sync and enter the figures. Items already at 0 are not listed.';
     let cls = 'cc-step';
     if (st.stale) {
       head = '&#128260; Step 1 &mdash; sync the stock again';
-      msg = 'Stock has changed since the last sync (a sale, a delivery or an opened box). Count again before closing.';
+      msg = st.stale_reason === 'listed'
+        ? 'The count list has changed since the last sync (an item was ticked for the daily sync, or came into stock). Count again before closing.'
+        : 'Stock has changed since the last sync (a sale, a delivery or an opened box). Count again before closing.';
       cls = 'cc-wait';
     } else if (s && s.status === 'rejected') {
       head = '&#10060; Step 1 &mdash; the count was rejected';
@@ -215,7 +217,8 @@ window.Closing = (() => {
     const el = cfg.sync;
     if (!countItems.length) {
       el.innerHTML = `<div class="cc-box cc-step" data-role="count-form"><h4>&#128230; Step 1 &mdash; sync the stock</h4>
-        <div>Nothing is in stock right now, so there is nothing to count.</div>
+        <div>Nothing ticked for the daily stock sync has stock right now, so there is nothing to count.</div>
+        <div class="cc-muted">An admin chooses what is counted with the Daily sync ticks on the Stock page.</div>
         <div class="cc-row"><button class="cc-btn cc-primary" onclick="Closing.submitCount(this)">Confirm</button>
         <button class="cc-btn" onclick="Closing.cancelCount()">Cancel</button></div></div>`;
       return;
