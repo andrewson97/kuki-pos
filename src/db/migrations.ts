@@ -997,6 +997,93 @@ export function runMigrations(): void {
     );
     CREATE INDEX IF NOT EXISTS idx_disposal_requests_status ON disposal_requests(status, requested_at);
   `);
+
+  // --- feature/drawer-accountability -----------------------------------------
+  // One person is accountable for the cash drawer at a time — the HOLDER. The
+  // opener holds it; a HANDOVER passes it on (the giver syncs the stock and
+  // counts the cash, the receiver counts and accepts); an admin can TAKE OVER
+  // a drawer whose holder is not there. Only the holder (or an admin) takes
+  // cash, closes the drawer or hands it over. When an admin approves a cash or
+  // stock SHORTAGE, they choose to charge it to the holder's PENDING ACCOUNT
+  // (cashier_ledger) or write it off. See src/services/accounts.ts and the
+  // handover routes in src/routes/cash.ts.
+  //
+  // holder_user_id on an 'open' cash_counts row: who holds that shift's drawer
+  // now. NULL = the opener (every shift opened before this existed).
+  addColumn("cash_counts", "holder_user_id", "INTEGER");
+  // On a 'close' row: what was charged to whom for that close's shortage.
+  addColumn("cash_counts", "charged_amount", "REAL");
+  addColumn("cash_counts", "charged_to", "INTEGER");
+  // A stock sync: who held the drawer when it was counted (who a shortage is
+  // charged to), and what the admin decided about the shortage.
+  addColumn("stock_syncs", "holder_user_id", "INTEGER");
+  addColumn("stock_syncs", "charge_amount", "REAL");
+  addColumn("stock_syncs", "charged_to", "INTEGER");
+  addColumn("stock_syncs", "write_off_note", "TEXT");
+  // Per line: what one unit is worth for charging (selling price for a product,
+  // cost per unit for a store-room item), copied at count time.
+  addColumn("stock_sync_lines", "unit_value", "REAL");
+  // A close request's approval carries the charge decision to the close.
+  addColumn("cash_close_requests", "charge_decision", "TEXT");
+  addColumn("cash_close_requests", "charge_note", "TEXT");
+  db.exec(`
+    -- A drawer passing from one person to another. kind 'handover': the giver
+    -- (from_user_id) counted the cash and synced the stock and asked to_user_id
+    -- to take it; 'takeover': an admin took it from an absent holder (answered
+    -- at once). status: pending (waiting for the receiver; cash payments pause),
+    -- awaiting_admin (the receiver's count was off by more than the limit),
+    -- accepted (the receiver holds the drawer; accepted_at is the new
+    -- baseline the close counts from), declined, cancelled.
+    -- variance = receiver_total - receiver_expected; a shortage is the giver's.
+    CREATE TABLE IF NOT EXISTS drawer_handovers (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      shift_open_id INTEGER NOT NULL REFERENCES cash_counts(id),
+      kind TEXT NOT NULL DEFAULT 'handover' CHECK(kind IN ('handover', 'takeover')),
+      from_user_id INTEGER REFERENCES users(id),
+      to_user_id INTEGER NOT NULL REFERENCES users(id),
+      status TEXT NOT NULL CHECK(status IN ('pending', 'awaiting_admin', 'accepted', 'declined', 'cancelled')),
+      giver_count_json TEXT,
+      giver_total REAL,
+      giver_expected REAL,
+      giver_notes TEXT,
+      stock_sync_id INTEGER REFERENCES stock_syncs(id),
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      receiver_count_json TEXT,
+      receiver_total REAL,
+      receiver_expected REAL,
+      variance REAL,
+      receiver_notes TEXT,
+      answered_at TEXT,
+      accepted_at TEXT,
+      decline_reason TEXT,
+      decided_by INTEGER REFERENCES users(id),
+      decided_at TEXT,
+      decision TEXT CHECK(decision IN ('charge', 'write_off')),
+      decision_note TEXT,
+      charge_amount REAL
+    );
+    CREATE INDEX IF NOT EXISTS idx_drawer_handovers_shift ON drawer_handovers(shift_open_id, id);
+    CREATE INDEX IF NOT EXISTS idx_drawer_handovers_to ON drawer_handovers(to_user_id, status);
+
+    -- A cashier's pending account. amount > 0 is owed to the shop (a charged
+    -- shortage, or a charge the admin added); amount < 0 reduces it (a payment
+    -- or a write-off the admin recorded). The balance is SUM(amount). Rows are
+    -- never edited or deleted: a mistake is put right with another row.
+    -- source_type / source_id point at what caused it ('close', 'stock_sync',
+    -- 'handover', 'manual').
+    CREATE TABLE IF NOT EXISTS cashier_ledger (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL REFERENCES users(id),
+      amount REAL NOT NULL,
+      kind TEXT NOT NULL CHECK(kind IN ('cash_short', 'stock_short', 'charge', 'payment', 'write_off')),
+      source_type TEXT NOT NULL DEFAULT 'manual',
+      source_id INTEGER,
+      note TEXT,
+      created_by INTEGER REFERENCES users(id),
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_cashier_ledger_user ON cashier_ledger(user_id, id);
+  `);
 }
 
 export function seedDefaults(): void {
@@ -1038,6 +1125,9 @@ export function seedDefaults(): void {
     default_order_type: "takeaway",
     // Rs: a drawer closing more than this over OR short needs an admin's approval.
     cash_variance_limit: "200",
+    // 1: a cash shortage WITHIN the limit is charged to the holder too (no
+    // approval needed for it). 0 (default): the limit is a tolerance, not charged.
+    charge_small_shortages: "0",
   };
   for (const [key, value] of Object.entries(defaults)) {
     db.query("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)").run(key, value);

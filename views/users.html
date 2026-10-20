@@ -17,7 +17,7 @@
       </div>
       <div class="table-container">
         <table class="table table-hover mb-0">
-          <thead><tr><th>Username</th><th>Full Name</th><th>Role</th><th>Status</th><th>Dashboard money</th><th>Created</th><th>Actions</th></tr></thead>
+          <thead><tr><th>Username</th><th>Full Name</th><th>Role</th><th>Status</th><th>Dashboard money</th><th class="text-end">Owes</th><th>Created</th><th>Actions</th></tr></thead>
           <tbody id="users-table"></tbody>
         </table>
       </div>
@@ -55,14 +55,43 @@
     </div>
   </div>
 
+  <!-- A user's pending account: shortages charged to them, and what was paid back or written off. -->
+  <div class="modal fade" id="accountModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+      <div class="modal-content">
+        <div class="modal-header"><h5 class="modal-title" id="acct-title">Account</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+        <div class="modal-body">
+          <div class="fs-5 mb-2">Owes: <strong id="acct-balance">-</strong></div>
+          <div class="row g-2 align-items-end mb-3 border rounded p-2 bg-light">
+            <div class="col-md-3"><label class="form-label small mb-1">Record</label>
+              <select class="form-select form-select-sm" id="acct-kind">
+                <option value="payment">Payment received</option>
+                <option value="write_off">Write off</option>
+                <option value="charge">Charge (add)</option>
+              </select></div>
+            <div class="col-md-2"><label class="form-label small mb-1">Amount</label><input type="number" min="0" step="any" class="form-control form-control-sm" id="acct-amount"></div>
+            <div class="col-md-5"><label class="form-label small mb-1">Note <span class="text-muted" id="acct-note-hint">(optional)</span></label><input class="form-control form-control-sm" id="acct-note" placeholder="e.g. paid in cash, deducted from salary"></div>
+            <div class="col-md-2"><button class="btn btn-sm btn-primary w-100" onclick="saveEntry(this)">Save</button></div>
+            <div class="col-12 small text-muted">Nothing is ever edited or deleted. A charge made in error is put right with a write-off that says why.</div>
+          </div>
+          <div id="acct-ledger"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
   <script src="/public/js/app.js"></script>
+  <script src="/public/js/closing.js"></script>
   <script>
     let allUsers = [];
     initApp('/users', loadUsers);
 
+    // What each user owes for shortages charged to them (cashier_ledger).
+    let balances = {};
     async function loadUsers() {
       allUsers = await api('/api/settings/users');
+      try { balances = Object.fromEntries((await api('/api/cash/accounts')).map(a => [a.user_id, a.balance])); } catch { balances = {}; }
       document.getElementById('users-table').innerHTML = allUsers.map(u => `
         <tr>
           <td class="fw-bold">${u.username}</td>
@@ -70,8 +99,10 @@
           <td><span class="badge bg-${u.role === 'admin' ? 'primary' : 'secondary'}">${u.role}</span></td>
           <td><span class="badge bg-${u.is_active ? 'success' : 'danger'}">${u.is_active ? 'Active' : 'Disabled'}</span></td>
           <td>${u.role === 'admin' ? '<span class="text-muted small">Always (admin)</span>' : (u.show_dashboard_money ? '<span class="badge bg-info">Shown</span>' : '<span class="badge bg-light text-dark border">Hidden</span>')}</td>
+          <td class="text-end">${(balances[u.id] || 0) > 0 ? `<span class="text-danger fw-bold">${formatCurrency(balances[u.id])}</span>` : '<span class="text-muted">-</span>'}</td>
           <td>${formatDate(u.created_at)}</td>
-          <td><button class="btn btn-sm btn-outline-primary" onclick="editUser(${u.id})">Edit</button></td>
+          <td><button class="btn btn-sm btn-outline-primary" onclick="editUser(${u.id})">Edit</button>
+            <button class="btn btn-sm btn-outline-secondary" onclick="openAccount(${u.id})">Account</button></td>
         </tr>
       `).join('');
     }
@@ -132,6 +163,41 @@
       dashBox.dataset.cashierValue = u.show_dashboard_money ? '1' : '0';
       syncDashMoneyField();
       new bootstrap.Modal(document.getElementById('userModal')).show();
+    }
+
+    let acctUser = null;
+    async function openAccount(id) {
+      acctUser = id;
+      document.getElementById('acct-amount').value = '';
+      document.getElementById('acct-note').value = '';
+      await renderAccount();
+      bootstrap.Modal.getOrCreateInstance(document.getElementById('accountModal')).show();
+    }
+    async function renderAccount() {
+      const a = await api(`/api/cash/accounts/${acctUser}`);
+      document.getElementById('acct-title').textContent = `Pending account — ${a.user.full_name}`;
+      const b = document.getElementById('acct-balance');
+      b.textContent = formatCurrency(Math.max(0, a.balance));
+      b.className = a.balance > 0 ? 'text-danger' : 'text-success';
+      document.getElementById('acct-ledger').innerHTML = Closing.ledgerHtml(a.entries || []);
+    }
+    document.getElementById('acct-kind').addEventListener('change', (e) => {
+      document.getElementById('acct-note-hint').textContent = e.target.value === 'payment' ? '(optional)' : '(required)';
+    });
+    async function saveEntry(btn) {
+      const body = {
+        kind: document.getElementById('acct-kind').value,
+        amount: Number(document.getElementById('acct-amount').value),
+        note: document.getElementById('acct-note').value.trim(),
+      };
+      await withBusy(btn, async () => {
+        await api(`/api/cash/accounts/${acctUser}/entries`, { method: 'POST', body });
+        showToast('Saved');
+        document.getElementById('acct-amount').value = '';
+        document.getElementById('acct-note').value = '';
+        await renderAccount();
+        await loadUsers();
+      }, '…');
     }
 
     async function saveUser(btn) {

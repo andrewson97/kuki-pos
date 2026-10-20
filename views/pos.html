@@ -25,6 +25,7 @@
       <div id="top-bar-user"></div>
     </div>
     <div id="shift-banner" style="display:none;"></div>
+    <div id="cash-hold-banner" class="alert alert-info mb-0 rounded-0 py-2 small" style="display:none;"></div>
     <div class="pos-container" style="padding:15px;">
       <!-- Products panel -->
       <div style="overflow-y:auto;">
@@ -532,6 +533,7 @@
           shiftDrawerOpen = true;
           shiftBlocked = false;
         }
+        readCashHold(data);
       } catch {
         shiftBlocked = false; // network error — let server enforce
         // shiftDrawerOpen is left exactly as it was: one failed read is no
@@ -542,6 +544,28 @@
       // The check is also the keepalive's heartbeat, so every run re-decides
       // whether the beat should be running.
       syncShiftKeepalive();
+    }
+
+
+    // Only the drawer's holder (or an admin) takes cash, and nobody while it is
+    // being handed over (src/routes/cash.ts). Card and LankaQR are untouched,
+    // so this greys out the Cash button alone; the server refuses it anyway.
+    let cashHoldReason = '';
+    function readCashHold(data) {
+      const h = data && data.handover;
+      if (h) cashHoldReason = `Cash is paused: the drawer is being handed over to ${h.to_name || 'someone'}${h.status === 'awaiting_admin' ? ' (waiting for an admin)' : ''}. Card and LankaQR are fine.`;
+      else if (data && data.shift_open && data.holder && !data.is_holder && !(currentUser && currentUser.role === 'admin')) cashHoldReason = `${data.holder.name} holds the cash drawer, so only they take cash here. Card and LankaQR are fine.`;
+      else cashHoldReason = '';
+    }
+    function applyCashHold() {
+      const b = document.getElementById('pay-cash');
+      if (b && cashHoldReason && b.getAttribute('data-busy') !== '1') { b.disabled = true; b.style.opacity = '0.5'; b.title = cashHoldReason; }
+      else if (b) b.title = '';
+      const el = document.getElementById('cash-hold-banner');
+      if (el) {
+        el.textContent = cashHoldReason ? '💵 ' + cashHoldReason : '';
+        el.style.display = cashHoldReason ? 'block' : 'none';
+      }
     }
 
     function updateShiftUI() {
@@ -601,6 +625,7 @@
         b.style.opacity = blocked ? '0.5' : '';
         b.style.cursor = blocked ? (checkoutInProgress ? 'progress' : 'not-allowed') : '';
       });
+      applyCashHold();
       const locked = cartLocked();
       const panel = document.querySelector('.cart-panel');
       if (panel) panel.classList.toggle('cart-locked', locked);

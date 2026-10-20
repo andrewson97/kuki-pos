@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { getDb } from "../db/database";
 import { adminOnly, getUser } from "../middleware/auth";
+import { drawerHandlerBlockReason } from "./cash";
 
 const expenses = new Hono();
 
@@ -52,6 +53,12 @@ expenses.post("/", async (c) => {
   const { category_id, amount, description, expense_date, payment_source } = await c.req.json();
   const user = getUser(c)!;
   const db = getDb();
+  // Paid out of the drawer: only its holder (or an admin), and not while it
+  // is being handed over. No shift is needed, as before.
+  if ((payment_source || "cash") === "cash") {
+    const blocked = drawerHandlerBlockReason(user);
+    if (blocked) return c.json({ error: blocked }, 400);
+  }
   // Admins' submissions are auto-approved; cashiers' need approval
   const isAdmin = user.role === "admin";
   const status = isAdmin ? "approved" : "pending";

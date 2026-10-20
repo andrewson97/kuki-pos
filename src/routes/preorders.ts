@@ -11,7 +11,7 @@ import {
   queuePrint,
 } from "../services/printer";
 import { formatDateTime, todayDate } from "../utils/helpers";
-import { cashShiftBlockReason } from "./cash";
+import { cashShiftBlockReason, drawerHandlerBlockReason } from "./cash";
 
 // ---------------------------------------------------------------------------
 // Pre-orders: a customer orders ahead (a custom birthday cake described in
@@ -641,7 +641,7 @@ preorders.post("/", async (c) => {
     // shift rule as a sale: money that arrives outside an open shift can never
     // be reconciled by a close. Card/UPI never touches the drawer.
     if (method === "cash") {
-      const blocked = cashShiftBlockReason();
+      const blocked = cashShiftBlockReason() ?? drawerHandlerBlockReason(user);
       if (blocked) return c.json({ error: blocked }, 400);
     }
     deposit = { amount: money(amount), payment_method: method, paid_on: paidOn };
@@ -904,7 +904,7 @@ preorders.post("/:id/payments", async (c) => {
       }
 
       if (method === "cash") {
-        const blocked = cashShiftBlockReason();
+        const blocked = cashShiftBlockReason() ?? drawerHandlerBlockReason(user);
         if (blocked) throw new Refused(400, { error: blocked });
       }
 
@@ -1063,7 +1063,7 @@ preorders.post("/:id/cancel", adminOnly, async (c) => {
         });
       }
       if (hasDeposit && action === "refund" && refundMethod === "cash") {
-        const blocked = cashShiftBlockReason();
+        const blocked = cashShiftBlockReason() ?? drawerHandlerBlockReason(user);
         if (blocked) {
           throw new Refused(400, { error: `A cash refund comes out of the drawer. ${blocked}` });
         }
@@ -1315,7 +1315,7 @@ preorders.post("/:id/collect", async (c) => {
       // Same rule as POST /api/pos/bill. No replay exemption is needed any
       // more: an order that reaches this line has no bill yet (checked just
       // above), so this request is always a new sale.
-      const blocked = cashShiftBlockReason();
+      const blocked = cashShiftBlockReason() ?? (method === "cash" && cashToCollect > CENT ? drawerHandlerBlockReason(user) : null);
       if (blocked) throw new Refused(400, { error: blocked });
 
       let bill: CreatedBill;

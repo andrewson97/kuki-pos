@@ -98,6 +98,7 @@
   </div>
 
   <div id="shift-banner"></div>
+  <div id="cash-hold-banner" style="display:none;background:#eff6ff;color:#1e40af;padding:8px 12px;font-size:0.85rem;"></div>
   <!-- What the till is waiting for before it can take money (a sale being
        saved, or the check on a sale whose answer never arrived), visible even
        with every sheet closed. Filled by renderSaleStatus(). -->
@@ -490,6 +491,28 @@
       loadPreorderSummary();
     }
 
+
+    // Only the drawer's holder (or an admin) takes cash, and nobody while it is
+    // being handed over (src/routes/cash.ts). Card and LankaQR are untouched,
+    // so this greys out the Cash button alone; the server refuses it anyway.
+    let cashHoldReason = '';
+    function readCashHold(data) {
+      const h = data && data.handover;
+      if (h) cashHoldReason = `Cash is paused: the drawer is being handed over to ${h.to_name || 'someone'}${h.status === 'awaiting_admin' ? ' (waiting for an admin)' : ''}. Card and LankaQR are fine.`;
+      else if (data && data.shift_open && data.holder && !data.is_holder && !(currentUser && currentUser.role === 'admin')) cashHoldReason = `${data.holder.name} holds the cash drawer, so only they take cash here. Card and LankaQR are fine.`;
+      else cashHoldReason = '';
+    }
+    function applyCashHold() {
+      const b = document.getElementById('pay-cash');
+      if (b && cashHoldReason && b.getAttribute('data-busy') !== '1') { b.disabled = true; b.style.opacity = '0.5'; b.title = cashHoldReason; }
+      else if (b) b.title = '';
+      const el = document.getElementById('cash-hold-banner');
+      if (el) {
+        el.textContent = cashHoldReason ? '💵 ' + cashHoldReason : '';
+        el.style.display = cashHoldReason ? 'block' : 'none';
+      }
+    }
+
     async function checkShift() {
       // enforce_cash_shift = '0': no shift concept at all, so this returns
       // without even asking the server. There is then no "the shop is trading"
@@ -516,6 +539,7 @@
           shiftBlocked = false;
           $('shift-banner').innerHTML = '';
         }
+        readCashHold(data);
       } catch {
         // shiftDrawerOpen is left exactly as it was: one failed read is no
         // evidence the drawer closed, and a beat that keeps trying is both
@@ -1841,6 +1865,7 @@
         b.disabled = blocked;
         b.style.opacity = blocked ? '0.55' : '';
       });
+      applyCashHold();
       const locked = cartLocked();
       const sheet = $('cart-sheet');
       if (sheet) sheet.classList.toggle('cart-locked', locked);

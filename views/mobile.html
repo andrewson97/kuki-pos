@@ -131,18 +131,21 @@
         loadDisposals();
         renderTasks(data.tasks);
         renderStock(data);
-        if (currentUser.role === 'admin') showCashApprovals();
+        showCashApprovals();
       } catch (err) { toast(err.message, 'error'); }
     }
 
     // The owner on their phone: closing the drawer is waiting on them (a stock
-    // count that did not match, or a variance over the limit). A red count on
-    // the Cash Drawer link, where the approval is done. Never fatal to the page.
+    // count that did not match, a variance over the limit, a handover counted
+    // off). And anyone: a drawer being handed to them to count and accept. A
+    // red count on the Cash Drawer link, where both are done. Never fatal.
     // ONE badge, reused: load() runs again every minute, and a fresh span each
     // time stacked up "1 1 1 1" and never went away when the count fell to 0.
     async function showCashApprovals() {
       try {
-        const { count } = await api('/api/cash/approvals/count');
+        let count = 0;
+        if (currentUser.role === 'admin') count += Number((await api('/api/cash/approvals/count')).count) || 0;
+        count += ((await api('/api/cash/handovers/incoming')) || []).length;
         let b = $('ql-cash-badge');
         if (!b) {
           b = document.createElement('span');
