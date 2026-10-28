@@ -257,6 +257,12 @@ export function openStockUnit(stockItemId: number, userId: number, note: string 
     if (size > onHand + 1e-9) {
       throw new PortionError(`Only ${+onHand.toFixed(3)}${unit} of ${item.name} is sealed in stock, so ${+size.toFixed(3)}${unit} cannot be opened. Check the amount, or add the delivery on the Stock page first.`);
     }
+    // Less than one serving of everything made from it: nothing could ever be
+    // sold from it, so it is a mistyped amount (0.002 for 2), not a box.
+    const best = links.reduce((a, l) => (Number(l.servings_per_unit) > Number(a.servings_per_unit) ? l : a), links[0]);
+    if (size * Number(best.servings_per_unit) < 1 - PORTION_EPSILON) {
+      throw new PortionError(`${+size.toFixed(3)}${unit} of ${item.name} is not enough for even one ${best.name}. Check the amount.`);
+    }
     const next = roundFrac(onHand - size);
     const makes = links.map((l) => `${+(Number(l.servings_per_unit) * size).toFixed(3)} ${l.name}`).join(" / ");
     const cleanNote = String(note || "").trim();
@@ -371,6 +377,17 @@ export function finishStockUnit(openedId: number, userId: number, note: string) 
 }
 
 /**
+ * The size each ingredient was last opened at, as a reminder beside the amount
+ * box (never filled in for the cashier: they say what this one is).
+ */
+function lastOpenSizes(): Map<number, number> {
+  return new Map((getDb().query(`
+    SELECT o.stock_item_id, COALESCE(o.size, 1) AS size FROM opened_stock_units o
+    WHERE o.id = (SELECT MAX(x.id) FROM opened_stock_units x WHERE x.stock_item_id = o.stock_item_id)
+  `).all() as any[]).map((r) => [Number(r.stock_item_id), Number(r.size) || 1]));
+}
+
+/**
  * Every ingredient that something is made from, with its links and its opened
  * units — what the till's Use stock panel shows. servings_left is per linked
  * product for each opened unit, ignoring holds (a unit's contents, not what is
@@ -390,12 +407,7 @@ export function listPortionIngredients(): any[] {
     FROM opened_stock_units o LEFT JOIN users u ON u.id = o.opened_by
     WHERE o.status = 'opened' ORDER BY o.opened_at, o.id
   `).all() as any[];
-  // The size each ingredient was last opened at, as a reminder beside the
-  // amount box (never filled in for the cashier: they say what this one is).
-  const lastSizes = new Map((db.query(`
-    SELECT o.stock_item_id, COALESCE(o.size, 1) AS size FROM opened_stock_units o
-    WHERE o.id = (SELECT MAX(x.id) FROM opened_stock_units x WHERE x.stock_item_id = o.stock_item_id)
-  `).all() as any[]).map((r) => [Number(r.stock_item_id), Number(r.size) || 1]));
+  const lastSizes = lastOpenSizes();
   const byItem = new Map<number, any>();
   const entry = (id: number) => {
     const it = byItem.get(id) || { stock_item_id: id, links: [], opened_units: [], last_open_size: lastSizes.get(id) ?? null };
@@ -438,6 +450,7 @@ export function productPortionStatus(cartId?: string | null): Map<number, any> {
   if (!links.length) return out;
   const open = openRemainingMap();
   const held = heldPortionsByOtherCarts(cartId);
+  const lastSizes = lastOpenSizes();
   for (const l of links) {
     const available = Math.max(0, (open.get(l.stock_item_id) ?? 0) - (held.get(l.stock_item_id) ?? 0));
     const servings = servingsFrom(available, l.servings_per_unit);
@@ -453,6 +466,8 @@ export function productPortionStatus(cartId?: string | null): Map<number, any> {
       is_open: (open.get(l.stock_item_id) ?? 0) > PORTION_EPSILON,
       sealed_quantity: Number(l.sealed_quantity) || 0,
       unit: l.unit,
+      // For the "how much is in it?" reminder when opening from a product tap.
+      last_open_size: lastSizes.get(Number(l.stock_item_id)) ?? null,
     });
     status.servings_left = Math.min(status.servings_left, servings);
     out.set(l.product_id, status);

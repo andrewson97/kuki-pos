@@ -341,7 +341,13 @@ stock.post("/items/:id/open", async (c) => {
     return c.json({ error: "Enter how much is in the one being opened. Reload the page if it does not ask." }, 400);
   }
   try {
-    return c.json({ success: true, ...openStockUnit(id, getUser(c)!.id, body?.note, Number(raw)) });
+    // A plain number, or digits with an optional decimal point. Nothing else:
+    // true, [2] or "0x1" are not amounts, and "1,000" is refused rather than
+    // read as 1.
+    const size = typeof raw === "number" ? raw
+      : typeof raw === "string" && /^\s*\d+(\.\d+)?\s*$/.test(raw) ? Number(raw) : NaN;
+    if (!Number.isFinite(size)) return c.json({ error: "Enter the amount as a number, e.g. 2 or 1.5 (no commas)." }, 400);
+    return c.json({ success: true, ...openStockUnit(id, getUser(c)!.id, body?.note, size) });
   } catch (err: any) {
     if (err instanceof PortionError) return c.json({ error: err.message }, err.status);
     throw err;

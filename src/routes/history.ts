@@ -343,7 +343,7 @@ const UNIFIED_SQL = `
     'info',
     CASE WHEN o.finish_reason = 'manual' THEN ROUND(o.remaining, 3) END,
     CASE WHEN o.finish_reason = 'manual'
-      THEN 'Finished early, ' || ROUND(o.remaining, 3) || ' of it left — ' || COALESCE(o.finish_note, '')
+      THEN 'Finished early, ' || ROUND(o.remaining, 3) || ' of ' || ROUND(COALESCE(o.size, 1), 3) || COALESCE(' ' || NULLIF(si.unit, ''), '') || ' left — ' || COALESCE(o.finish_note, '')
       ELSE 'Used up by sales'
     END,
     'Opened ' || o.opened_at,
