@@ -109,6 +109,7 @@
     <div class="quick-links">
       <a class="quick-link" href="/m/pos"><span class="qi">🛒</span>POS</a>
       <a class="quick-link" href="/m/bills"><span class="qi">🧾</span>Bills</a>
+      <a class="quick-link" href="/m/preorders" id="ql-preorders"><span class="qi">📅</span>Pre-orders</a>
       <a class="quick-link" href="/m/cash" id="ql-cash"><span class="qi">💵</span>Cash Drawer</a>
       <a class="quick-link" href="/m/expenses"><span class="qi">💸</span>Expenses</a>
       <a class="quick-link" href="/m/products"><span class="qi">🎂</span>Products</a>
@@ -132,7 +133,29 @@
         renderTasks(data.tasks);
         renderStock(data);
         showCashApprovals();
+        showPreordersDue();
       } catch (err) { toast(err.message, 'error'); }
+    }
+
+    // Pre-orders due today plus any already late, as on the desktop menu: red
+    // once something is overdue, amber when it is merely due. Everyone sees it.
+    // One badge, reused (see showCashApprovals). Never fatal.
+    async function showPreordersDue() {
+      try {
+        const s = await api('/api/preorders/summary');
+        const late = Number(s.overdue) || 0;
+        const due = late + (Number(s.due_today) || 0);
+        let b = $('ql-preorders-badge');
+        if (!b) {
+          b = document.createElement('span');
+          b.id = 'ql-preorders-badge';
+          b.style.cssText = 'display:none;margin-left:6px;color:white;border-radius:999px;padding:1px 7px;font-size:0.75rem;font-weight:800;';
+          $('ql-preorders').appendChild(b);
+        }
+        b.textContent = due || '';
+        b.style.background = late ? 'var(--red)' : 'var(--amber)';
+        b.style.display = due ? 'inline-block' : 'none';
+      } catch {}
     }
 
     // The owner on their phone: closing the drawer is waiting on them (a stock

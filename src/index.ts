@@ -180,6 +180,7 @@ const MOBILE_REDIRECTS: Record<string, string> = {
   "/stock": "/m/stock",
   "/customers": "/m/customers",
   "/tasks": "/m/tasks",
+  "/preorders": "/m/preorders",
 };
 const isMobileUA = (ua: string) => /Android|iPhone|iPod|BlackBerry|IEMobile|Opera Mini/i.test(ua);
 
@@ -222,13 +223,12 @@ for (const page of pages) {
   });
 }
 
-// The pre-orders screen. Separate from the list above because the view is being
-// built alongside this API: until views/preorders.html lands, Bun.file().text()
-// would throw and the page would answer with the generic 500 from app.onError,
-// which says nothing useful. Check first and say what is actually missing. The
-// route is registered now so the screen works the moment the file appears.
+// The mobile pre-orders screen. Separate from the list above because the view
+// was built alongside this API: until the file lands, Bun.file().text() would
+// throw and the page would answer with the generic 500 from app.onError, which
+// says nothing useful. Check first and say what is actually missing. (The
+// desktop /preorders is served by MOBILE_REDIRECTS, which sends phones here.)
 const PREORDER_PAGES: Record<string, string> = {
-  "/preorders": "views/preorders.html",
   "/m/preorders": "views/m-preorders.html",
 };
 for (const [path, file] of Object.entries(PREORDER_PAGES)) {
