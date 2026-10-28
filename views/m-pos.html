@@ -2283,9 +2283,11 @@
       const makes = portion.links.map(l => `${qtyText(l.servings_per_unit)} ${escapeHtml(l.product_name)}`).join(' / ');
       const opened = (portion.opened_units || []).map(u => {
         const left = (u.servings_left || []).map(s => `${s.servings} ${escapeHtml(s.product_name)}`).join(' / ');
+        // How much of what was opened is left, in the item's unit (a 2 L box with 1.5 L left).
+        const amount = `${escapeHtml(qtyText(u.remaining))} of ${escapeHtml(qtyText(u.size))} ${escapeHtml(it.unit || '')}`.trim();
         return `<div style="display:flex;align-items:center;gap:8px;margin-top:6px;">
           <span class="badge" style="background:#2563eb;color:white;">OPENED</span>
-          <span class="list-meta" style="flex:1;">${left} left · ${escapeHtml(formatDateTime(u.opened_at))}</span>
+          <span class="list-meta" style="flex:1;">${amount} left (${left}) · ${escapeHtml(formatDateTime(u.opened_at))}</span>
           ${u.untouched && currentUser && currentUser.role === 'admin'
             ? `<button class="btn btn-outline btn-sm" style="width:auto;flex:0 0 auto;color:var(--red);" onclick="undoOpened(${Number(u.id)}, ${Number(it.id)}, this)">Undo</button>`
             : ''}
@@ -2295,7 +2297,7 @@
       // No links left: a unit outlived the last product made from it — it can
       // only be finished, not opened again. Same as the desktop till.
       const linked = portion.links.length > 0;
-      const action = linked && sealedQty >= 1
+      const action = linked && sealedQty > 0
         ? `<button class="btn btn-primary btn-sm" style="width:auto;flex:0 0 auto;" onclick="openPortionItem(${Number(it.id)}, this)">Open</button>`
         : '<button class="btn btn-outline btn-sm" style="width:auto;flex:0 0 auto;" disabled>Open</button>';
       return `<div class="list-item">
@@ -2354,22 +2356,24 @@
       const l = link || portionLimit(p);
       if (!l.stock_item_id) { toast(`${p.name} cannot be sold right now`, 'error'); return; }
       const name = l.ingredient_name || 'ingredient';
-      if (!(Number(l.sealed_quantity) >= 1)) {
+      if (!(Number(l.sealed_quantity) > 0)) {
         toast(`${p.name} needs an opened ${name}, and none are left in stock — restock it first`, 'error');
         return;
       }
       const more = Math.max(0, Math.floor((portionAvailable(l) - cartPortionUse(l.stock_item_id)) * (Number(l.servings_per_unit) || 1) + 1e-6));
       const why = l.is_open ? (more > 0 ? `Only ${more} more ${p.name} can come from the opened ${name}.` : `The opened ${name} is all taken by this cart.`) : `${p.name} needs an opened ${name}.`;
-      if (!confirm(`${why}\n\nOpen a new ${name} now? It comes out of stock (${qtyText(l.sealed_quantity)} sealed left).`)) return;
+      const lastSize = (portionItems.get(Number(l.stock_item_id)) || {}).last_open_size;
+      const size = askOpenSize(name, l.unit, l.sealed_quantity, `${qtyText(l.servings_per_unit)} ${p.name}`, lastSize, why);
+      if (size === null) return;
       openingInFlight = true;
       try {
         try {
-          await api(`/api/stock/items/${Number(l.stock_item_id)}/open`, { method: 'POST', body: {} });
+          await api(`/api/stock/items/${Number(l.stock_item_id)}/open`, { method: 'POST', body: { size } });
         } catch (err) {
           toast((err && err.message) || `Could not open ${name}`, 'error');
           return;
         }
-        toast(`Opened a new ${name}`);
+        toast(`Opened ${qtyText(size)} ${l.unit || ''} of ${name}`.replace(/ +/g, ' '));
         await refreshAvailability();
       } finally {
         openingInFlight = false;
@@ -2380,20 +2384,37 @@
       if (fresh && !portionShortfall(fresh, 1)) addToCart(p.id);
     }
 
+    // How much is in the one being opened, in the item's own unit — asked every
+    // time, never assumed: the same milk comes in 2 L and 1 L boxes. The last
+    // size is shown as a reminder, not filled in. Returns the amount, or null.
+    function askOpenSize(name, unit, sealed, makesPerUnit, lastSize, why) {
+      const u = unit || 'unit';
+      const head = why ? why + '\n\n' : '';
+      const last = lastSize ? `\nLast one opened: ${qtyText(lastSize)} ${u}.` : '';
+      for (;;) {
+        const raw = prompt(`${head}How much ${name} is in the one you are opening? Enter it in ${u}.\n\nEach ${u} makes ${makesPerUnit}. ${qtyText(sealed)} ${u} sealed in stock.${last}`, '');
+        if (raw === null) return null;
+        const n = Number(String(raw).replace(',', '.').trim());
+        if (String(raw).trim() !== '' && Number.isFinite(n) && n >= 0.001 && n <= Number(sealed) + 1e-9) return n;
+        alert(n > Number(sealed) ? `Only ${qtyText(sealed)} ${u} of ${name} is sealed in stock. Check the amount, or add the delivery on the Stock page first.` : `Enter how much is in it, in ${u} (for example 2).`);
+      }
+    }
+
     async function openPortionItem(stockItemId, btn) {
       const it = useStockItems.find(x => Number(x.id) === Number(stockItemId));
       const portion = portionItems.get(Number(stockItemId));
       if (!it || !portion) { loadUseStock(); return; }
       const makes = portion.links.map(l => `${qtyText(l.servings_per_unit)} ${l.product_name}`).join(' / ');
-      if (!confirm(`Open a new ${it.name}? One ${it.unit || 'unit'} comes out of stock and makes ${makes}.`)) return;
+      const size = askOpenSize(it.name, it.unit, Number(it.quantity) || 0, makes, portion.last_open_size, '');
+      if (size === null) return;
       await withBusy(btn, async () => {
         try {
-          await api(`/api/stock/items/${Number(stockItemId)}/open`, { method: 'POST', body: {} });
+          await api(`/api/stock/items/${Number(stockItemId)}/open`, { method: 'POST', body: { size } });
         } catch (err) {
           toast((err && err.message) || 'Could not open it', 'error');
           return;
         }
-        toast(`Opened a new ${it.name}`);
+        toast(`Opened ${qtyText(size)} ${it.unit || ''} of ${it.name}`.replace(/ +/g, ' '));
         await loadUseStock();
         refreshAvailability();
       }, 'Opening…');
