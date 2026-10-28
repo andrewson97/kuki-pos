@@ -160,7 +160,7 @@ export function checkPortions(units: Map<number, LinkedUnits>, cartId?: string |
 
     const first = need.parts[0];
     const sealed = Number((db.query("SELECT quantity FROM stock_items WHERE id = ?").get(need.stock_item_id) as any)?.quantity) || 0;
-    const sealedHint = sealed >= 1 ? ` (${+sealed.toFixed(3)} sealed in stock)` : " — and none are left in stock, so restock it first";
+    const sealedHint = sealed > PORTION_EPSILON ? ` (${+sealed.toFixed(3)} sealed in stock)` : " — and none are left in stock, so restock it first";
     if (!open.has(need.stock_item_id) || (open.get(need.stock_item_id) ?? 0) <= PORTION_EPSILON) {
       throw new PortionError(`${first.product_name} needs an opened ${need.name}. Open one from "Use stock" first${sealedHint}.`);
     }
@@ -217,12 +217,24 @@ export function consumePortions(billId: number, units: Map<number, LinkedUnits>,
   }
 }
 
+/** The smallest amount that can be opened: a thousandth of the item's unit. */
+export const MIN_OPEN_SIZE = 0.001;
+
 /**
- * Open one unit of an ingredient: take it out of sealed stock (a 'usage'
+ * Open a unit of an ingredient: take it out of sealed stock (a 'usage'
  * movement, so Stock History shows it) and start an opened unit with all of
  * it left. Only ingredients that some product is made from can be opened.
+ *
+ * `size` is how much is in THIS one, in the item's own unit, as the person
+ * opening it says: milk counted in litres comes in 2 L and 1 L boxes, so the
+ * size is noted every time rather than assumed. Its servings are size × the
+ * product's yield per unit.
  */
-export function openStockUnit(stockItemId: number, userId: number, note?: string | null) {
+export function openStockUnit(stockItemId: number, userId: number, note: string | null | undefined, size: number) {
+  if (!Number.isFinite(size) || size < MIN_OPEN_SIZE - 1e-12) {
+    throw new PortionError("Enter how much is in the one being opened (more than 0).");
+  }
+  size = roundFrac(size);
   const db = getDb();
   return db.transaction(() => {
     const item = db.query("SELECT id, name, unit, quantity FROM stock_items WHERE id = ?").get(stockItemId) as any;
@@ -236,25 +248,37 @@ export function openStockUnit(stockItemId: number, userId: number, note?: string
     }
     const onHand = Number(item.quantity) || 0;
     const unit = item.unit ? ` ${item.unit}` : "";
-    if (onHand < 1 - 1e-9) {
+    if (onHand <= PORTION_EPSILON) {
       throw new PortionError(`No sealed ${item.name} left (${+onHand.toFixed(3)}${unit} on hand). Restock it on the Stock page first.`);
     }
-    const next = roundFrac(onHand - 1);
-    const makes = links.map((l) => `${+Number(l.servings_per_unit).toFixed(3)} ${l.name}`).join(" / ");
+    // More than the books say is sealed: either the size is mistyped or a
+    // delivery was never entered. Either way it is put right first, not
+    // opened into negative stock.
+    if (size > onHand + 1e-9) {
+      throw new PortionError(`Only ${+onHand.toFixed(3)}${unit} of ${item.name} is sealed in stock, so ${+size.toFixed(3)}${unit} cannot be opened. Check the amount, or add the delivery on the Stock page first.`);
+    }
+    // Less than one serving of everything made from it: nothing could ever be
+    // sold from it, so it is a mistyped amount (0.002 for 2), not a box.
+    const best = links.reduce((a, l) => (Number(l.servings_per_unit) > Number(a.servings_per_unit) ? l : a), links[0]);
+    if (size * Number(best.servings_per_unit) < 1 - PORTION_EPSILON) {
+      throw new PortionError(`${+size.toFixed(3)}${unit} of ${item.name} is not enough for even one ${best.name}. Check the amount.`);
+    }
+    const next = roundFrac(onHand - size);
+    const makes = links.map((l) => `${+(Number(l.servings_per_unit) * size).toFixed(3)} ${l.name}`).join(" / ");
     const cleanNote = String(note || "").trim();
-    const ref = `Opened at POS — makes ${makes}` + (cleanNote ? ` — ${cleanNote}` : "");
+    const ref = `Opened ${+size.toFixed(3)}${unit} at POS — makes ${makes}` + (cleanNote ? ` — ${cleanNote}` : "");
     db.query(
-      "INSERT INTO stock_transactions (stock_item_id, type, quantity, reference, user_id) VALUES (?, 'usage', -1, ?, ?)"
-    ).run(stockItemId, ref, userId);
+      "INSERT INTO stock_transactions (stock_item_id, type, quantity, reference, user_id) VALUES (?, 'usage', ?, ?, ?)"
+    ).run(stockItemId, -size, ref, userId);
     db.query("UPDATE stock_items SET quantity = ?, updated_at = datetime('now') WHERE id = ?").run(next, stockItemId);
     const result = db.query(
-      "INSERT INTO opened_stock_units (stock_item_id, status, remaining, opened_by) VALUES (?, 'opened', 1, ?)"
-    ).run(stockItemId, userId);
+      "INSERT INTO opened_stock_units (stock_item_id, status, remaining, size, opened_by) VALUES (?, 'opened', ?, ?, ?)"
+    ).run(stockItemId, size, size, userId);
     const openedId = Number(result.lastInsertRowid);
     db.query("INSERT INTO activity_log (user_id, action, details) VALUES (?, 'opened_stock_unit', ?)").run(
-      userId, JSON.stringify({ opened_unit_id: openedId, stock_item_id: stockItemId, name: item.name, previous: onHand, new_quantity: next, note: cleanNote || null })
+      userId, JSON.stringify({ opened_unit_id: openedId, stock_item_id: stockItemId, name: item.name, size, previous: onHand, new_quantity: next, note: cleanNote || null })
     );
-    return { id: openedId, name: item.name, sealed_left: next };
+    return { id: openedId, name: item.name, size, sealed_left: next };
   }).immediate();
 }
 
@@ -270,31 +294,33 @@ export function undoOpenStockUnit(openedId: number, userId: number) {
   const db = getDb();
   return db.transaction(() => {
     const u = db.query(`
-      SELECT o.id, o.status, o.remaining, o.stock_item_id, si.name, si.unit, si.quantity
+      SELECT o.id, o.status, o.remaining, COALESCE(o.size, 1) AS size, o.stock_item_id, si.name, si.unit, si.quantity
       FROM opened_stock_units o JOIN stock_items si ON si.id = o.stock_item_id WHERE o.id = ?
     `).get(openedId) as any;
     if (!u) throw new PortionError("That opened item was not found", 404);
     if (u.status !== "opened") throw new PortionError(`That ${u.name} is already finished, so it cannot be put back`);
+    // What went into it at opening goes back, all of it.
+    const size = Number(u.size) || 1;
     const used = db.query("SELECT COUNT(*) AS n FROM opened_unit_usage WHERE opened_unit_id = ?").get(openedId) as any;
-    if (used.n > 0 || Math.abs((Number(u.remaining) || 0) - 1) > PORTION_EPSILON) {
+    if (used.n > 0 || Math.abs((Number(u.remaining) || 0) - size) > PORTION_EPSILON) {
       throw new PortionError(`Something has already been sold from this ${u.name}, so it cannot go back into stock. Use Finish instead.`);
     }
-    const openAfter = (openRemainingMap().get(u.stock_item_id) ?? 0) - 1;
+    const openAfter = (openRemainingMap().get(u.stock_item_id) ?? 0) - size;
     const held = heldPortionsByOtherCarts("").get(u.stock_item_id) ?? 0;
     if (held > openAfter + PORTION_EPSILON) {
       throw new PortionError(`Carts or parked bills are holding servings from the opened ${u.name}. Sell or clear those first.`);
     }
     const onHand = Number(u.quantity) || 0;
-    const next = roundFrac(onHand + 1);
+    const next = roundFrac(onHand + size);
     db.query(
-      "INSERT INTO stock_transactions (stock_item_id, type, quantity, reference, user_id) VALUES (?, 'adjustment', 1, ?, ?)"
-    ).run(u.stock_item_id, "Opened by mistake — put back into stock unopened", userId);
+      "INSERT INTO stock_transactions (stock_item_id, type, quantity, reference, user_id) VALUES (?, 'adjustment', ?, ?, ?)"
+    ).run(u.stock_item_id, size, "Opened by mistake — put back into stock unopened", userId);
     db.query("UPDATE stock_items SET quantity = ?, updated_at = datetime('now') WHERE id = ?").run(next, u.stock_item_id);
     db.query("DELETE FROM opened_stock_units WHERE id = ?").run(openedId);
     db.query("INSERT INTO activity_log (user_id, action, details) VALUES (?, 'undid_stock_open', ?)").run(
-      userId, JSON.stringify({ opened_unit_id: openedId, stock_item_id: u.stock_item_id, name: u.name, previous: onHand, new_quantity: next })
+      userId, JSON.stringify({ opened_unit_id: openedId, stock_item_id: u.stock_item_id, name: u.name, size, previous: onHand, new_quantity: next })
     );
-    return { id: openedId, name: u.name, sealed_left: next };
+    return { id: openedId, name: u.name, size, sealed_left: next };
   }).immediate();
 }
 
@@ -302,13 +328,13 @@ export function undoOpenStockUnit(openedId: number, userId: number) {
  * A refunded bill whose cashier ticked "Put items back into stock": give its
  * servings back to the opened units they came from — but only to units that
  * are still OPEN. A unit already finished (used up, or written off) stays
- * finished; its share is reported back as not returned. Never past a whole
- * unit. Plain, not its own transaction: the refund route calls it inside its own.
+ * finished; its share is reported back as not returned. Never past what went
+ * into the unit when it was opened. Plain, not its own transaction: the refund route calls it inside its own.
  */
 export function returnPortionsForBill(billId: number): { returned: number; not_returned: number } {
   const db = getDb();
   const rows = db.query(`
-    SELECT u.opened_unit_id, SUM(u.fraction) AS fraction, o.status, o.remaining
+    SELECT u.opened_unit_id, SUM(u.fraction) AS fraction, o.status, o.remaining, COALESCE(o.size, 1) AS size
     FROM opened_unit_usage u JOIN opened_stock_units o ON o.id = u.opened_unit_id
     WHERE u.bill_id = ? GROUP BY u.opened_unit_id
   `).all(billId) as any[];
@@ -317,7 +343,7 @@ export function returnPortionsForBill(billId: number): { returned: number; not_r
   for (const r of rows) {
     const fraction = Number(r.fraction) || 0;
     if (r.status !== "opened") { notReturned += fraction; continue; }
-    const next = Math.min(1, roundFrac((Number(r.remaining) || 0) + fraction));
+    const next = Math.min(Number(r.size) || 1, roundFrac((Number(r.remaining) || 0) + fraction));
     db.query("UPDATE opened_stock_units SET remaining = ? WHERE id = ?").run(next, r.opened_unit_id);
     returned += next - (Number(r.remaining) || 0);
   }
@@ -351,6 +377,17 @@ export function finishStockUnit(openedId: number, userId: number, note: string) 
 }
 
 /**
+ * The size each ingredient was last opened at, as a reminder beside the amount
+ * box (never filled in for the cashier: they say what this one is).
+ */
+function lastOpenSizes(): Map<number, number> {
+  return new Map((getDb().query(`
+    SELECT o.stock_item_id, COALESCE(o.size, 1) AS size FROM opened_stock_units o
+    WHERE o.id = (SELECT MAX(x.id) FROM opened_stock_units x WHERE x.stock_item_id = o.stock_item_id)
+  `).all() as any[]).map((r) => [Number(r.stock_item_id), Number(r.size) || 1]));
+}
+
+/**
  * Every ingredient that something is made from, with its links and its opened
  * units — what the till's Use stock panel shows. servings_left is per linked
  * product for each opened unit, ignoring holds (a unit's contents, not what is
@@ -365,14 +402,15 @@ export function listPortionIngredients(): any[] {
   `).all() as any[];
   // `untouched`: nothing sold from it yet — the only state an admin may undo.
   const opened = db.query(`
-    SELECT o.id, o.stock_item_id, o.remaining, o.opened_at, u.full_name AS opened_by_name,
+    SELECT o.id, o.stock_item_id, o.remaining, COALESCE(o.size, 1) AS size, o.opened_at, u.full_name AS opened_by_name,
            NOT EXISTS (SELECT 1 FROM opened_unit_usage x WHERE x.opened_unit_id = o.id) AS untouched
     FROM opened_stock_units o LEFT JOIN users u ON u.id = o.opened_by
     WHERE o.status = 'opened' ORDER BY o.opened_at, o.id
   `).all() as any[];
+  const lastSizes = lastOpenSizes();
   const byItem = new Map<number, any>();
   const entry = (id: number) => {
-    const it = byItem.get(id) || { stock_item_id: id, links: [], opened_units: [] };
+    const it = byItem.get(id) || { stock_item_id: id, links: [], opened_units: [], last_open_size: lastSizes.get(id) ?? null };
     byItem.set(id, it);
     return it;
   };
@@ -387,9 +425,10 @@ export function listPortionIngredients(): any[] {
     it.opened_units.push({
       id: o.id,
       remaining: roundFrac(Number(o.remaining) || 0),
+      size: roundFrac(Number(o.size) || 1),
       opened_at: o.opened_at,
       opened_by_name: o.opened_by_name,
-      untouched: !!o.untouched && Math.abs((Number(o.remaining) || 0) - 1) <= PORTION_EPSILON,
+      untouched: !!o.untouched && Math.abs((Number(o.remaining) || 0) - (Number(o.size) || 1)) <= PORTION_EPSILON,
       servings_left: it.links.map((l: any) => ({ product_name: l.product_name, servings: servingsFrom(Number(o.remaining) || 0, l.servings_per_unit) })),
     });
   }
@@ -411,6 +450,7 @@ export function productPortionStatus(cartId?: string | null): Map<number, any> {
   if (!links.length) return out;
   const open = openRemainingMap();
   const held = heldPortionsByOtherCarts(cartId);
+  const lastSizes = lastOpenSizes();
   for (const l of links) {
     const available = Math.max(0, (open.get(l.stock_item_id) ?? 0) - (held.get(l.stock_item_id) ?? 0));
     const servings = servingsFrom(available, l.servings_per_unit);
@@ -426,6 +466,8 @@ export function productPortionStatus(cartId?: string | null): Map<number, any> {
       is_open: (open.get(l.stock_item_id) ?? 0) > PORTION_EPSILON,
       sealed_quantity: Number(l.sealed_quantity) || 0,
       unit: l.unit,
+      // For the "how much is in it?" reminder when opening from a product tap.
+      last_open_size: lastSizes.get(Number(l.stock_item_id)) ?? null,
     });
     status.servings_left = Math.min(status.servings_left, servings);
     out.set(l.product_id, status);

@@ -1140,6 +1140,13 @@ export function runMigrations(): void {
   // opened before this existed (and on the very first opening).
   addColumn("cash_counts", "carried_amount", "REAL");
   addColumn("cash_counts", "open_variance", "REAL");
+
+  // --- feature/open-size ----------------------------------------------------
+  // How much went into an opened unit, in the stock item's own unit: a 2 L or
+  // a 1 L box of milk counted in litres. Opening takes this much out of sealed
+  // stock and starts remaining at it. NULL = 1 (every unit opened before this,
+  // when an opened unit was always exactly one of the item's unit).
+  addColumn("opened_stock_units", "size", "REAL");
 }
 
 export function seedDefaults(): void {

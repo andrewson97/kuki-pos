@@ -2664,15 +2664,17 @@
 
     // An ingredient something is made from. Its quantity is what is still
     // SEALED; each opened unit is listed under it with what it can still make,
-    // and the action is Open (one sealed unit out of stock) rather than Use.
+    // and the action is Open (as much as is in the one opened comes out of stock) rather than Use.
     function portionRow(it, portion, sealedQty, tag) {
       const makes = portion.links.map(l => `${qtyText(l.servings_per_unit)} ${escapeHtml(l.product_name)}`).join(' / ');
       const opened = (portion.opened_units || []).map(u => {
         const left = (u.servings_left || []).map(s => `${s.servings} ${escapeHtml(s.product_name)}`).join(' / ');
+        // How much of what was opened is left, in the item's unit (a 2 L box with 1.5 L left).
+        const amount = `${escapeHtml(qtyText(u.remaining))} of ${escapeHtml(qtyText(u.size))} ${escapeHtml(it.unit || '')}`.trim();
         return `
           <div class="d-flex align-items-center gap-2 mt-1">
             <span class="badge bg-primary">Opened</span>
-            <small>${left} left &middot; opened ${escapeHtml(formatDateTime(u.opened_at))}${u.opened_by_name ? ' by ' + escapeHtml(u.opened_by_name) : ''}</small>
+            <small>${amount} left${left ? ` (${left})` : ''} &middot; opened ${escapeHtml(formatDateTime(u.opened_at))}${u.opened_by_name ? ' by ' + escapeHtml(u.opened_by_name) : ''}</small>
             ${u.untouched && currentUser && currentUser.role === 'admin'
               ? `<button class="btn btn-sm btn-outline-danger py-0 px-2 ms-auto" onclick="undoOpened(${Number(u.id)}, ${Number(it.id)}, this)" title="Opened by mistake: put it back into stock unopened (nothing sold from it yet)">Undo</button>`
               : ''}
@@ -2682,7 +2684,7 @@
       // No links left: an opened unit outlived the last product made from it.
       // Nothing sells from it, so it can only be finished, not opened again.
       const linked = portion.links.length > 0;
-      const canOpen = linked && sealedQty >= 1;
+      const canOpen = linked && sealedQty >= 0.001;
       const action = canOpen
         ? `<button class="btn btn-sm btn-primary" onclick="openPortionItem(${Number(it.id)}, this)">Open</button>`
         : `<button class="btn btn-sm btn-outline-secondary" disabled title="${linked ? 'No sealed unit left — restock it first' : 'Nothing on the menu is made from it now'}">Open</button>`;
@@ -2750,7 +2752,7 @@
       const l = link || portionLimit(p);
       if (!l.stock_item_id) { showToast(`${p.name} cannot be sold right now`, 'warning'); return; }
       const name = l.ingredient_name || 'ingredient';
-      if (!(Number(l.sealed_quantity) >= 1)) {
+      if (!(Number(l.sealed_quantity) >= 0.001)) {
         showToast(`${p.name} needs an opened ${name}, and none are left in stock. Restock ${name} on the Stock page first.`, 'error');
         return;
       }
@@ -2758,16 +2760,18 @@
       const why = l.is_open
         ? (more > 0 ? `Only ${more} more ${p.name} can come from the opened ${name}.` : `The opened ${name} is all taken by this cart.`)
         : `${p.name} needs an opened ${name}.`;
-      if (!confirm(`${why}\n\nOpen a new ${name} now? It comes out of stock (${qtyText(l.sealed_quantity)} sealed left).`)) return;
+      const lastSize = l.last_open_size ?? (portionItems.get(Number(l.stock_item_id)) || {}).last_open_size;
+      const size = askOpenSize(name, l.unit, l.sealed_quantity, [{ servings_per_unit: l.servings_per_unit, product_name: p.name }], lastSize, why);
+      if (size === null) return;
       openingInFlight = true;
       try {
         try {
-          await api(`/api/stock/items/${Number(l.stock_item_id)}/open`, { method: 'POST', body: {} });
+          await api(`/api/stock/items/${Number(l.stock_item_id)}/open`, { method: 'POST', body: { size } });
         } catch (err) {
           showToast((err && err.message) || `Could not open ${name}`, 'error');
           return;
         }
-        showToast(`Opened a new ${name}`);
+        showToast(`Opened ${qtyText(size)} ${escapeHtml(l.unit || '')} of ${escapeHtml(name)}`.replace(/ +/g, ' '));
         await refreshAvailability();
       } finally {
         openingInFlight = false;
@@ -2779,20 +2783,53 @@
       if (fresh && !portionShortfall(fresh, 1)) addToCart(p.id);
     }
 
+    // How much is in the one being opened, in the item's own unit — asked every
+    // time, never assumed: the same milk comes in 2 L and 1 L boxes. The last
+    // size is shown as a reminder, not filled in. Returns the amount, or null.
+    // links: [{ servings_per_unit, product_name }] — what one unit makes.
+    function askOpenSize(name, unit, sealed, links, lastSize, why) {
+      const u = unit || 'unit';
+      const head = why ? why + '\n\n' : '';
+      const last = lastSize ? `\nLast one opened: ${qtyText(lastSize)} ${u}.` : '';
+      const makes = (size) => links.map(l => `${Math.floor(size * Number(l.servings_per_unit) + 1e-6)} ${l.product_name}`).join(' / ');
+      const perUnit = links.map(l => `${qtyText(l.servings_per_unit)} ${l.product_name}`).join(' / ');
+      for (;;) {
+        const raw = prompt(`${head}How much ${name} is in the one you are opening? Enter it in ${u}.\n\nEach ${u} makes ${perUnit}. ${qtyText(sealed)} ${u} sealed in stock.${last}`, '');
+        if (raw === null) return null;
+        const text = String(raw).trim();
+        // Digits and a decimal point only: "1,000" would otherwise be read as 1.
+        if (!/^\d+(\.\d+)?$/.test(text)) {
+          alert(`Enter the amount in ${u} as a number, e.g. 2 or 1.5 — no commas or spaces.`);
+          continue;
+        }
+        const n = Number(text);
+        if (n > Number(sealed) + 1e-9) {
+          alert(`Only ${qtyText(sealed)} ${u} of ${name} is sealed in stock. Check the amount, or add the delivery on the Stock page first.`);
+          continue;
+        }
+        if (!links.some(l => n * Number(l.servings_per_unit) >= 1 - 1e-6)) {
+          alert(`${qtyText(n)} ${u} is not enough for even one ${links.map(l => l.product_name).join(' or ')}. Check the amount.`);
+          continue;
+        }
+        // Read back before anything leaves stock: a slip of a digit is caught here.
+        if (confirm(`Open ${qtyText(n)} ${u} of ${name}? It makes ${makes(n)}.`)) return n;
+      }
+    }
+
     async function openPortionItem(stockItemId, btn) {
       const it = useStockItems.find(x => Number(x.id) === Number(stockItemId));
       const portion = portionItems.get(Number(stockItemId));
       if (!it || !portion) { loadUseStock(); return; }
-      const makes = portion.links.map(l => `${qtyText(l.servings_per_unit)} ${l.product_name}`).join(' / ');
-      if (!confirm(`Open a new ${it.name}? One ${it.unit || 'unit'} comes out of stock and makes ${makes}.`)) return;
+      const size = askOpenSize(it.name, it.unit, Number(it.quantity) || 0, portion.links, portion.last_open_size, '');
+      if (size === null) return;
       await withBusy(btn, async () => {
         try {
-          await api(`/api/stock/items/${Number(stockItemId)}/open`, { method: 'POST', body: {} });
+          await api(`/api/stock/items/${Number(stockItemId)}/open`, { method: 'POST', body: { size } });
         } catch (err) {
           showToast((err && err.message) || 'Could not open it', 'error');
           return;
         }
-        showToast(`Opened a new ${it.name}`);
+        showToast(`Opened ${qtyText(size)} ${escapeHtml(it.unit || '')} of ${escapeHtml(it.name)}`.replace(/ +/g, ' '));
         await loadUseStock();
         refreshAvailability();
       }, 'Opening...');

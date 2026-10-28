@@ -328,13 +328,26 @@ stock.post("/usage", async (c) => {
 // Every ingredient something is made from: its links and its opened units.
 stock.get("/portions", (c) => c.json(listPortionIngredients()));
 
-// Open one sealed unit: it leaves stock and its servings become sellable.
+// Open a sealed unit: it leaves stock and its servings become sellable.
+// Body: { size, note? } — size is how much is in this one, in the item's unit
+// (a 2 L or a 1 L box). Required: a page from before sizes existed must not
+// open a 2 L box as 1.
 stock.post("/items/:id/open", async (c) => {
   const id = Number(c.req.param("id"));
   if (!Number.isInteger(id) || id <= 0) return c.json({ error: "Invalid stock item id" }, 400);
   const body = await c.req.json().catch(() => ({} as any));
+  const raw = body?.size;
+  if (raw === undefined || raw === null || raw === "") {
+    return c.json({ error: "Enter how much is in the one being opened. Reload the page if it does not ask." }, 400);
+  }
   try {
-    return c.json({ success: true, ...openStockUnit(id, getUser(c)!.id, body?.note) });
+    // A plain number, or digits with an optional decimal point. Nothing else:
+    // true, [2] or "0x1" are not amounts, and "1,000" is refused rather than
+    // read as 1.
+    const size = typeof raw === "number" ? raw
+      : typeof raw === "string" && /^\s*\d+(\.\d+)?\s*$/.test(raw) ? Number(raw) : NaN;
+    if (!Number.isFinite(size)) return c.json({ error: "Enter the amount as a number, e.g. 2 or 1.5 (no commas)." }, 400);
+    return c.json({ success: true, ...openStockUnit(id, getUser(c)!.id, body?.note, size) });
   } catch (err: any) {
     if (err instanceof PortionError) return c.json({ error: err.message }, err.status);
     throw err;
